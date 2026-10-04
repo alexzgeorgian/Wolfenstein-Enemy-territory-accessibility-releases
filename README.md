@@ -49,8 +49,9 @@ explains every key and every sound.
 
 ## Updates
 
-The game checks for a new version when it starts, and asks you before
-it downloads anything. To check yourself, go to Options, then
+When the game starts you hear "Checking for updates", then whether you
+have the latest version, then "Main menu". If there is a new version,
+it asks you before it downloads anything. To check yourself, go to Options, then
 Accessibility, then "Check for updates".
 
 ## First steps in a match
@@ -89,7 +90,7 @@ Go to Options, then Accessibility. There are four pages:
 
 ## Help and feedback
 
-The mode is in beta and is tested by a blind player. If something is
+The mode is made with, and tested by, a blind player. If something is
 not said, says the wrong thing, or a sound points the wrong way, please
 open an issue on this page. Say what you did and what you heard.
 
