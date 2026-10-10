@@ -65,9 +65,10 @@ tried out before a release. Take the latest release instead.
    VoiceOver. With it off, it speaks through the Mac's own voice.
 
 **Bots on a Mac.** ET: Legacy's Mac version comes without bot support.
-The Mac zip brings a file that adds it, `qagame_mac`, and the bots
-themselves come from Omni-bot's page. `INSTALL.md`, in the Mac zip,
-has the four steps under "Step three: bots".
+Download Omni-bot from its own page and put its `omni-bot` folder in the
+same `legacy` folder, as on Windows. The game then fetches the file that
+adds bot support, `qagame_mac`, by itself, and keeps it up to date.
+`INSTALL.md`, in the Mac zip, has the steps under "Step three: bots".
 
 On both, do not rename `zzz_accessibility.pk3`: the name is what makes
 the game load it. The folder also has `INSTALL.md`, the full guide,
