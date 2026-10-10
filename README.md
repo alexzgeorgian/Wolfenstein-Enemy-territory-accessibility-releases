@@ -18,10 +18,13 @@ You do not need a GitHub account to download.
 Go to the latest release:
 https://github.com/alexzgeorgian/Wolfenstein-Enemy-territory-accessibility-releases/releases/latest
 
-Download the file whose name starts with
-`wolfenstein-enemy-territory-accessibility-` and ends in `.zip`. It is
-the same file for Windows and for a Mac, and it is everything you need.
-Ignore the other files.
+Download the zip for your computer. Its name says which it is for:
+
+- **On Windows:** the one ending in `-windows.zip`.
+- **On a Mac:** the one ending in `-mac.zip`.
+
+It is everything you need. Ignore the other files. (Up to 1.2.0 there
+was one zip, for both.)
 
 A release marked "Mac test build, not for players" is a build being
 tried out before a release. Take the latest release instead.
@@ -33,7 +36,8 @@ tried out before a release. Take the latest release instead.
    built for. Each release says which version that is.
 2. You need the original game files, `pak0.pk3`, `pak1.pk3` and
    `pak2.pk3`. The ET: Legacy installer can download them for you.
-3. Unzip the download anywhere. It makes one folder.
+3. Download the `-windows.zip` and unzip it anywhere. It makes one
+   folder.
 4. In that folder, find `zzz_accessibility.pk3`. Copy it into the
    `legacy` folder where ET: Legacy is installed. For a normal install
    that is `C:\Program Files\ETLegacy\legacy`.
@@ -51,13 +55,19 @@ tried out before a release. Take the latest release instead.
    Intel Macs.
 2. You need the original game files, `pak0.pk3`, `pak1.pk3` and
    `pak2.pk3`. Start ET: Legacy once, so it makes its folders.
-3. Open the download. The Mac unzips it into a folder.
+3. Download the `-mac.zip` and open it. The Mac unzips it into a
+   folder.
 4. In Finder, choose **Go**, then **Go to Folder** (Command Shift G).
    Type `~/Library/Application Support/etlegacy/legacy` and press
    Return.
 5. Copy `zzz_accessibility.pk3` from the unzipped folder into that one.
 6. Start ET: Legacy. With VoiceOver on, the game speaks through
    VoiceOver. With it off, it speaks through the Mac's own voice.
+
+**Bots on a Mac.** ET: Legacy's Mac version comes without bot support.
+The Mac zip brings a file that adds it, `qagame_mac`, and the bots
+themselves come from Omni-bot's page. `INSTALL.md`, in the Mac zip,
+has the four steps under "Step three: bots".
 
 On both, do not rename `zzz_accessibility.pk3`: the name is what makes
 the game load it. The folder also has `INSTALL.md`, the full guide,
