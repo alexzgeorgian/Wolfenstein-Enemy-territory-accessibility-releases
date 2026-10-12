@@ -31,7 +31,7 @@ tried out before a release. Take the latest release instead.
 
 ## Install on Windows
 
-1. You need **ET: Legacy 2.86.1**, from https://www.etlegacy.com/download.
+1. You need **ET: Legacy 2.86.2**, from https://www.etlegacy.com/download.
    The version matters: the mode only works with the version it was
    built for. Each release says which version that is.
 2. You need the original game files, `pak0.pk3`, `pak1.pk3` and
@@ -50,7 +50,7 @@ tried out before a release. Take the latest release instead.
 
 ## Install on a Mac
 
-1. You need **ET: Legacy 2.86.1** for macOS, from
+1. You need **ET: Legacy 2.86.2** for macOS, from
    https://www.etlegacy.com/download. It runs on Apple Silicon and
    Intel Macs.
 2. You need the original game files, `pak0.pk3`, `pak1.pk3` and
