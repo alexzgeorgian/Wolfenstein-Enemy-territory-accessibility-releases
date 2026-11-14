@@ -1,0 +1,219 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index bfb0781..cf9b0e6 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -708,6 +708,11 @@ static void CG_AccessibilityStatus_f(void)
+ 		}
+ 	}
+ 
++	/* Where before what: "I am at the Old City Wall" frames everything
++	   that follows, and it is the part a player can pass straight on to
++	   their team. */
++	CG_AccessibilitySpeakLocation();
++
+ 	CG_AccessibilityNarrateObjective();
+ 
+ 	ETA_Speech_EndReport();
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index b81c00d..9e26a3a 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2983,6 +2983,150 @@ static void ETA_NarrateWater(void)
+  * The library also owns the hysteresis, which is what keeps a player
+  * lining up on a doorway from hearing the direction flip back and forth.
+  */
++/**
++ * @brief What the player would say if asked where they are.
++ *
++ * ET already answers this for everyone else, twice over. Most maps ship
++ * a file of named places - "Old City Wall", "Axis Command Post" - and
++ * CG_GetLocationMsg picks the nearest one that is actually in view.
++ * Maps without that file still have the command map's lettered grid.
++ * Between them there is always an answer, and on either path it is the
++ * same wording a sighted teammate reads off their own screen, which is
++ * the point: saying "I am at the Old City Wall" has to mean something
++ * to the person hearing it.
++ *
++ * The colour codes come off because these names are authored for the
++ * screen and carry them - a screen reader would otherwise pronounce the
++ * markup.
++ *
++ * @return the place name, or NULL when the engine has no answer
++ */
++static const char *ETA_LocationName(void)
++{
++	static char name[96];
++	const char  *raw;
++
++	if (!cg.snap)
++	{
++		return NULL;
++	}
++
++	raw = CG_GetLocationMsg(cg.clientNum, cg.predictedPlayerState.origin);
++
++	if (raw && Q_stricmp(raw, "Unknown"))
++	{
++		Q_strncpyz(name, raw, sizeof(name));
++	}
++	else
++	{
++		/* No named place here. The grid square is what a sighted player
++		   would read off the command map, and every map has one. */
++		Com_sprintf(name, sizeof(name), "grid %s",
++		            BG_GetLocationString(cg.predictedPlayerState.origin[0],
++		                                 cg.predictedPlayerState.origin[1]));
++	}
++
++	Q_CleanStr(name);
++
++	return name[0] ? name : NULL;
++}
++
++/**
++ * @brief How far up to look for sky, in Quake units.
++ *
++ * Past the tallest indoor space in the stock maps, so a high hall does
++ * not read as open air, and short enough that the trace is cheap.
++ */
++#define ETA_OVERHEAD_PROBE 2048.0f
++
++/**
++ * @brief Whether there is sky directly overhead.
++ *
++ * Only ever reports what it measured. A trace that reaches sky proves
++ * open air; anything else proves only that something is above you, and
++ * that something might be a roof, a bridge, a tunnel or an awning. So
++ * this says "under cover" rather than "indoors" - the stronger word
++ * would be a guess wearing a fact's clothes.
++ *
++ * Worth having in its own right: an airstrike or a mortar round needs
++ * open sky to come through, so this is not scenery, it is whether half
++ * the game's ordnance can reach you.
++ */
++static ETA_Overhead ETA_OverheadState(void)
++{
++	trace_t trace;
++	vec3_t  start, end;
++
++	if (!cg.snap)
++	{
++		return ETA_OVERHEAD_UNKNOWN;
++	}
++
++	VectorCopy(cg.predictedPlayerState.origin, start);
++	start[2] += cg.predictedPlayerState.viewheight;
++
++	VectorCopy(start, end);
++	end[2] += ETA_OVERHEAD_PROBE;
++
++	CG_Trace(&trace, start, NULL, NULL, end, cg.snap->ps.clientNum, MASK_SOLID);
++
++	if (trace.fraction == 1.0f || (trace.surfaceFlags & SURF_SKY))
++	{
++		return ETA_OVERHEAD_OPEN_SKY;
++	}
++
++	return ETA_OVERHEAD_COVERED;
++}
++
++/**
++ * @brief Says where the player is, once they have actually got there.
++ *
++ * The damping is the whole design. Oasis names 114 places and Radar
++ * 134, and a player crossing a courtyard passes through several of them
++ * at a walk - announcing each would be a voice that never stops and
++ * never says anything useful. The library holds a new place for two
++ * seconds before it counts as an arrival.
++ */
++static void ETA_NarrateLocation(void)
++{
++	const char *name;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_locationCallouts.integer)
++	{
++		ETA_HudNarrator_ResetLocation();
++		return;
++	}
++
++	name = ETA_LocationName();
++
++	if (ETA_HudNarrator_UpdateLocation(name, cg.time))
++	{
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakLocation(name);
++		ETA_Speech_EndReport();
++	}
++}
++
++/**
++ * @brief Speaks where the player is, into an already-open report.
++ *
++ * The status key's job is to answer everything at once, so it does not
++ * wait for the two-second settle the passive announcement uses - being
++ * asked is itself the evidence that the player wants to know now.
++ */
++void CG_AccessibilitySpeakLocation(void)
++{
++	const char   *name = ETA_LocationName();
++	ETA_Overhead overhead = ETA_OverheadState();
++
++	if (name)
++	{
++		ETA_HudNarrator_SpeakLocation(name);
++	}
++
++	ETA_HudNarrator_SpeakOverhead(overhead);
++}
++
+ static void ETA_NarrateFacing(void)
+ {
+ 	ETA_Facing facing;
+@@ -5939,6 +6083,8 @@ void CG_DrawActive()
+ 	   the heading. */
+ 	ETA_NarrateWater();
+ 
++	ETA_NarrateLocation();
++
+ 	ETA_NarrateDropAhead();
+ 
+ 	/* Alongside the stance, and for the same reason: both are things the
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 12bb970..54d35f3 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3409,12 +3409,14 @@ qboolean CG_AccessibilityObjective(team_t team, const vec3_t from, etaObjective_
+ qboolean CG_AccessibilityNearestObjective(team_t team, const vec3_t from, etaObjective_t *out);
+ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObjective_t *out);
+ void CG_AccessibilityNarrateObjective(void);
++void CG_AccessibilitySpeakLocation(void);
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+ extern vmCvar_t eta_objectiveCallouts;
+ extern vmCvar_t eta_environmentCallouts;
+ extern vmCvar_t eta_facingCallouts;
++extern vmCvar_t eta_locationCallouts;
+ 
+ /**
+  * Quake units to meters, for the accessibility navigation system's
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index f01682f..b5a22f3 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2190,6 +2190,7 @@ typedef struct
+ vmCvar_t eta_objectiveCallouts;
+ vmCvar_t eta_environmentCallouts;
+ vmCvar_t eta_facingCallouts;
++vmCvar_t eta_locationCallouts;
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+ {
+@@ -2302,6 +2303,7 @@ static void ETA_InitAccessibility(void)
+ 	trap_Cvar_Register(&eta_objectiveCallouts, "eta_objectiveCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_environmentCallouts, "eta_environmentCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_facingCallouts, "eta_facingCallouts", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_locationCallouts, "eta_locationCallouts", "1", CVAR_ARCHIVE);
+ 
+ 	for (i = 0; i < sizeof(eta_cueSounds) / sizeof(eta_cueSounds[0]); i++)
+ 	{

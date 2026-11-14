@@ -1,0 +1,67 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index bd7f535..cd64312 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -32,6 +32,9 @@ option(BUILD_CLIENT_MOD "Build cgame and ui modules" ON)
+ option(WITH_OMNIBOT     "Build with Omni-bot support" ON)
+ option(WITH_LUA         "Build with Lua support" ON)
+ option(WITH_HWBAN       "Build with Hardware Ban support" OFF)
++option(FEATURE_ACCESSIBILITY "Build the spoken accessibility mode into cgame and ui" OFF)
++set(ETA_SOURCE_DIR "${CMAKE_SOURCE_DIR}/accessibility-mode" CACHE PATH
++    "Checkout of the accessibility mode, whose library cgame and ui link")
+ 
+ if(MSVC)
+     add_compile_options(
+@@ -55,6 +58,11 @@ if(MSVC)
+     add_link_options("/PDBALTPATH:%_PDB%")
+     add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE)
+ else()
++    # [Accessibility]: the headers declare globals without extern (cg_pmove,
++    # BG_Weapons...), which MSVC merges and GCC 10 and later reject as
++    # duplicates unless told to treat them as common symbols, as NQ's own
++    # Linux build script does.
++    add_compile_options(-fcommon)
+     add_compile_options(
+         -Wall
+         -Wno-unused-function
+@@ -281,6 +289,16 @@ if(BUILD_SERVER_MOD)
+     )
+ endif()
+ 
++# ==============================================================================
++# Accessibility mode: speech for the menus and the match, linked into the
++# two client modules. The ui and the cgame each get their own copy, as on
++# ET: Legacy, since each is a library of its own.
++# ==============================================================================
++if(BUILD_CLIENT_MOD AND FEATURE_ACCESSIBILITY)
++    set(ETA_BUILD_SMOKE_TEST OFF CACHE BOOL "" FORCE)
++    add_subdirectory("${ETA_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/accessibility-mode")
++endif()
++
+ # ==============================================================================
+ # CGAME (Client Game Module)
+ # ==============================================================================
+@@ -337,6 +355,11 @@ if(BUILD_CLIENT_MOD)
+     target_include_directories(cgame PRIVATE ${COMMON_INCLUDES})
+     target_compile_definitions(cgame PRIVATE CGAMEDLL NEW_ANIMS)
+ 
++    if(FEATURE_ACCESSIBILITY)
++        target_compile_definitions(cgame PRIVATE FEATURE_ACCESSIBILITY)
++        target_link_libraries(cgame PRIVATE eta_accessibility)
++    endif()
++
+     if(UNIX AND NOT APPLE)
+         target_link_libraries(cgame PRIVATE m dl)
+     endif()
+@@ -367,6 +390,11 @@ if(BUILD_CLIENT_MOD)
+     target_include_directories(ui PRIVATE ${COMMON_INCLUDES})
+     target_compile_definitions(ui PRIVATE UIDLL NEW_ANIMS)
+ 
++    if(FEATURE_ACCESSIBILITY)
++        target_compile_definitions(ui PRIVATE FEATURE_ACCESSIBILITY)
++        target_link_libraries(ui PRIVATE eta_accessibility)
++    endif()
++
+     if(UNIX AND NOT APPLE)
+         target_link_libraries(ui PRIVATE m dl)
+     endif()

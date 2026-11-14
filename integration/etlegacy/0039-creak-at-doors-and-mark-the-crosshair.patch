@@ -1,0 +1,313 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 9e26a3a..f908b77 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3127,6 +3127,184 @@ void CG_AccessibilitySpeakLocation(void)
+ 	ETA_HudNarrator_SpeakOverhead(overhead);
+ }
+ 
++/**
++ * @brief How far a door can be heard, in Quake units. About ten metres.
++ *
++ * Short on purpose. A beacon on every door on the map would be a wall of
++ * creaking; this is meant to answer "what is near me", not "what exists".
++ */
++#define ETA_DOOR_CUE_RANGE 400.0f
++
++/**
++ * @brief Whether a cursor-hint value names a door.
++ *
++ * The server stamps the hint onto the entity itself and it is replicated
++ * to every client, so this is the engine's own classification rather than
++ * a guess from the entity type - which matters, because ET_MOVER also
++ * covers lifts, tank barriers and movable bridges, and calling one of
++ * those a door would send a player to a wall.
++ */
++static qboolean ETA_HintIsDoor(int hint)
++{
++	return (qboolean)(hint == HINT_DOOR || hint == HINT_DOOR_ROTATING
++	                  || hint == HINT_DOOR_LOCKED || hint == HINT_DOOR_ROTATING_LOCKED);
++}
++
++static qboolean ETA_HintIsLockedDoor(int hint)
++{
++	return (qboolean)(hint == HINT_DOOR_LOCKED || hint == HINT_DOOR_ROTATING_LOCKED);
++}
++
++/**
++ * @brief Puts a creak on every door within earshot.
++ *
++ * Speech is an event: miss it and it is gone. A door is not an event, it
++ * is a thing that is still there - so it gets a sound that is still
++ * there too, positioned in the world, which the engine swings around the
++ * player's head as they turn. Turn toward it and it centres. That is
++ * navigation; an announcement is not.
++ *
++ * Locked doors creak differently, and that is the useful half: hearing
++ * that a door will not open saves the walk to it.
++ *
++ * dmgFlags is overloaded - on players it carries damage information, and
++ * on a speaker it is a sound range - so the entity type is checked first.
++ * Reading it off the wrong kind of entity would produce doors that are
++ * not there, silently and only on some maps.
++ */
++static void ETA_BeaconDoors(void)
++{
++	int i;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_doorCues.integer)
++	{
++		return;
++	}
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		entityState_t *es = &cg.snap->entities[i];
++		centity_t     *cent;
++		sfxHandle_t   sfx;
++		vec3_t        origin;
++
++		if (es->eType != ET_MOVER || !ETA_HintIsDoor(es->dmgFlags))
++		{
++			continue;
++		}
++
++		cent = &cg_entities[es->number];
++
++		/* A door is a brush model, and a brush model's origin is not
++		   where it is - the engine keeps the real midpoint of each
++		   inline model for exactly this reason, and uses it itself when
++		   positioning a mover's own sounds. */
++		if (es->solid == SOLID_BMODEL && es->modelindex < MAX_MODELS)
++		{
++			VectorAdd(cent->lerpOrigin, cgs.inlineModelMidpoints[es->modelindex], origin);
++		}
++		else
++		{
++			VectorCopy(cent->lerpOrigin, origin);
++		}
++
++		if (Distance(cg.predictedPlayerState.origin, origin) > ETA_DOOR_CUE_RANGE)
++		{
++			continue;
++		}
++
++		sfx = CG_AccessibilityLoopSound(ETA_HintIsLockedDoor(es->dmgFlags)
++		                                ? ETA_LOOP_DOOR_LOCKED : ETA_LOOP_DOOR);
++
++		if (sfx)
++		{
++			trap_S_AddLoopingSound(origin, vec3_origin, sfx, 255, 0);
++		}
++	}
++}
++
++/**
++ * @brief Says, continuously, that the crosshair is on somebody.
++ *
++ * Two different kinds of parity, and they are worth separating.
++ *
++ * The teammate cue mirrors an explicit HUD feature: the stock game draws
++ * a teammate's name under the crosshair so you do not shoot them.
++ *
++ * The enemy cue does not. Cross an enemy in the stock game and the HUD
++ * says nothing at all - the sighted player knows because they can see a
++ * person standing there. So this mirrors what sight gives for free
++ * rather than what the HUD gives, which is a fair thing to restore but
++ * worth being honest about, and is why it has its own switch.
++ *
++ * The line this does not cross: a disguised covert operative reads as a
++ * teammate, because that is what a sighted player sees. The game is
++ * deliberately deceiving them and the cue is deceived with them. The one
++ * exception is the Field Ops skill that reveals disguises, where the
++ * game itself gives the truth - then so does this. The rule is that the
++ * cue says what a sighted player would believe, including when the game
++ * is lying to them.
++ *
++ * It rides the engine's own crosshair trace, so it can never report
++ * through a wall.
++ */
++static void ETA_NarrateCrosshair(void)
++{
++	int         other;
++	qboolean    enemy;
++	sfxHandle_t sfx;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_crosshairCues.integer)
++	{
++		return;
++	}
++
++	if (cg.crosshairNotLookingAtClient || cg.crosshairEntNum >= MAX_CLIENTS)
++	{
++		return;
++	}
++
++	/* The engine fades the crosshair name out rather than clearing it, so
++	   the same window is what decides whether it is still current. */
++	if (cg.time - cg.crosshairEntTime > cg_drawCrosshairFade.integer)
++	{
++		return;
++	}
++
++	other = cg.crosshairEntNum;
++
++	if (!cgs.clientinfo[other].infoValid)
++	{
++		return;
++	}
++
++	enemy = (qboolean)(cgs.clientinfo[other].team != cgs.clientinfo[cg.snap->ps.clientNum].team);
++
++	if (enemy && (cg_entities[other].currentState.powerups & (1 << PW_OPS_DISGUISED)))
++	{
++		/* Disguised. A sighted player sees one of their own, so this
++		   says one of their own - unless the game itself would have
++		   told them otherwise. */
++		if (!(cgs.clientinfo[cg.snap->ps.clientNum].cls == PC_FIELDOPS
++		      && BG_IsSkillAvailable(cgs.clientinfo[cg.snap->ps.clientNum].skill,
++		                             SK_SIGNALS, SK_FIELDOPS_ENEMY_RECOGNITION)))
++		{
++			enemy = qfalse;
++		}
++	}
++
++	sfx = CG_AccessibilityLoopSound(enemy ? ETA_LOOP_CROSSHAIR_ENEMY
++	                                : ETA_LOOP_CROSSHAIR_TEAMMATE);
++
++	if (sfx)
++	{
++		/* At the view origin, so it sits centred: this is about the
++		   crosshair, which is always straight ahead, not about where
++		   the other player is. */
++		trap_S_AddLoopingSound(cg.refdef.vieworg, vec3_origin, sfx, 255, 0);
++	}
++}
++
+ static void ETA_NarrateFacing(void)
+ {
+ 	ETA_Facing facing;
+@@ -6085,6 +6263,12 @@ void CG_DrawActive()
+ 
+ 	ETA_NarrateLocation();
+ 
++	/* Both of these are continuous rather than spoken, so they do not
++	   compete with the narration above for the one voice. */
++	ETA_BeaconDoors();
++
++	ETA_NarrateCrosshair();
++
+ 	ETA_NarrateDropAhead();
+ 
+ 	/* Alongside the stance, and for the same reason: both are things the
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 54d35f3..346d5fd 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3410,6 +3410,22 @@ qboolean CG_AccessibilityNearestObjective(team_t team, const vec3_t from, etaObj
+ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObjective_t *out);
+ void CG_AccessibilityNarrateObjective(void);
+ void CG_AccessibilitySpeakLocation(void);
++
++/**
++ * @brief The mod's own looping sounds, shipped inside the pk3.
++ */
++typedef enum
++{
++	ETA_LOOP_DOOR = 0,
++	ETA_LOOP_DOOR_LOCKED,
++	ETA_LOOP_CROSSHAIR_ENEMY,
++	ETA_LOOP_CROSSHAIR_TEAMMATE
++} eta_loopSoundType_t;
++
++sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
++
++extern vmCvar_t eta_doorCues;
++extern vmCvar_t eta_crosshairCues;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index b5a22f3..ce72ccc 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2191,6 +2191,31 @@ vmCvar_t eta_objectiveCallouts;
+ vmCvar_t eta_environmentCallouts;
+ vmCvar_t eta_facingCallouts;
+ vmCvar_t eta_locationCallouts;
++vmCvar_t eta_doorCues;
++vmCvar_t eta_crosshairCues;
++
++/**
++ * @brief The four sounds this mod brings with it, and why they are not
++ *        the game's own.
++ *
++ * Every other cue here is a sound ET already ships, chosen by a cvar, so
++ * a player can read the path and know what they are hearing. These four
++ * cannot work that way. They loop continuously, and ET's sound set is
++ * combat and world effects - one-shot transients with hard onsets, which
++ * buzz when looped tightly and grate when looped slowly. Nothing in the
++ * game fits, so these are generated (release/make-cue-sounds.py) and
++ * shipped inside the pk3.
++ *
++ * Still cvars, and still re-registered when one changes, so a player who
++ * prefers one of the game's own sounds can say so.
++ */
++static eta_cueSound_t eta_loopSounds[] =
++{
++	{ "eta_cueDoor",              "sound/accessibility/door_creak.wav",         { 0 }, 0, { 0 } },
++	{ "eta_cueDoorLocked",        "sound/accessibility/door_creak_locked.wav",  { 0 }, 0, { 0 } },
++	{ "eta_cueCrosshairEnemy",    "sound/accessibility/crosshair_enemy.wav",    { 0 }, 0, { 0 } },
++	{ "eta_cueCrosshairTeammate", "sound/accessibility/crosshair_teammate.wav", { 0 }, 0, { 0 } }
++};
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+ {
+@@ -2201,6 +2226,7 @@ static eta_cueSound_t eta_cueSounds[] =
+ 	{ "eta_cueObjectiveDirection", "sound/misc/vote.wav",             { 0 }, 0, { 0 } }
+ };
+ 
++
+ /**
+  * @brief How far in front of the player a directional cue is placed.
+  *
+@@ -2235,6 +2261,23 @@ static sfxHandle_t ETA_CueSound(eta_cueSound_t *cue)
+ 	return cue->handle;
+ }
+ 
++/**
++ * @brief The handle for one of the mod's own looping sounds.
++ *
++ * Zero when the sound could not be registered - a player who pointed a
++ * cue cvar at a file that is not there gets silence, which is the same
++ * thing the engine does and the reason cue_sounds_test.py exists.
++ */
++sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which)
++{
++	if ((int)which < 0 || (int)which >= (int)(sizeof(eta_loopSounds) / sizeof(eta_loopSounds[0])))
++	{
++		return 0;
++	}
++
++	return ETA_CueSound(&eta_loopSounds[which]);
++}
++
+ /**
+  * @brief Plays an accessibility cue through the engine's sound system.
+  * @param[in] type the cue being played
+@@ -2304,6 +2347,15 @@ static void ETA_InitAccessibility(void)
+ 	trap_Cvar_Register(&eta_environmentCallouts, "eta_environmentCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_facingCallouts, "eta_facingCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_locationCallouts, "eta_locationCallouts", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_doorCues, "eta_doorCues", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_crosshairCues, "eta_crosshairCues", "1", CVAR_ARCHIVE);
++
++	for (i = 0; i < sizeof(eta_loopSounds) / sizeof(eta_loopSounds[0]); i++)
++	{
++		trap_Cvar_Register(&eta_loopSounds[i].cvar, eta_loopSounds[i].cvarName,
++		                   eta_loopSounds[i].defaultSound, CVAR_ARCHIVE);
++		ETA_CueSound(&eta_loopSounds[i]);
++	}
+ 
+ 	for (i = 0; i < sizeof(eta_cueSounds) / sizeof(eta_cueSounds[0]); i++)
+ 	{

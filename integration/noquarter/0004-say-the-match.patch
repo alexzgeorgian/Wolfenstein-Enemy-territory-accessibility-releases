@@ -1,0 +1,2428 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index cd64312..90dced4 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -351,6 +351,10 @@ if(BUILD_CLIENT_MOD)
+         cgame/cg_window.c
+     )
+ 
++    if(FEATURE_ACCESSIBILITY)
++        list(APPEND CGAME_SRC cgame/cg_accessibility.c)
++    endif()
++
+     add_library(cgame SHARED ${CGAME_SRC})
+     target_include_directories(cgame PRIVATE ${COMMON_INCLUDES})
+     target_compile_definitions(cgame PRIVATE CGAMEDLL NEW_ANIMS)
+diff --git a/src/cgame/cg_accessibility.c b/src/cgame/cg_accessibility.c
+new file mode 100644
+index 0000000..39db366
+--- /dev/null
++++ b/src/cgame/cg_accessibility.c
+@@ -0,0 +1,1687 @@
++/*
++ * name:	cg_accessibility.c
++ *
++ * desc:	[Accessibility]: the match said aloud, for players who cannot see
++ *			the screen. Ported from the accessibility mode's ET: Legacy cgame,
++ *			where each of these was asked for by a tester playing without
++ *			sight: health and ammo on keys, the objectives, kills and deaths,
++ *			what was picked up, the respawn countdown, whether you are playing
++ *			or watching, the scoreboard, chat and the loading screen.
++ *
++ *			Only built with FEATURE_ACCESSIBILITY. No Quarter's own files call
++ *			in here from a handful of hooks, each marked FEATURE_ACCESSIBILITY.
++ */
++
++#include "cg_local.h"
++
++#include "audio/audio_cue_system.h"
++#include "core/accessibility_runtime.h"
++#include "core/runtime_guard.h"
++#include "hud/hud_narrator.h"
++#include "speech/speech_manager.h"
++
++/*
++=====================================================================
++Settings
++=====================================================================
++*/
++
++/* Whether an objective finished or failed is said. */
++vmCvar_t eta_objectiveCallouts;
++/* The construction count under the pliers. */
++vmCvar_t eta_interactionCallouts;
++/* Chat read out as it arrives. */
++vmCvar_t eta_chatCallouts;
++/* How far the music steps back while the narrator talks; 1 leaves it. */
++vmCvar_t eta_musicDuck;
++/* The Windows voice's rate, pitch and volume. NVDA keeps its own. */
++vmCvar_t eta_speechRate;
++vmCvar_t eta_speechPitch;
++vmCvar_t eta_speechVolume;
++/* How loud the mod's cue sounds are, 0 to 100. */
++vmCvar_t eta_cueVolume;
++
++typedef struct {
++	vmCvar_t	*cvar;
++	const char	*name;
++	const char	*defaultValue;
++} eta_setting_t;
++
++/*
++ * One list for registering and for refreshing. A registered cvar is the
++ * module's copy, and nothing refreshes it unless asked: a setting changed
++ * from the console would otherwise not be seen until the next map.
++ */
++static eta_setting_t eta_settings[] = {
++	{ &eta_objectiveCallouts,	"eta_objectiveCallouts",	"1" },
++	{ &eta_interactionCallouts,	"eta_interactionCallouts",	"1" },
++	{ &eta_chatCallouts,		"eta_chatCallouts",			"1" },
++	{ &eta_musicDuck,			"eta_musicDuck",			"1" },
++	{ &eta_speechRate,			"eta_speechRate",			"0" },
++	{ &eta_speechPitch,			"eta_speechPitch",			"0" },
++	{ &eta_speechVolume,		"eta_speechVolume",			"100" },
++	{ &eta_cueVolume,			"eta_cueVolume",			"100" },
++};
++
++#define ETA_COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
++
++/*
++=====================================================================
++Cue sounds
++=====================================================================
++*/
++
++/*
++ * The cues are the game's own sounds, played through the engine, so they
++ * are mixed at the player's own volume and the directional ones are
++ * placed in the world rather than merely panned. Each is a cvar, so a
++ * player can swap one by ear. All are in the stock game's pak files.
++ *
++ * Indexed by ETA_AudioCueType: the order must match that enum.
++ */
++typedef struct {
++	const char	*cvarName;
++	const char	*defaultSound;
++	vmCvar_t	cvar;
++	sfxHandle_t	handle;
++	char		registered[MAX_QPATH];
++} eta_cueSound_t;
++
++static eta_cueSound_t eta_cueSounds[] = {
++	{ "eta_cueLowHealth",			"sound/player/gasp.wav",			{ 0 }, 0, { 0 } },
++	{ "eta_cueObjective",			"sound/misc/referee.wav",			{ 0 }, 0, { 0 } },
++	{ "eta_cueInteraction",			"sound/menu/select.wav",			{ 0 }, 0, { 0 } },
++	{ "eta_cueDamageDirection",		"sound/weapons/impact/flesh1.wav",	{ 0 }, 0, { 0 } },
++	{ "eta_cueObjectiveDirection",	"sound/misc/vote.wav",				{ 0 }, 0, { 0 } },
++};
++
++/* How far ahead a directional cue is placed: far enough for the engine to
++   give it a direction, near enough not to fade. */
++#define ETA_CUE_DISTANCE 128.0f
++
++/* A cue's sound, registered again only when its cvar names another. */
++static sfxHandle_t ETA_CueSound(eta_cueSound_t *cue) {
++	trap_Cvar_Update(&cue->cvar);
++
++	if (!cue->handle || Q_stricmp(cue->registered, cue->cvar.string)) {
++		if (!cue->cvar.string[0]) {
++			return 0;
++		}
++		cue->handle = trap_S_RegisterSound(cue->cvar.string, qfalse);
++		Q_strncpyz(cue->registered, cue->cvar.string, sizeof(cue->registered));
++	}
++
++	return cue->handle;
++}
++
++static int ETA_VolumePercent(const vmCvar_t *cvar) {
++	return cvar->integer <= 0 ? 0 : cvar->integer >= 100 ? 100 : cvar->integer;
++}
++
++/* Plays a cue through the engine. directionDegrees is view-relative:
++   0 ahead, 90 right, 180 behind. */
++static void ETA_PlayCueSound(ETA_AudioCueType type, int directionDegrees, int hasDirection, void *userData) {
++	sfxHandle_t sfx;
++	int volume;
++
++	(void)userData;
++
++	if ((int)type < 0 || (int)type >= ETA_COUNT(eta_cueSounds)) {
++		return;
++	}
++
++	sfx = ETA_CueSound(&eta_cueSounds[type]);
++	if (!sfx) {
++		return;
++	}
++
++	/* At 100, the game's own 127. */
++	volume = (127 * ETA_VolumePercent(&eta_cueVolume)) / 100;
++	if (!volume) {
++		return;
++	}
++
++	if (!hasDirection || !cg.snap) {
++		if (volume >= 127 || !cg.snap) {
++			trap_S_StartLocalSound(sfx, CHAN_AUTO);
++		} else {
++			trap_S_StartSoundVControl(NULL, cg.snap->ps.clientNum, CHAN_AUTO, sfx, volume);
++		}
++		return;
++	}
++
++	{
++		vec3_t angles, forward, origin;
++
++		/* Placed out along the bearing, so the engine positions it. */
++		VectorClear(angles);
++		angles[YAW] = AngleNormalize360(cg.snap->ps.viewangles[YAW] - (float)directionDegrees);
++		AngleVectors(angles, forward, NULL, NULL);
++		VectorMA(cg.snap->ps.origin, ETA_CUE_DISTANCE, forward, origin);
++
++		trap_S_StartSoundVControl(origin, -1, CHAN_AUTO, sfx, volume);
++	}
++}
++
++/*
++=====================================================================
++Start, stop
++=====================================================================
++*/
++
++void CG_AccessibilityInit(void) {
++	int i;
++
++	ETA_AccessibilityRuntime_Init();
++	ETA_AudioCueSystem_Init();
++	ETA_HudNarrator_Init();
++
++	for (i = 0; i < ETA_COUNT(eta_settings); i++) {
++		trap_Cvar_Register(eta_settings[i].cvar, eta_settings[i].name, eta_settings[i].defaultValue, CVAR_ARCHIVE);
++	}
++
++	for (i = 0; i < ETA_COUNT(eta_cueSounds); i++) {
++		trap_Cvar_Register(&eta_cueSounds[i].cvar, eta_cueSounds[i].cvarName, eta_cueSounds[i].defaultSound, CVAR_ARCHIVE);
++		/* Loaded now, so the first cue of a match does not hitch. */
++		ETA_CueSound(&eta_cueSounds[i]);
++	}
++
++	ETA_AudioCueSystem_SetBackend(ETA_PlayCueSound, NULL);
++}
++
++void CG_AccessibilityShutdown(void) {
++	ETA_HudNarrator_Shutdown();
++	ETA_AudioCueSystem_Shutdown();
++	ETA_AccessibilityRuntime_Shutdown();
++}
++
++/* Re-reads the settings, so a change takes effect at once. */
++static void ETA_UpdateSettings(void) {
++	int i;
++
++	for (i = 0; i < ETA_COUNT(eta_settings); i++) {
++		trap_Cvar_Update(eta_settings[i].cvar);
++	}
++
++	ETA_Speech_SetVoice(eta_speechRate.integer, eta_speechPitch.integer, eta_speechVolume.integer);
++}
++
++/*
++=====================================================================
++Names
++=====================================================================
++*/
++
++/*
++ * What to call a weapon out loud. No Quarter names its weapons in its
++ * weapon files, and almost all of those names read well; the few that do
++ * not are put right here. Never empty: silence where a name belongs is
++ * indistinguishable from the mod being broken.
++ */
++const char *CG_AccessibilityWeaponName(weapon_t weap) {
++	static const struct {
++		weapon_t	weapon;
++		const char	*name;
++	} fixed[] = {
++		/* Named after another item in No Quarter's weapon file. */
++		{ WP_BINOCULARS,	"Binoculars" },
++		/* "Browning Autom. Rifle": an abbreviation read as a word. */
++		{ WP_BAR,			"Browning Automatic Rifle" },
++		{ WP_MEDKIT,		"Health pack" },
++		{ WP_AMMO,			"Ammo pack" },
++	};
++	int i;
++
++	if (weap <= WP_NONE || weap >= WP_NUM_WEAPONS) {
++		return "Weapon";
++	}
++
++	for (i = 0; i < ETA_COUNT(fixed); i++) {
++		if (fixed[i].weapon == weap) {
++			return fixed[i].name;
++		}
++	}
++
++	if (BG_Weapons[weap].name[0]) {
++		return BG_Weapons[weap].name;
++	}
++
++	return "Weapon";
++}
++
++/*
++ * Map text as it should be heard. The objective and map descriptions
++ * break their lines with '*', which a screen reader reads out as "star":
++ * each break becomes the end of a sentence, and colour codes go.
++ */
++void CG_AccessibilitySpeakableText(const char *in, char *out, size_t outSize) {
++	size_t used = 0;
++	qboolean lineBreak = qfalse;
++
++	if (!outSize) {
++		return;
++	}
++
++	while (in && *in && used + 3 < outSize) {
++		char c = *in++;
++
++		if (c == Q_COLOR_ESCAPE && *in) {
++			in++;
++			continue;
++		}
++
++		if (c == '*' || c == '\n' || c == '\r') {
++			lineBreak = qtrue;
++			continue;
++		}
++
++		if (c == ' ' && (used == 0 || lineBreak || out[used - 1] == ' ')) {
++			continue;
++		}
++
++		if (lineBreak) {
++			while (used > 0 && out[used - 1] == ' ') {
++				used--;
++			}
++			if (used > 0) {
++				if (!strchr(".!?:;,", out[used - 1])) {
++					out[used++] = '.';
++				}
++				out[used++] = ' ';
++			}
++			lineBreak = qfalse;
++		}
++
++		out[used++] = c;
++	}
++
++	while (used > 0 && out[used - 1] == ' ') {
++		used--;
++	}
++
++	out[used] = '\0';
++}
++
++/*
++=====================================================================
++Objectives
++=====================================================================
++*/
++
++/* How many objectives this team's map lists: the limbo panel's number. */
++static int ETA_ObjectiveCount(team_t team) {
++	if (team != TEAM_AXIS && team != TEAM_ALLIES) {
++		return 0;
++	}
++	return atoi(Info_ValueForKey(CG_ConfigString(CS_MULTI_INFO), "o"));
++}
++
++/* The map script's state for one objective: 0 to do, 1 done, 2 failed. */
++static int ETA_ObjectiveStateOf(team_t team, int number) {
++	if (number < 1 || number > MAX_OBJECTIVES) {
++		return 0;
++	}
++	return atoi(Info_ValueForKey(CG_ConfigString(CS_MULTI_OBJECTIVE),
++								 va("%s%i", team == TEAM_AXIS ? "x" : "a", number)));
++}
++
++/* The first objective the team still has to do, or -1 when none is left. */
++static int ETA_CurrentObjective(team_t team) {
++	int count = ETA_ObjectiveCount(team);
++	int i;
++
++	for (i = 1; i <= count && i <= MAX_OBJECTIVES; i++) {
++		if (ETA_ObjectiveStateOf(team, i) == 0) {
++			return i;
++		}
++	}
++	return -1;
++}
++
++/* The map's own words for one numbered objective, or NULL. */
++static const char *ETA_ObjectiveDescription(team_t team, int number) {
++	static char spoken[2][256];
++	static int next;
++	const char *text;
++	char *out;
++
++	if (number < 1 || number > MAX_OBJECTIVES) {
++		return NULL;
++	}
++
++	text = team == TEAM_AXIS ? cg.objDescription_Axis[number - 1] : cg.objDescription_Allied[number - 1];
++	if (!text || !text[0]) {
++		return NULL;
++	}
++
++	out = spoken[next];
++	next = (next + 1) % 2;
++	CG_AccessibilitySpeakableText(text, out, sizeof(spoken[0]));
++
++	return out[0] ? out : NULL;
++}
++
++/*
++ * The objective to point at: the nearest on the team's command map. No
++ * Quarter's objectives carry no link from their number in the map's list
++ * to their place on it, and it has no "main objective", so the nearest
++ * is the honest answer.
++ *
++ * Sticky, so two objectives at similar range do not swap places as the
++ * player strafes: the current one is kept unless another is a quarter
++ * closer.
++ */
++static qboolean ETA_Objective(team_t team, const vec3_t from, etaObjective_t *out) {
++	static team_t stickyTeam = TEAM_FREE;
++	static int stickyEntNum = -1;
++	etaObjective_t nearest;
++
++	if (team != TEAM_AXIS && team != TEAM_ALLIES) {
++		stickyTeam = TEAM_FREE;
++		stickyEntNum = -1;
++		return qfalse;
++	}
++
++	if (!CG_AccessibilityNearestObjective(team, from, &nearest)) {
++		stickyTeam = TEAM_FREE;
++		stickyEntNum = -1;
++		return qfalse;
++	}
++
++	if (team == stickyTeam && stickyEntNum != nearest.entityNum) {
++		etaObjective_t sticky;
++
++		if (CG_AccessibilityObjectiveByEntityNum(team, stickyEntNum, &sticky)
++			&& Distance(from, nearest.origin) >= 0.75f * Distance(from, sticky.origin)) {
++			nearest = sticky;
++		}
++	}
++
++	*out = nearest;
++	stickyTeam = team;
++	stickyEntNum = nearest.entityNum;
++	return qtrue;
++}
++
++/* Metres from the game's units: 8 units to the foot, near enough. */
++#define ETA_QU_TO_METERS 0.0254f
++
++/* Which objective is next in the map's own list, and how many there are. */
++static void ETA_SpeakObjectiveOrder(void) {
++	team_t team = cgs.clientinfo[cg.clientNum].team;
++	int count = ETA_ObjectiveCount(team);
++	int current = ETA_CurrentObjective(team);
++
++	if (team != TEAM_AXIS && team != TEAM_ALLIES) {
++		return;
++	}
++
++	if (count <= 0) {
++		ETA_Speech_Say("This map lists no objectives");
++		return;
++	}
++
++	if (current < 0) {
++		ETA_HudNarrator_SpeakObjectivesComplete();
++		return;
++	}
++
++	ETA_HudNarrator_SpeakObjectiveStep(current, count, ETA_OBJECTIVE_PENDING, ETA_ObjectiveDescription(team, current));
++}
++
++/* Where the objective is: its name, how far, which way to turn. */
++static void ETA_SpeakObjectiveWay(void) {
++	playerState_t *ps;
++	etaObjective_t objective;
++	vec3_t delta, angles;
++	float relativeYaw;
++	char line[192];
++	int meters;
++
++	if (!cg.snap) {
++		return;
++	}
++
++	ps = &cg.snap->ps;
++
++	if (!ETA_Objective(cgs.clientinfo[cg.clientNum].team, ps->origin, &objective)) {
++		/* Spectators have none, and a map can have nothing left. Saying
++		   so is better than silence, which sounds like a fault. */
++		ETA_Speech_Say("No current objective");
++		return;
++	}
++
++	VectorSubtract(objective.origin, ps->origin, delta);
++	vectoangles(delta, angles);
++	relativeYaw = AngleSubtract(angles[YAW], ps->viewangles[YAW]);
++	meters = (int)(VectorLength(delta) * ETA_QU_TO_METERS);
++
++	Com_sprintf(line, sizeof(line), "%s, %d %s, %s",
++				objective.name ? objective.name : "Objective",
++				meters, meters == 1 ? "meter" : "meters",
++				fabs(relativeYaw) <= 15.0f ? "ahead"
++				: relativeYaw > 0.0f ? "turn left" : "turn right");
++	ETA_Speech_Say(line);
++
++	/* An objective on a roof is not reached by walking at it. */
++	{
++		float rise = (objective.origin[2] - ps->origin[2]) * ETA_QU_TO_METERS;
++
++		if (rise >= ETA_HEIGHT_SAY_METERS || rise <= -ETA_HEIGHT_SAY_METERS) {
++			ETA_Speech_Say(va("%d meters %s you", (int)fabs(rise), rise > 0 ? "above" : "below"));
++		}
++	}
++
++	/* The two compass points say how far round to turn, which "turn left"
++	   on its own never does. */
++	ETA_Speech_Say(va("Objective lies %s, you are facing %s",
++					  ETA_HudNarrator_FacingName(ETA_HudNarrator_FacingFromYaw(angles[YAW])),
++					  ETA_HudNarrator_FacingName(ETA_HudNarrator_FacingFromYaw(ps->viewangles[YAW]))));
++}
++
++/* The map's description of the mission, for the player's side. */
++static void ETA_SpeakMapDescription(void) {
++	char text[384];
++	team_t team = cgs.clientinfo[cg.clientNum].team;
++	const char *source = team == TEAM_AXIS ? cg.objMapDescription_Axis
++						 : team == TEAM_ALLIES ? cg.objMapDescription_Allied
++						 : cg.objMapDescription_Neutral;
++
++	CG_AccessibilitySpeakableText(source, text, sizeof(text));
++	if (!text[0]) {
++		ETA_Speech_Say("This map has no objective description");
++		return;
++	}
++	ETA_HudNarrator_SpeakObjective(text);
++}
++
++/*
++ * Says when an objective is finished, or lost: the most useful thing to
++ * hear on a map played alone. A sighted player sees the stamp land on the
++ * objective panel; this reads the same map-script state.
++ */
++static void ETA_NarrateObjectiveOrder(void) {
++	static int lastStates[MAX_OBJECTIVES + 1];
++	static team_t lastTeam = TEAM_FREE;
++	static qboolean saidComplete = qfalse;
++	team_t team = cgs.clientinfo[cg.clientNum].team;
++	int count, i;
++
++	if (!cg.snap || !eta_objectiveCallouts.integer || (team != TEAM_AXIS && team != TEAM_ALLIES)) {
++		lastTeam = TEAM_FREE;
++		return;
++	}
++
++	count = ETA_ObjectiveCount(team);
++	if (count <= 0 || count > MAX_OBJECTIVES) {
++		lastTeam = TEAM_FREE;
++		return;
++	}
++
++	/* Another team is another list: remember it rather than announce it. */
++	if (team != lastTeam) {
++		for (i = 1; i <= MAX_OBJECTIVES; i++) {
++			lastStates[i] = ETA_ObjectiveStateOf(team, i);
++		}
++		lastTeam = team;
++		saidComplete = ETA_CurrentObjective(team) < 0;
++		return;
++	}
++
++	for (i = 1; i <= count; i++) {
++		int state = ETA_ObjectiveStateOf(team, i);
++
++		if (state == lastStates[i]) {
++			continue;
++		}
++		lastStates[i] = state;
++
++		/* Only forward: back to pending is a script resetting itself. */
++		if (state != 1 && state != 2) {
++			continue;
++		}
++
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakObjectiveStep(i, count, state == 1 ? ETA_OBJECTIVE_COMPLETE : ETA_OBJECTIVE_FAILED,
++										   ETA_ObjectiveDescription(team, i));
++		ETA_Speech_EndReport();
++
++		/* One a frame, so two stamps landing together do not cut each
++		   other off. */
++		return;
++	}
++
++	if (ETA_CurrentObjective(team) < 0) {
++		if (!saidComplete) {
++			saidComplete = qtrue;
++			ETA_Speech_BeginReport();
++			ETA_HudNarrator_SpeakObjectivesComplete();
++			ETA_Speech_EndReport();
++		}
++	} else {
++		saidComplete = qfalse;
++	}
++}
++
++/*
++ * The objective cue, and the direction cue toward it, when the objective
++ * being pointed at changes: one finished and the next taking over, or the
++ * player joining a team.
++ */
++static void ETA_NarrateObjectiveChange(void) {
++	static team_t lastTeam = TEAM_SPECTATOR;
++	static int lastEntNum = -1;
++	playerState_t *ps = &cg.snap->ps;
++	team_t team = cgs.clientinfo[cg.clientNum].team;
++	etaObjective_t objective;
++
++	if ((team != TEAM_AXIS && team != TEAM_ALLIES) || (ps->pm_flags & PMF_FOLLOW)
++		|| !ETA_Objective(team, ps->origin, &objective)) {
++		lastTeam = team;
++		lastEntNum = -1;
++		return;
++	}
++
++	if (team != lastTeam || objective.entityNum != lastEntNum) {
++		vec3_t delta, angles;
++
++		ETA_AudioCueSystem_PlayObjectiveCue();
++
++		VectorSubtract(objective.origin, ps->origin, delta);
++		vectoangles(delta, angles);
++		ETA_AudioCueSystem_PlayObjectiveDirectionCue((int)AngleNormalize360(ps->viewangles[YAW] - angles[YAW]));
++	}
++
++	lastTeam = team;
++	lastEntNum = objective.entityNum;
++}
++
++/*
++=====================================================================
++Play state: in the match, down, waiting, watching
++=====================================================================
++*/
++
++/*
++ * Whether the player is in the match or watching it. Watching someone -
++ * as a spectator, or from limbo - the snapshot is the watched player's,
++ * with PMF_FOLLOW set, so the player's own team comes from their client
++ * info and a watched player's health is never taken for their own.
++ */
++static ETA_PlayState ETA_PlayStateNow(char *following, size_t followingSize) {
++	const playerState_t *ps = &cg.snap->ps;
++	team_t team = cgs.clientinfo[cg.clientNum].team;
++	qboolean watch = ((ps->pm_flags & PMF_FOLLOW) && ps->clientNum != cg.clientNum
++					  && ps->clientNum >= 0 && ps->clientNum < MAX_CLIENTS) ? qtrue : qfalse;
++
++	following[0] = '\0';
++
++	if (watch) {
++		Q_strncpyz(following, cgs.clientinfo[ps->clientNum].name, (int)followingSize);
++		Q_CleanStr(following);
++	}
++
++	if (ps->pm_type == PM_INTERMISSION) {
++		return ETA_PLAY_MATCH_OVER;
++	}
++	if (team != TEAM_AXIS && team != TEAM_ALLIES) {
++		return ETA_PLAY_SPECTATING;
++	}
++	if ((ps->pm_flags & PMF_LIMBO) || watch) {
++		return ETA_PLAY_LIMBO;
++	}
++	if (ps->stats[STAT_HEALTH] <= 0 || ps->pm_type == PM_DEAD) {
++		return ETA_PLAY_DOWN;
++	}
++	return ETA_PLAY_IN_PLAY;
++}
++
++/* Who is being watched: "Hans, Axis Medic, 85 health", or "down". */
++static void ETA_DescribeFollowed(const char *name, char *out, int outSize) {
++	const playerState_t *ps = &cg.snap->ps;
++	const clientInfo_t *ci = &cgs.clientinfo[ps->clientNum];
++	const char *side = ci->team == TEAM_AXIS ? "Axis " : ci->team == TEAM_ALLIES ? "Allied " : "";
++
++	if (ps->stats[STAT_HEALTH] <= 0 || ps->pm_type == PM_DEAD) {
++		Com_sprintf(out, outSize, "%s, %s%s, down", name, side, BG_ClassnameForNumber(ci->cls));
++	} else {
++		Com_sprintf(out, outSize, "%s, %s%s, %d health", name, side, BG_ClassnameForNumber(ci->cls),
++					ps->stats[STAT_HEALTH]);
++	}
++}
++
++static void ETA_SpeakPlayState(ETA_PlayState state, const char *following) {
++	team_t team = cgs.clientinfo[cg.clientNum].team;
++	const char *side = team == TEAM_AXIS ? "Axis" : team == TEAM_ALLIES ? "Allies" : "";
++	char who[MAX_QPATH + 48];
++
++	who[0] = '\0';
++	if (following[0]) {
++		ETA_DescribeFollowed(following, who, sizeof(who));
++	}
++
++	ETA_HudNarrator_SpeakPlayState(state, side,
++								   state == ETA_PLAY_IN_PLAY ? BG_ClassnameForNumber(cgs.clientinfo[cg.clientNum].cls) : "",
++								   who);
++}
++
++/* The player's own death, in the game's words, waiting to be said with
++   the "Down" or "Waiting to respawn" that follows it, as one line. */
++static char eta_deathWords[256];
++static int eta_deathWordsAt;
++
++#define ETA_DEATH_WORDS_WAIT 1500
++
++static const char *ETA_DeathWords(qboolean alone) {
++	static char said[256];
++
++	if (!eta_deathWords[0]) {
++		return NULL;
++	}
++	if (alone && cg.time - eta_deathWordsAt < ETA_DEATH_WORDS_WAIT && cg.time >= eta_deathWordsAt) {
++		return NULL;
++	}
++
++	Q_strncpyz(said, eta_deathWords, sizeof(said));
++	eta_deathWords[0] = '\0';
++	return said;
++}
++
++/*
++ * A death or kill, from cg_event.c, already in the game's own words. The
++ * player's own death waits for the play state, so the two are one line.
++ */
++void CG_AccessibilityObituary(const char *text, qboolean ownDeath) {
++	if (!text || !text[0]) {
++		return;
++	}
++
++	if (ownDeath) {
++		Q_strncpyz(eta_deathWords, text, sizeof(eta_deathWords));
++		eta_deathWordsAt = cg.time;
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(text);
++	ETA_Speech_EndReport();
++}
++
++/* "Hans revived": the one watched, back up where they fell. */
++#define ETA_REVIVED_NEAR 128.0f
++
++static void ETA_NarrateFollowedRevive(void) {
++	static int watched = -1;
++	static qboolean down;
++	static vec3_t downAt;
++	const playerState_t *ps = &cg.snap->ps;
++	qboolean isDown;
++
++	if (!(ps->pm_flags & PMF_FOLLOW) || ps->clientNum == cg.clientNum) {
++		watched = -1;
++		return;
++	}
++
++	isDown = (ps->stats[STAT_HEALTH] <= 0 || ps->pm_type == PM_DEAD) ? qtrue : qfalse;
++	if (ps->clientNum != watched) {
++		watched = ps->clientNum;
++		down = isDown;
++		VectorCopy(ps->origin, downAt);
++		return;
++	}
++
++	if (isDown && !down) {
++		VectorCopy(ps->origin, downAt);
++	} else if (!isDown && down && Distance(ps->origin, downAt) <= ETA_REVIVED_NEAR) {
++		char name[MAX_QPATH];
++
++		Q_strncpyz(name, cgs.clientinfo[ps->clientNum].name, sizeof(name));
++		Q_CleanStr(name);
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(va("%s revived", name));
++		ETA_Speech_EndReport();
++	}
++	down = isDown;
++}
++
++/*
++ * Says it when the player goes from watching to playing, or back. A
++ * change has to hold a moment first: joining a team passes through a
++ * frame or two of other states, and a spectator cycling through players
++ * should hear the one they stop on.
++ */
++#define ETA_PLAY_STATE_SETTLE_MS 400
++
++static void ETA_NarratePlayState(void) {
++	static ETA_PlayState said = ETA_PLAY_UNKNOWN;
++	static char saidFollowing[MAX_QPATH];
++	static ETA_PlayState pending = ETA_PLAY_UNKNOWN;
++	static char pendingFollowing[MAX_QPATH];
++	static int pendingSince;
++	char following[MAX_QPATH];
++	ETA_PlayState now = ETA_PlayStateNow(following, sizeof(following));
++
++	if (now == said && !strcmp(following, saidFollowing)) {
++		pending = ETA_PLAY_UNKNOWN;
++		return;
++	}
++
++	if (now != pending || strcmp(following, pendingFollowing)) {
++		pending = now;
++		pendingSince = cg.time;
++		Q_strncpyz(pendingFollowing, following, sizeof(pendingFollowing));
++		return;
++	}
++
++	if (cg.time - pendingSince < ETA_PLAY_STATE_SETTLE_MS && cg.time >= pendingSince) {
++		return;
++	}
++
++	said = now;
++	Q_strncpyz(saidFollowing, following, sizeof(saidFollowing));
++	pending = ETA_PLAY_UNKNOWN;
++
++	ETA_Speech_BeginReport();
++	if (now == ETA_PLAY_DOWN || now == ETA_PLAY_LIMBO) {
++		const char *died = ETA_DeathWords(qfalse);
++
++		if (died) {
++			ETA_Speech_Say(died);
++		}
++	}
++	ETA_SpeakPlayState(now, following);
++	ETA_Speech_EndReport();
++}
++
++/* How the player died, said alone when no change of state came to say it with. */
++static void ETA_NarrateDeathWords(void) {
++	const char *died = ETA_DeathWords(qtrue);
++
++	if (died) {
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(died);
++		ETA_Speech_EndReport();
++	}
++}
++
++/*
++ * The respawn countdown while the player waits for it: when the wait
++ * begins, every five seconds, and the last three. A sighted player reads
++ * it off the screen; every second for thirty seconds would bury
++ * everything else.
++ */
++static void ETA_NarrateRespawn(void) {
++	static int lastSaid = -1;
++	static qboolean waiting = qfalse;
++	char following[MAX_QPATH];
++	ETA_PlayState state;
++	int seconds;
++
++	if (cgs.gamestate != GS_PLAYING) {
++		waiting = qfalse;
++		return;
++	}
++
++	state = ETA_PlayStateNow(following, sizeof(following));
++	if (state != ETA_PLAY_DOWN && state != ETA_PLAY_LIMBO) {
++		waiting = qfalse;
++		return;
++	}
++
++	seconds = CG_CalculateReinfTime(qfalse);
++	if (seconds <= 0) {
++		return;
++	}
++
++	if (!waiting) {
++		/* After the death and the play state have been said. */
++		waiting = qtrue;
++		lastSaid = seconds;
++		return;
++	}
++
++	if (seconds == lastSaid) {
++		return;
++	}
++	lastSaid = seconds;
++
++	if (seconds % 5 == 0 || seconds <= 3) {
++		ETA_HudNarrator_SpeakRespawn(seconds);
++	}
++}
++
++/* The status key's opening words: in the match or watching it. */
++static void ETA_SpeakPlayStateNow(void) {
++	char following[MAX_QPATH];
++
++	ETA_SpeakPlayState(ETA_PlayStateNow(following, sizeof(following)), following);
++}
++
++/*
++=====================================================================
++Weapon, posture, scope, lean
++=====================================================================
++*/
++
++/* The weapon in hand and its ammo, when it changes. Read from the same
++   predicted entity the HUD's ammo comes from, so the two agree. */
++static void ETA_NarrateWeaponChange(void) {
++	static int spoken = WP_NONE;
++	int weap, ammo, clips, akimbo;
++
++	if (cg.snap->ps.pm_type == PM_INTERMISSION) {
++		return;
++	}
++
++	weap = cg.predictedPlayerEntity.currentState.weapon;
++	if (weap == spoken) {
++		return;
++	}
++
++	/* Raising or lowering a scope swaps to the weapon's scoped twin;
++	   to the person holding it that is not a new weapon. */
++	if (spoken > WP_NONE && spoken < WP_NUM_WEAPONS && weap > WP_NONE && weap < WP_NUM_WEAPONS
++		&& (weapAlts[spoken] == weap || weapAlts[weap] == spoken)
++		&& (IS_SCOPED_WEAPON(weap) || IS_SCOPED_WEAPON(spoken))) {
++		spoken = weap;
++		return;
++	}
++
++	spoken = weap;
++	if (weap <= WP_NONE || weap >= WP_NUM_WEAPONS) {
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakWeapon(CG_AccessibilityWeaponName((weapon_t)weap));
++	CG_AccessibilityAmmo(&ammo, &clips, &akimbo);
++	if (ammo >= 0) {
++		ETA_HudNarrator_SpeakAmmoDetail(ammo + (akimbo > 0 ? akimbo : 0), clips);
++	}
++	ETA_Speech_EndReport();
++}
++
++/*
++ * The player's posture, when it changes. The engine can refuse to stand
++ * under a low ceiling, so "did the crouch take" needs an answer. Prone is
++ * tested first: going prone sets the crouch flag too.
++ */
++static void ETA_NarrateStanceChange(void) {
++	static int spoken = -1;
++	const playerState_t *ps = &cg.predictedPlayerState;
++	ETA_Stance stance;
++
++	if (ps->pm_type != PM_NORMAL) {
++		spoken = -1;
++		return;
++	}
++
++	if (ps->eFlags & EF_PRONE) {
++		stance = ETA_STANCE_PRONE;
++	} else if (ps->pm_flags & PMF_DUCKED) {
++		stance = ETA_STANCE_CROUCHED;
++	} else {
++		stance = ETA_STANCE_STANDING;
++	}
++
++	if ((int)stance == spoken) {
++		return;
++	}
++
++	/* Standing, the first frame of a life, is not news. */
++	if (spoken == -1 && stance == ETA_STANCE_STANDING) {
++		spoken = stance;
++		return;
++	}
++
++	spoken = stance;
++	ETA_HudNarrator_SpeakStance(stance);
++}
++
++/* The binoculars and the scope, as they come up and go down: a scope
++   does not always come up when asked, and silence sounds the same. */
++static void ETA_NarrateZoom(void) {
++	static ETA_Zoom spoken = ETA_ZOOM_OFF;
++	ETA_Zoom zoom;
++
++	if (cg.snap->ps.pm_type != PM_NORMAL) {
++		spoken = ETA_ZOOM_OFF;
++		return;
++	}
++
++	zoom = cg.zoomedBinoc ? ETA_ZOOM_BINOCULARS : cg.zoomed ? ETA_ZOOM_SCOPE : ETA_ZOOM_OFF;
++	if (zoom == spoken) {
++		return;
++	}
++
++	spoken = zoom;
++	ETA_HudNarrator_SpeakZoom(zoom);
++}
++
++/* Leaning out from cover and back, from what the lean did, never the
++   key: the engine refuses to lean a player who is moving or firing. */
++#define ETA_LEAN_THRESHOLD 2.0f
++
++static void ETA_NarrateLean(void) {
++	static int spoken = -1;
++	const playerState_t *ps = &cg.predictedPlayerState;
++	ETA_Lean lean;
++
++	if (ps->pm_type != PM_NORMAL) {
++		spoken = -1;
++		return;
++	}
++
++	lean = ps->leanf > ETA_LEAN_THRESHOLD ? ETA_LEAN_RIGHT
++		   : ps->leanf < -ETA_LEAN_THRESHOLD ? ETA_LEAN_LEFT : ETA_LEAN_UPRIGHT;
++
++	if ((int)lean == spoken) {
++		return;
++	}
++	if (spoken == -1 && lean == ETA_LEAN_UPRIGHT) {
++		spoken = lean;
++		return;
++	}
++
++	spoken = lean;
++	ETA_HudNarrator_SpeakLean(lean);
++}
++
++/*
++=====================================================================
++Building
++=====================================================================
++*/
++
++/* How far off a construction the player is working on can be. */
++#define ETA_BUILD_SEARCH_RANGE 640.0f
++
++/* The progress of the nearest construction of the player's own team that
++   is under way, 0 to 255, or -1. It is the construction's own figure, so
++   it does not depend on where the player is looking. */
++static int ETA_NearbyConstructionProgress(int following, int *entityNum) {
++	const team_t team = cgs.clientinfo[cg.clientNum].team;
++	float nearest = ETA_BUILD_SEARCH_RANGE;
++	int progress = -1;
++	int i;
++
++	for (i = 0; i < cg.snap->numEntities; i++) {
++		const entityState_t *es = &cg.snap->entities[i];
++		vec3_t origin;
++		float distance;
++
++		if (es->eType != ET_CONSTRUCTIBLE || es->teamNum != team) {
++			continue;
++		}
++		if (es->angles2[0] <= 0.f && es->number != following) {
++			continue;
++		}
++
++		VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++		if (es->modelindex > 0 && es->modelindex < MAX_MODELS) {
++			VectorAdd(origin, cgs.inlineModelMidpoints[es->modelindex], origin);
++		}
++
++		distance = Distance(cg.predictedPlayerState.origin, origin);
++		if (distance < nearest) {
++			nearest = distance;
++			progress = (int)es->angles2[0];
++			*entityNum = es->number;
++		}
++	}
++
++	return progress;
++}
++
++/*
++ * How a construction is going under the pliers, at milestones, and when
++ * it is finished. A sighted player watches the bar fill; the count tells
++ * a player to keep holding. The finish is heard as the figure dropping
++ * from near the top to nothing with the player still beside it: the
++ * server resets it in the frame the work completes, and a construction
++ * left alone runs down slowly, never in one step.
++ */
++static void ETA_NarrateBuildProgress(void) {
++	static qboolean building = qfalse;
++	static qboolean announced = qfalse;
++	static int following = -1;
++	static int lastValue;
++	int value, percent, entityNum = -1;
++
++	if (!eta_interactionCallouts.integer || cg.predictedPlayerState.weapon != WP_PLIERS
++		|| ETA_NearbyConstructionProgress(following, &entityNum) < 0) {
++		if (building) {
++			building = qfalse;
++			announced = qfalse;
++			ETA_HudNarrator_ResetBuildProgress();
++		}
++		following = -1;
++		return;
++	}
++
++	value = (int)cg_entities[entityNum].currentState.angles2[0];
++
++	if (following == entityNum && building && !announced && value <= 0 && lastValue >= 230) {
++		announced = qtrue;
++		building = qfalse;
++		following = -1;
++		ETA_HudNarrator_SpeakBuildComplete();
++		ETA_HudNarrator_ResetBuildProgress();
++		return;
++	}
++
++	following = entityNum;
++	lastValue = value;
++
++	if (value <= 0) {
++		return;
++	}
++
++	building = qtrue;
++	announced = qfalse;
++
++	percent = value >= 255 ? 100 : (value * 100) / 255;
++	ETA_HudNarrator_UpdateBuildProgress(percent);
++}
++
++/*
++=====================================================================
++Pickups
++=====================================================================
++*/
++
++/* Reserve ammo and health as of the frame before, to say what a pack
++   gave: by the time the pickup event arrives the snapshot already holds
++   the new totals. */
++static int eta_previousReserve[MAX_WEAPONS];
++static int eta_previousHealth;
++static qboolean eta_havePrevious = qfalse;
++
++static void ETA_SampleTotals(void) {
++	int i;
++
++	for (i = 0; i < MAX_WEAPONS; i++) {
++		eta_previousReserve[i] = cg.snap->ps.ammo[i];
++	}
++	eta_previousHealth = cg.snap->ps.stats[STAT_HEALTH];
++	eta_havePrevious = qtrue;
++}
++
++/* Rounds added since the last frame, across every weapon: a pack tops up
++   the whole kit at once. Only increases count; firing and reloading are
++   decreases. */
++static int ETA_ReserveGained(void) {
++	int i, gained = 0;
++
++	if (!eta_havePrevious) {
++		return 0;
++	}
++	for (i = 0; i < MAX_WEAPONS; i++) {
++		if (cg.snap->ps.ammo[i] > eta_previousReserve[i]) {
++			gained += cg.snap->ps.ammo[i] - eta_previousReserve[i];
++		}
++	}
++	return gained;
++}
++
++/*
++ * What the player picked up, in the popup's own words, and for health
++ * and ammo what it gave and the new total. Walking over a pack already
++ * full is said too: it sounds exactly like one that helped, and the pack
++ * is gone either way.
++ */
++void CG_AccessibilityItemPickup(int itemNum) {
++	const gitem_t *item = &bg_itemlist[itemNum];
++	char text[256];
++
++	if (!cg.snap) {
++		return;
++	}
++
++	Q_strncpyz(text, va("Picked up %s", CG_PickupItemText(itemNum)), sizeof(text));
++	Q_CleanStr(text);
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(text);
++
++	if (item->giType == IT_HEALTH) {
++		int gained = eta_havePrevious ? cg.snap->ps.stats[STAT_HEALTH] - eta_previousHealth : 0;
++
++		if (gained > 0) {
++			ETA_HudNarrator_SpeakGain(gained, qfalse);
++		} else {
++			ETA_HudNarrator_SpeakAlreadyFull();
++		}
++		ETA_HudNarrator_SpeakHealth(cg.snap->ps.stats[STAT_HEALTH]);
++	} else if (item->giType == IT_AMMO || (item->giType == IT_WEAPON && item->giTag == WP_AMMO)) {
++		int ammo, clips, akimbo;
++		int gained = ETA_ReserveGained();
++
++		if (gained > 0) {
++			ETA_HudNarrator_SpeakGain(gained, qtrue);
++		} else {
++			ETA_HudNarrator_SpeakAlreadyFull();
++		}
++
++		CG_AccessibilityAmmo(&ammo, &clips, &akimbo);
++		if (ammo >= 0) {
++			ETA_HudNarrator_SpeakAmmoDetail(ammo + (akimbo > 0 ? akimbo : 0), clips);
++		}
++	}
++
++	ETA_Speech_EndReport();
++}
++
++/*
++=====================================================================
++Health, damage
++=====================================================================
++*/
++
++/* A sound from the direction a hit came from; yaw as the damage
++   indicator has it, 0 ahead, 90 right. */
++void CG_AccessibilityDamage(float yaw) {
++	int degrees = (int)yaw % 360;
++
++	if (degrees < 0) {
++		degrees += 360;
++	}
++	ETA_AudioCueSystem_PlayDamageDirectionCue(degrees);
++}
++
++/* A gasp on each hit while health is critically low. */
++void CG_AccessibilityPain(int health) {
++	if (health > 0 && health <= 25) {
++		ETA_AudioCueSystem_PlayLowHealthCue();
++	}
++}
++
++/*
++=====================================================================
++Scoreboard
++=====================================================================
++*/
++
++/* When the scores were asked for; spoken only if they arrive soon after,
++   so a reply that never came does not make the board speak later. */
++static int eta_scoresPending;
++static qboolean eta_scoresReady;
++
++#define ETA_ANSWER_WAIT_MS 3000
++
++/*
++ * The scoreboard, most useful first: the time, each team's size and XP,
++ * where the player stands on their own team, then every name with its
++ * XP, the player's own team first.
++ */
++static void ETA_SpeakScores(void) {
++	team_t mine = cgs.clientinfo[cg.clientNum].team;
++	team_t order[2];
++	int members[2][MAX_CLIENTS];
++	int counts[2] = { 0, 0 };
++	int totals[2] = { 0, 0 };
++	int t, i, j;
++
++	order[0] = mine == TEAM_AXIS ? TEAM_AXIS : TEAM_ALLIES;
++	order[1] = mine == TEAM_AXIS ? TEAM_ALLIES : TEAM_AXIS;
++
++	for (t = 0; t < 2; t++) {
++		for (i = 0; i < cg.numScores && i < MAX_CLIENTS; i++) {
++			if (cg.scores[i].team != order[t]) {
++				continue;
++			}
++			for (j = counts[t]; j > 0 && cg.scores[members[t][j - 1]].score < cg.scores[i].score; j--) {
++				members[t][j] = members[t][j - 1];
++			}
++			members[t][j] = i;
++			counts[t]++;
++			totals[t] += cg.scores[i].score;
++		}
++	}
++
++	ETA_Speech_BeginReport();
++
++	if (cgs.gamestate == GS_PLAYING && cgs.timelimit > 0.0f) {
++		int msec = (int)(cgs.timelimit * 60000.f) - (cg.time - cgs.levelStartTime);
++
++		if (msec < 0) {
++			ETA_Speech_Say("Sudden death");
++		} else {
++			int seconds = msec / 1000;
++
++			ETA_Speech_Say(va("%d minutes %d seconds left", seconds / 60, seconds % 60));
++		}
++	} else if (cgs.gamestate == GS_WARMUP || cgs.gamestate == GS_WARMUP_COUNTDOWN) {
++		ETA_Speech_Say("Warmup");
++	} else if (cgs.gamestate == GS_INTERMISSION) {
++		ETA_Speech_Say("Match over");
++	}
++
++	for (t = 0; t < 2; t++) {
++		ETA_Speech_Say(va("%s, %d %s, %d XP", order[t] == TEAM_AXIS ? "Axis" : "Allies",
++						  counts[t], counts[t] == 1 ? "player" : "players", totals[t]));
++	}
++
++	if (mine == TEAM_AXIS || mine == TEAM_ALLIES) {
++		for (j = 0; j < counts[0]; j++) {
++			if (cg.scores[members[0][j]].client == cg.clientNum) {
++				ETA_Speech_Say(va("you are %d of %d, %d XP", j + 1, counts[0], cg.scores[members[0][j]].score));
++				break;
++			}
++		}
++	}
++
++	for (t = 0; t < 2; t++) {
++		if (!counts[t]) {
++			continue;
++		}
++		ETA_Speech_Say(order[t] == TEAM_AXIS ? "Axis" : "Allies");
++		for (j = 0; j < counts[t]; j++) {
++			const score_t *sc = &cg.scores[members[t][j]];
++
++			ETA_Speech_Say(va("%s %d", cgs.clientinfo[sc->client].cleanname, sc->score));
++		}
++	}
++
++	ETA_Speech_EndReport();
++}
++
++/* The scoreboard key was pressed. requested: fresh scores were asked
++   for, so the board is said when they arrive. */
++void CG_AccessibilityScoresPressed(qboolean requested) {
++	if (requested || cg.numScores <= 0) {
++		eta_scoresPending = cg.time | 1;
++		return;
++	}
++	ETA_SpeakScores();
++}
++
++/* Scores arrived. Said a frame later: the server can send the board in
++   two parts in the same frame, and it is whole by the next. */
++void CG_AccessibilityScoresArrived(void) {
++	if (eta_scoresPending && cg.time - eta_scoresPending >= 0 && cg.time - eta_scoresPending < ETA_ANSWER_WAIT_MS) {
++		eta_scoresReady = qtrue;
++	}
++	eta_scoresPending = 0;
++}
++
++/*
++=====================================================================
++Chat
++=====================================================================
++*/
++
++/*
++ * A chat line as it arrives, in the game's words without its colours.
++ * Team chat arrives as "(Hans)(B,3):text", which read aloud is a string
++ * of brackets: it is said "Team, Hans, B,3: text", and fireteam chat,
++ * "<Hans><B,3>: text", as "Fireteam, Hans, B,3: text".
++ */
++void CG_AccessibilityChat(const char *text) {
++	char raw[MAX_SAY_TEXT + 64];
++	char line[MAX_SAY_TEXT + 80];
++	const char *p;
++
++	if (!eta_chatCallouts.integer || !text || !text[0]) {
++		return;
++	}
++
++	Q_strncpyz(raw, text, sizeof(raw));
++	Q_CleanStr(raw);
++
++	line[0] = '\0';
++	p = raw;
++	/* Fireteam chat is the same in angle brackets. */
++	if (*p == '(' || *p == '<') {
++		char open = *p;
++		char shut = open == '(' ? ')' : '>';
++
++		Q_strcat(line, sizeof(line), open == '(' ? "Team" : "Fireteam");
++		while (*p == open) {
++			const char *close = strchr(p, shut);
++			char part[MAX_SAY_TEXT];
++
++			if (!close) {
++				break;
++			}
++			Q_strncpyz(part, p + 1, (int)(close - p) < (int)sizeof(part) ? (int)(close - p) : (int)sizeof(part));
++			if (part[0]) {
++				Q_strcat(line, sizeof(line), ", ");
++				Q_strcat(line, sizeof(line), part);
++			}
++			p = close + 1;
++		}
++		if (*p == ':') {
++			p++;
++		}
++		Q_strcat(line, sizeof(line), ": ");
++		while (*p == ' ') {
++			p++;
++		}
++	}
++	Q_strcat(line, sizeof(line), p);
++
++	if (!line[0]) {
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(line);
++	ETA_Speech_EndReport();
++}
++
++/*
++=====================================================================
++Music under the voice
++=====================================================================
++*/
++
++/* The music level the game asked for, and whether it is ducked. The
++   music is the engine's and the voice is Windows', and neither mixer
++   knows the other, so the narrator was buried by loud music. This is the
++   broadcaster's answer: turn the music down while the voice talks. */
++static float eta_musicBaseline = 1.0f;
++static qboolean eta_musicDucked = qfalse;
++static int eta_musicDuckUntil;
++static int eta_musicDuckSerial;
++
++#define ETA_MUSIC_DUCK_DOWN_MS 150
++#define ETA_MUSIC_DUCK_UP_MS 600
++
++void CG_AccessibilityMusicFade(float level, qboolean restarted) {
++	eta_musicBaseline = level;
++
++	if (restarted) {
++		/* A new stream starts unfaded, so any duck is already gone. */
++		eta_musicDucked = qfalse;
++		return;
++	}
++
++	if (eta_musicDucked) {
++		trap_S_FadeBackgroundTrack(eta_musicBaseline * eta_musicDuck.value, ETA_MUSIC_DUCK_DOWN_MS, 0);
++	}
++}
++
++static void ETA_DuckMusicForSpeech(void) {
++	int serial = ETA_Speech_GetSpokenSerial();
++
++	/* 1 is off, and the default. */
++	if (eta_musicDuck.value >= 1.0f) {
++		if (eta_musicDucked) {
++			trap_S_FadeBackgroundTrack(eta_musicBaseline, ETA_MUSIC_DUCK_UP_MS, 0);
++			eta_musicDucked = qfalse;
++		}
++		eta_musicDuckSerial = serial;
++		return;
++	}
++
++	if (serial != eta_musicDuckSerial) {
++		eta_musicDuckSerial = serial;
++		eta_musicDuckUntil = cg.time + ETA_Speech_EstimateDurationMs(ETA_Speech_GetLastMessage());
++
++		if (!eta_musicDucked) {
++			eta_musicDucked = qtrue;
++			trap_S_FadeBackgroundTrack(eta_musicBaseline * eta_musicDuck.value, ETA_MUSIC_DUCK_DOWN_MS, 0);
++		}
++		return;
++	}
++
++	if (eta_musicDucked && cg.time - eta_musicDuckUntil >= 0) {
++		trap_S_FadeBackgroundTrack(eta_musicBaseline, ETA_MUSIC_DUCK_UP_MS, 0);
++		eta_musicDucked = qfalse;
++	}
++}
++
++/*
++=====================================================================
++Console
++=====================================================================
++*/
++
++/* Said when the console opens or closes: a tester opened it by mistake
++   with the key beside 1, and the game went on without them. */
++static void ETA_NarrateConsole(void) {
++	static qboolean wasOpen;
++	qboolean open = (trap_Key_GetCatcher() & KEYCATCH_CONSOLE) ? qtrue : qfalse;
++
++	if (open == wasOpen) {
++		return;
++	}
++	wasOpen = open;
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(open ? "Console open. The same key closes it" : "Console closed");
++	ETA_Speech_EndReport();
++}
++
++/*
++=====================================================================
++Loading screen
++=====================================================================
++*/
++
++/* The briefing is said as the load begins, the bar at each quarter but
++   never over the briefing, and then that the load is over. */
++static int eta_loadingBriefingUntil;
++static int eta_loadingMilestones;
++static qboolean eta_loadingReadySaid = qtrue;
++
++static void ETA_LoadingSay(const char *text) {
++	ETA_Speech_Say(text);
++	eta_loadingBriefingUntil = trap_Milliseconds() + ETA_Speech_EstimateDurationMs(text);
++}
++
++void CG_AccessibilityLoadingBegin(void) {
++	char text[ETA_MAX_SPEECH_TEXT_LENGTH + 1];
++	char briefing[2048];
++	char name[256];
++	const char *description = "";
++	char *end;
++
++	/* The voice is needed now; starting it twice is harmless. */
++	ETA_AccessibilityRuntime_Init();
++
++	eta_loadingMilestones = 0;
++	eta_loadingReadySaid = qfalse;
++
++	Q_strncpyz(name, cgs.rawmapname, sizeof(name));
++	if (cgs.gametype == GT_WOLF_CAMPAIGN && cgs.campaignInfoLoaded) {
++		Com_sprintf(name, sizeof(name), "%s, map %i of %i", cgs.campaignData.campaignName,
++					cgs.currentCampaignMap + 1, cgs.campaignData.mapCount);
++		description = cgs.campaignData.campaignDescription;
++	} else if (cgs.arenaInfoLoaded) {
++		Q_strncpyz(name, cgs.arenaData.longname, sizeof(name));
++		description = cgs.gametype == GT_WOLF_LMS ? cgs.arenaData.lmsdescription : cgs.arenaData.description;
++	}
++	Q_CleanStr(name);
++
++	CG_AccessibilitySpeakableText(description, briefing, sizeof(briefing));
++	Com_sprintf(text, sizeof(text), "Loading %s. %s. %s", name, CG_LoadPanel_GameTypeName(cgs.gametype), briefing);
++
++	/* Too long for one line: end at the last whole sentence that fits. */
++	if (strlen(text) >= ETA_MAX_SPEECH_TEXT_LENGTH) {
++		text[ETA_MAX_SPEECH_TEXT_LENGTH - 1] = '\0';
++		end = strrchr(text, '.');
++		if (end) {
++			end[1] = '\0';
++		}
++	}
++
++	ETA_LoadingSay(text);
++}
++
++void CG_AccessibilityLoadingProgress(void) {
++	int used, expected, percent, quarter;
++
++	if (eta_loadingReadySaid) {
++		return;
++	}
++
++	trap_GetHunkData(&used, &expected);
++	if (expected <= 0) {
++		/* The first load of a map has nothing to measure against. */
++		return;
++	}
++
++	percent = (int)(100.0f * (float)used / (float)expected);
++	quarter = percent >= 75 ? 3 : percent / 25;
++	if (quarter < 1 || (eta_loadingMilestones & (1 << quarter))) {
++		return;
++	}
++	eta_loadingMilestones |= (1 << quarter);
++
++	if (trap_Milliseconds() < eta_loadingBriefingUntil) {
++		return;
++	}
++
++	ETA_LoadingSay(va("Loading, %i percent", percent > 99 ? 99 : percent));
++}
++
++/* Once the match is up: loaded, and for a spectator how to choose a team. */
++static void ETA_LoadingFrame(void) {
++	int key1 = -1, key2 = -1;
++
++	if (eta_loadingReadySaid || trap_Milliseconds() < eta_loadingBriefingUntil) {
++		return;
++	}
++
++	eta_loadingReadySaid = qtrue;
++
++	if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR) {
++		ETA_Speech_Say("Loaded");
++		return;
++	}
++
++	trap_Key_KeysForBinding("openlimbomenu", &key1, &key2);
++	if (key1 != -1) {
++		char keyName[32];
++
++		trap_Key_KeynumToStringBuf(key1, keyName, sizeof(keyName));
++		Q_strupr(keyName);
++		ETA_Speech_Say(va("Loaded. Press %s to choose your team and class", keyName));
++	} else {
++		ETA_Speech_Say("Loaded. Open the limbo menu to choose your team and class");
++	}
++}
++
++/*
++=====================================================================
++Keys
++=====================================================================
++*/
++
++/* Health alone, reachable without leaving the movement keys. */
++void CG_AccessibilityHealth_f(void) {
++	if (!cg.snap) {
++		return;
++	}
++	ETA_HudNarrator_SpeakHealth(cg.snap->ps.stats[STAT_HEALTH]);
++}
++
++/* Loaded rounds and reserve: with health, whether to keep fighting. */
++void CG_AccessibilityAmmo_f(void) {
++	int ammo, clips, akimbo;
++
++	if (!cg.snap) {
++		return;
++	}
++
++	CG_AccessibilityAmmo(&ammo, &clips, &akimbo);
++	if (ammo >= 0) {
++		ETA_HudNarrator_SpeakAmmoDetail(ammo + (akimbo > 0 ? akimbo : 0), clips);
++	} else {
++		/* Never silence: no count and a broken mod sound the same. */
++		ETA_Speech_Say("This weapon has no ammo count");
++	}
++}
++
++/*
++ * The whole picture, as one line: playing or watching, health, the weapon
++ * and its ammo, the next objective in the map's list, and where the
++ * nearest objective is.
++ */
++void CG_AccessibilityStatus_f(void) {
++	playerState_t *ps;
++	int weap, ammo, clips, akimbo;
++
++	if (!cg.snap) {
++		return;
++	}
++	ps = &cg.snap->ps;
++
++	ETA_Speech_BeginReport();
++	ETA_SpeakPlayStateNow();
++	ETA_HudNarrator_SpeakHealth(ps->stats[STAT_HEALTH]);
++
++	weap = cg.predictedPlayerEntity.currentState.weapon;
++	if (weap > WP_NONE && weap < WP_NUM_WEAPONS) {
++		ETA_HudNarrator_SpeakWeapon(CG_AccessibilityWeaponName((weapon_t)weap));
++		CG_AccessibilityAmmo(&ammo, &clips, &akimbo);
++		if (ammo >= 0) {
++			ETA_HudNarrator_SpeakAmmoDetail(ammo + (akimbo > 0 ? akimbo : 0), clips);
++		}
++	}
++
++	ETA_SpeakObjectiveOrder();
++	ETA_SpeakObjectiveWay();
++	ETA_Speech_EndReport();
++}
++
++/*
++ * The objectives key: the mission in the map's own words, the next
++ * objective in its list, and the way to the nearest. Said as the game's
++ * own objectives panel opens.
++ */
++void CG_AccessibilityObjectives(void) {
++	if (!cg.snap) {
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_SpeakMapDescription();
++	ETA_SpeakObjectiveOrder();
++	ETA_SpeakObjectiveWay();
++	ETA_Speech_EndReport();
++}
++
++/*
++=====================================================================
++Every frame
++=====================================================================
++*/
++
++void CG_AccessibilityFrame(void) {
++	ETA_UpdateSettings();
++	ETA_NarrateConsole();
++	ETA_DuckMusicForSpeech();
++
++	if (!cg.snap) {
++		eta_havePrevious = qfalse;
++		return;
++	}
++
++	ETA_LoadingFrame();
++
++	if (eta_scoresReady) {
++		eta_scoresReady = qfalse;
++		ETA_SpeakScores();
++	}
++
++	ETA_NarratePlayState();
++	ETA_NarrateDeathWords();
++	ETA_NarrateFollowedRevive();
++	ETA_NarrateRespawn();
++	ETA_NarrateObjectiveOrder();
++	ETA_NarrateObjectiveChange();
++
++	if (!(cg.snap->ps.pm_flags & PMF_FOLLOW)) {
++		ETA_NarrateWeaponChange();
++		ETA_NarrateStanceChange();
++		ETA_NarrateZoom();
++		ETA_NarrateLean();
++		ETA_NarrateBuildProgress();
++	}
++
++	/* Last, after anything that compares against the frame before. */
++	ETA_SampleTotals();
++}
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index f18fef5..23f6294 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -1745,3 +1745,160 @@ void CG_CommandMap_DrawHighlightText( void ) {
+ 	CG_Text_Paint_Ext( cg_highlightTextRect.x, cg_highlightTextRect.y, 0.25f, 0.25f, colorWhite, cg_highlightText, 0, 0, ITEM_TEXTSTYLE_SHADOWED, &cgs.media.limboFont2 );
+ 	*cg_highlightText = '\0';
+ }
++
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * [Accessibility]: the objectives on the player's own command map, for
++ * the speech to point at. These are the icons the server sends the team
++ * once a second whether or not the map is open: only that team's, and an
++ * objective drops out once it is done. So "the nearest objective" is the
++ * nearest of exactly what the command map draws - not a guess.
++ *
++ * No Quarter keeps tanks with the players and the other objective icons
++ * in a second list, so both are searched. Each is placed the way
++ * CG_DrawMapEntity places its icon, from the live entity rather than the
++ * map's coarse 128-unit grid.
++ */
++static qboolean ETA_MapObjectiveAt( const mapEntityData_t *mEnt, vec3_t origin, int *oidIndex ) {
++	const centity_t *cent;
++	int j;
++
++	if( mEnt->data < 0 || mEnt->data >= MAX_GENTITIES ) {
++		return qfalse;
++	}
++
++	switch( mEnt->type ) {
++		case ME_CONSTRUCT:
++		case ME_DESTRUCT:
++		case ME_DESTRUCT_2:
++			cent = &cg_entities[mEnt->data];
++			if( !cent->currentValid ) {
++				return qfalse;
++			}
++			*oidIndex = cent->currentState.modelindex2;
++			VectorCopy( cent->lerpOrigin, origin );
++			return qtrue;
++		case ME_TANK:
++		case ME_TANK_DEAD:
++			if( !cg.snap ) {
++				return qfalse;
++			}
++			for( j = 0; j < cg.snap->numEntities; j++ ) {
++				if( cg.snap->entities[j].eType == ET_OID_TRIGGER && cg.snap->entities[j].teamNum == mEnt->data ) {
++					*oidIndex = mEnt->data;
++					VectorCopy( cg_entities[cg.snap->entities[j].number].lerpOrigin, origin );
++					return qtrue;
++				}
++			}
++			return qfalse;
++		case ME_COMMANDMAP_MARKER:
++			if( mEnt->data >= MAX_OID_TRIGGERS ) {
++				return qfalse;
++			}
++			*oidIndex = mEnt->data;
++			VectorCopy( cgs.oidInfo[mEnt->data].origin, origin );
++			return qtrue;
++		default:
++			return qfalse;
++	}
++}
++
++/* Calls each objective on the team's map with its position and its
++   objective info, until the callback says stop. */
++typedef qboolean (*etaObjectiveVisit_t)( const oidInfo_t *oid, const vec3_t origin, void *data );
++
++static void ETA_ForEachMapObjective( team_t team, etaObjectiveVisit_t visit, void *data ) {
++	const mapEntityData_t *lists[2];
++	int counts[2], l, i;
++
++	lists[0] = mapEntities2;
++	counts[0] = mapEntityCount2;
++	lists[1] = mapEntities;
++	counts[1] = mapEntityCount;
++
++	for( l = 0; l < 2; l++ ) {
++		for( i = 0; i < counts[l]; i++ ) {
++			const mapEntityData_t *mEnt = &lists[l][i];
++			vec3_t origin;
++			int oidIndex = -1;
++
++			if( mEnt->team != team || !ETA_MapObjectiveAt( mEnt, origin, &oidIndex )
++				|| oidIndex < 0 || oidIndex >= MAX_OID_TRIGGERS ) {
++				continue;
++			}
++
++			/* A cabinet is somewhere to go, never the objective. */
++			if( cgs.oidInfo[oidIndex].spawnflags & (1 << 5) ) {
++				continue;
++			}
++
++			if( !visit( &cgs.oidInfo[oidIndex], origin, data ) ) {
++				return;
++			}
++		}
++	}
++}
++
++typedef struct {
++	const float		*from;
++	etaObjective_t	*out;
++	int				bestTier;
++	float			bestDistance;
++	qboolean		found;
++	int				entityNum;
++} etaObjectiveSearch_t;
++
++/* A real objective (spawnflag 4, as the HUD picks out primary ones)
++   before a mere construction site, then the nearest. */
++static qboolean ETA_VisitNearest( const oidInfo_t *oid, const vec3_t origin, void *data ) {
++	etaObjectiveSearch_t *s = data;
++	int tier = (oid->spawnflags & (1 << 4)) ? 1 : 0;
++	float distance = Distance( s->from, origin );
++
++	if( s->found && (tier < s->bestTier || (tier == s->bestTier && distance >= s->bestDistance)) ) {
++		return qtrue;
++	}
++
++	s->bestTier = tier;
++	s->bestDistance = distance;
++	s->found = qtrue;
++	s->out->name = oid->name[0] ? oid->name : NULL;
++	s->out->entityNum = oid->entityNum;
++	VectorCopy( origin, s->out->origin );
++	return qtrue;
++}
++
++qboolean CG_AccessibilityNearestObjective( team_t team, const vec3_t from, etaObjective_t *out ) {
++	etaObjectiveSearch_t s;
++
++	memset( &s, 0, sizeof(s) );
++	s.from = from;
++	s.out = out;
++	ETA_ForEachMapObjective( team, ETA_VisitNearest, &s );
++	return s.found;
++}
++
++static qboolean ETA_VisitEntity( const oidInfo_t *oid, const vec3_t origin, void *data ) {
++	etaObjectiveSearch_t *s = data;
++
++	if( oid->entityNum != s->entityNum ) {
++		return qtrue;
++	}
++	s->found = qtrue;
++	s->out->name = oid->name[0] ? oid->name : NULL;
++	s->out->entityNum = oid->entityNum;
++	VectorCopy( origin, s->out->origin );
++	return qfalse;
++}
++
++/* Whether an objective chosen earlier is still on the map, and where. */
++qboolean CG_AccessibilityObjectiveByEntityNum( team_t team, int entityNum, etaObjective_t *out ) {
++	etaObjectiveSearch_t s;
++
++	memset( &s, 0, sizeof(s) );
++	s.out = out;
++	s.entityNum = entityNum;
++	ETA_ForEachMapObjective( team, ETA_VisitEntity, &s );
++	return s.found;
++}
++#endif
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 41b3586..399dcf5 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -225,6 +225,11 @@ void CG_ScoresDown_f( void ) {
+ #endif
+ 			) trap_SendClientCommand( "score" );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		/* Said when the fresh scores arrive. */
++		CG_AccessibilityScoresPressed( qtrue );
++#endif
++
+ 		// leave the current scores up if they were already
+ 		// displayed, but if this is the first hit, clear them out
+ 		if ( !cg.showScores ) {
+@@ -239,6 +244,9 @@ void CG_ScoresDown_f( void ) {
+ 	else {
+ 		// show the cached contents even if they just pressed if it is within two seconds
+ 		cg.showScores = qtrue;
++#ifdef FEATURE_ACCESSIBILITY
++		CG_AccessibilityScoresPressed( qfalse );
++#endif
+ 	}
+ }
+ 
+@@ -1240,6 +1248,10 @@ static const struct {
+ } etaCommands[] = {
+ 	{ "accessibilityRepeat",		CG_AccessibilityRepeat_f },
+ 	{ "accessibilityStopSpeech",	CG_AccessibilityStopSpeech_f },
++	{ "accessibilityStatus",		CG_AccessibilityStatus_f },
++	{ "accessibilityHealth",		CG_AccessibilityHealth_f },
++	{ "accessibilityAmmo",			CG_AccessibilityAmmo_f },
++	{ "accessibilityObjectives",	CG_AccessibilityObjectives },
+ };
+ #endif
+ 
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 81c804e..f6f7fab 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4618,6 +4618,14 @@ static int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo ) {
+ 	return weap;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/* [Accessibility]: the same figures the HUD draws, so what is said and
++   what is shown cannot disagree. */
++int CG_AccessibilityAmmo( int *ammo, int *clips, int *akimboammo ) {
++	return CG_PlayerAmmoValue( ammo, clips, akimboammo );
++}
++#endif
++
+ static void CG_DrawPlayerStatusHead( int offsetX ) {
+ 	hudHeadAnimNumber_t anim;
+ 	rectDef_t		headRect = { 44 + (hud_drawAltHUD.integer ? (cg_drawHUDHead.integer ? offsetX : 0) : 60), (480 - 92), 62, 80 };
+@@ -6102,6 +6110,10 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 	float		separation;
+ 	vec3_t		baseOrg;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	CG_AccessibilityFrame();
++#endif
++
+ 	// optionally draw the info screen instead
+ 	if ( !cg.snap ) {
+ 		CG_DrawInformation( qfalse );
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index 7a6dc99..bb228ef 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -362,6 +362,111 @@ CG_Obituary
+ */
+ extern void C_ResetPlayerPath( int clientNum );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * [Accessibility]: who killed whom, said when it is the player, or the one
++ * the player is watching. A tester kept dying to landmines and never heard
++ * what had killed them. Everyone else's deaths stay in the kill feed: a
++ * match's every death would bury everything else.
++ *
++ * In the game's own words, chosen as CG_Obituary below chooses them, and
++ * before its filters, which only decide what is shown.
++ */
++static void ETA_ObituaryName( int client, char *out, int outSize ) {
++	if( client == cg.clientNum ) {
++		Q_strncpyz( out, "You", outSize );
++		return;
++	}
++	Q_strncpyz( out, cgs.clientinfo[client].name, outSize );
++	Q_CleanStr( out );
++}
++
++/* The game's message made for "You": "were", "yourself", "your own". */
++static void ETA_ObituaryForYou( char *text, int size ) {
++	static const char *const swaps[][2] = {
++		{ "You was ", "You were " }, { "himself", "yourself" }, { "his own", "your own" }, { " his ", " your " }
++	};
++	int i;
++
++	for( i = 0; i < (int)(sizeof(swaps) / sizeof(swaps[0])); i++ ) {
++		char *at = strstr( text, swaps[i][0] );
++
++		if( at ) {
++			char rest[256];
++
++			Q_strncpyz( rest, at + strlen( swaps[i][0] ), sizeof(rest) );
++			*at = '\0';
++			Q_strcat( text, size, swaps[i][1] );
++			Q_strcat( text, size, rest );
++		}
++	}
++}
++
++static void ETA_NarrateObituary( int target, int attacker, int mod, weapon_t weapon, int flags ) {
++	int			viewed = cg.snap ? cg.snap->ps.clientNum : cg.clientNum;
++	const char	*message = NULL, *message2 = NULL;
++	char		targetName[MAX_QPATH], attackerName[MAX_QPATH];
++	char		text[256];
++	qboolean	hasAttacker = (attacker >= 0 && attacker < MAX_CLIENTS) ? qtrue : qfalse;
++
++	if( target != viewed && attacker != viewed ) {
++		return;
++	}
++	if( mod < 0 || mod >= MOD_NUM_MODS || mod == MOD_SWITCHTEAM ) {
++		return;
++	}
++
++	ETA_ObituaryName( target, targetName, sizeof(targetName) );
++
++	if( hasAttacker && attacker == viewed && attacker != target ) {
++		ETA_ObituaryName( attacker, attackerName, sizeof(attackerName) );
++		if( mod == MOD_SWAP_PLACES ) {
++			Com_sprintf( text, sizeof(text), "%s swapped places with %s", attackerName, targetName );
++		} else {
++			Com_sprintf( text, sizeof(text), "%s killed %s%s", attackerName,
++						 cgs.clientinfo[attacker].team == cgs.clientinfo[target].team ? "teammate " : "", targetName );
++		}
++	}
++	else if( !hasAttacker || attacker == target ) {
++		message = hasAttacker ? obituaries_suicide[mod].message : obituaries_singleclient[mod].message;
++		if( message && weapon > WP_NONE && weapon < WP_NUM_WEAPONS && BG_Weapons[weapon].selfKillMessage[0] ) {
++			message = BG_Weapons[weapon].selfKillMessage;
++		}
++		Com_sprintf( text, sizeof(text), "%s %s", targetName, message ? CG_TranslateString( message ) : "died" );
++	}
++	else {
++		message = obituaries_kill[mod].message;
++		message2 = obituaries_kill[mod].message2;
++		if( weapon > WP_NONE && weapon < WP_NUM_WEAPONS && mod != MOD_THROWKNIFE
++			&& message && BG_Weapons[weapon].KillMessage[0] && BG_Weapons[weapon].KillMessage2[0] ) {
++			message = BG_Weapons[weapon].KillMessage;
++			message2 = BG_Weapons[weapon].KillMessage2;
++		}
++		if( flags & OBIT_EXECUTED ) {
++			message = "was executed by";
++			message2 = ".";
++		}
++		ETA_ObituaryName( attacker, attackerName, sizeof(attackerName) );
++		if( message ) {
++			Com_sprintf( text, sizeof(text), "%s %s %s%s", targetName, CG_TranslateString( message ), attackerName,
++						 message2 ? CG_TranslateString( message2 ) : "" );
++		} else {
++			Com_sprintf( text, sizeof(text), "%s was killed by %s", targetName, attackerName );
++		}
++	}
++
++	Q_CleanStr( text );
++
++	if( target == cg.clientNum ) {
++		ETA_ObituaryForYou( text, sizeof(text) );
++		CG_AccessibilityObituary( text, qtrue );
++		return;
++	}
++
++	CG_AccessibilityObituary( text, qfalse );
++}
++#endif
++
+ static void CG_Obituary( entityState_t *ent ) {
+ 	int				mod					= ent->eventParm;
+ 	int				target				= ent->otherEntityNum;
+@@ -407,6 +512,10 @@ static void CG_Obituary( entityState_t *ent ) {
+ 		ca		 = &cgs.clientinfo[attacker];
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NarrateObituary( target, attacker, mod, ent->weapon, ent->dmgFlags );
++#endif
++
+ 	Q_strncpyz( targetName, ci->name, sizeof(targetName) - 2);
+ 	strcat( targetName, S_COLOR_WHITE );
+ 
+@@ -725,6 +834,11 @@ static void CG_ItemPickup( int itemNum ) {
+ 	shader = cgs.media.pmImages[msgType];
+ 	CG_AddPMItem( msgType, va( "Picked up %s", CG_PickupItemText( itemNum ) ), shader, NULL );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Both pickup events come through here, for the local player only. */
++	CG_AccessibilityItemPickup( itemNum );
++#endif
++
+ 	// see if it should be the grabbed weapon
+ 	if ( bg_itemlist[itemNum].giType == IT_WEAPON ) {
+ 
+diff --git a/src/cgame/cg_info.c b/src/cgame/cg_info.c
+index 176e5a6..c7cd955 100644
+--- a/src/cgame/cg_info.c
++++ b/src/cgame/cg_info.c
+@@ -18,6 +18,11 @@ void CG_LoadingString( const char *s ) {
+ 		// [NQ 1.3.1 - Security]: Direct print without va() format vulnerability
+ 		CG_Printf("LOADING... %s\n", s);	//----(SA)	added so you can see from the console what's going on
+ 	}
++
++#ifdef FEATURE_ACCESSIBILITY
++	/* How far the bar under this has got. */
++	CG_AccessibilityLoadingProgress();
++#endif
+ }
+ 
+ /*
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 197b01c..59e569a 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3511,6 +3511,40 @@ void CG_LimboPanel_NameEditFinish( panel_button_t* button );
+ void CG_LimboPanel_Setup( void );
+ #ifdef FEATURE_ACCESSIBILITY
+ void CG_AccessibilityLimboOpened( void );
++
++// [Accessibility]: the match said aloud, cg_accessibility.c
++typedef struct {
++	const char	*name;		// the objective's short name, or NULL
++	int			entityNum;
++	vec3_t		origin;
++} etaObjective_t;
++
++void CG_AccessibilityInit( void );
++void CG_AccessibilityShutdown( void );
++void CG_AccessibilityFrame( void );
++const char *CG_AccessibilityWeaponName( weapon_t weap );
++void CG_AccessibilitySpeakableText( const char *in, char *out, size_t outSize );
++void CG_AccessibilityObituary( const char *text, qboolean ownDeath );
++void CG_AccessibilityItemPickup( int itemNum );
++void CG_AccessibilityDamage( float yaw );
++void CG_AccessibilityPain( int health );
++void CG_AccessibilityScoresPressed( qboolean requested );
++void CG_AccessibilityScoresArrived( void );
++void CG_AccessibilityChat( const char *text );
++void CG_AccessibilityMusicFade( float level, qboolean restarted );
++void CG_AccessibilityLoadingBegin( void );
++void CG_AccessibilityLoadingProgress( void );
++void CG_AccessibilityHealth_f( void );
++void CG_AccessibilityAmmo_f( void );
++void CG_AccessibilityStatus_f( void );
++void CG_AccessibilityObjectives( void );
++// cg_draw.c: the HUD's own ammo figures for the weapon in hand
++int CG_AccessibilityAmmo( int *ammo, int *clips, int *akimboammo );
++// cg_commandmap.c: the objectives on the team's command map
++qboolean CG_AccessibilityNearestObjective( team_t team, const vec3_t from, etaObjective_t *out );
++qboolean CG_AccessibilityObjectiveByEntityNum( team_t team, int entityNum, etaObjective_t *out );
++// cg_loadpanel.c
++const char* CG_LoadPanel_GameTypeName( gametype_t gt );
+ #endif
+ void CG_LimboPanel_Init( void );
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index a4af48d..8369b2f 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -3053,6 +3053,11 @@ void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum, qb
+ 		CG_LocateArena();
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* The loading screen's words, now the map's name and briefing are known. */
++	CG_AccessibilityLoadingBegin();
++#endif
++
+ 	CG_ClearTrails();
+ 	// CG_ClearParticles(); IRATA: was done twice - see CG_RegisterGraphics() (about 20 lines later of this function)
+ 	// InitSmokeSprites(); IRATA: was done twice - see CG_RegisterGraphics() (about 20 lines later of this function)
+@@ -3235,6 +3240,10 @@ void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum, qb
+ 	cgs.csMethod_refresh = 1;
+ 	cgs.csMethod_request = 0;
+ 	cgs.csMethod_requesting = 0;
++
++#ifdef FEATURE_ACCESSIBILITY
++	CG_AccessibilityInit();
++#endif
+ }
+ 
+ /*
+@@ -3260,7 +3269,7 @@ void CG_Shutdown( void ) {
+ 	CG_RestoreProfile();
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+-	ETA_AccessibilityRuntime_Shutdown();
++	CG_AccessibilityShutdown();
+ #endif
+ }
+ 
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 1bff603..acb2d50 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -93,6 +93,13 @@ void CG_DamageFeedback( int yawByte, int pitchByte, int damage ) {
+ 
+ 		cg.v_dmg_pitch = -kick * front;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		/* [Accessibility]: a sound from where the hit came from: front and
++		   left are the hit's direction in the view, so this is 0 ahead and
++		   90 to the right, as the damage indicator draws it. */
++		CG_AccessibilityDamage( RAD2DEG( atan2( -left, front ) ) );
++#endif
++
+ 		if ( front <= 0.1 ) {
+ 			front = 0.1;
+ 		}
+@@ -316,6 +323,11 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
+ 			CG_PainEvent( &cg.predictedPlayerEntity, ps->stats[STAT_HEALTH], qfalse );
+ 
+ 			cg.painTime = cg.time;
++
++#ifdef FEATURE_ACCESSIBILITY
++			/* The same moment as the pain sound, while health is critical. */
++			CG_AccessibilityPain( ps->stats[STAT_HEALTH] );
++#endif
+ 		}
+ 	}
+ 
+diff --git a/src/cgame/cg_servercmds.c b/src/cgame/cg_servercmds.c
+index 14c45eb..faa2edc 100644
+--- a/src/cgame/cg_servercmds.c
++++ b/src/cgame/cg_servercmds.c
+@@ -1153,6 +1153,12 @@ static void CG_AddToTeamChat( const char *str, int clientnum, qboolean disguise
+ 	int		chatHeight;
+ 	int		textwidth;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Every chat line on screen comes through here: said, voice and team
++	   chat alike. */
++	CG_AccessibilityChat( str );
++#endif
++
+ 	// core: make the chat text fit over as much available width as possible,
+ 	// so texts are less often wrapped over multiple lines..
+ 	if (cgs.clientinfo[ clientnum ].team == TEAM_SPECTATOR) {
+@@ -2703,6 +2709,9 @@ static void CG_ServerCommand( void ) {
+ 
+ 		case SC0_HASH:
+ 			CG_ParseScore(TEAM_AXIS);
++#ifdef FEATURE_ACCESSIBILITY
++			CG_AccessibilityScoresArrived();
++#endif
+ 			return;
+ 
+ 		case SC1_HASH:
+@@ -3139,6 +3148,10 @@ static void CG_ServerCommand( void ) {
+ 				}
+ 
+ 				trap_S_StartBackgroundTrack( CG_Argv(1), CG_Argv(1), fadeTime );
++#ifdef FEATURE_ACCESSIBILITY
++				/* A new stream starts unfaded, cancelling any duck. */
++				CG_AccessibilityMusicFade( 1.0f, qtrue );
++#endif
+ 			}
+ 			return;
+ 
+@@ -3153,6 +3166,9 @@ static void CG_ServerCommand( void ) {
+ 				}
+ 
+ 				trap_S_StartBackgroundTrack( CG_Argv(1), "onetimeonly", fadeTime );
++#ifdef FEATURE_ACCESSIBILITY
++				CG_AccessibilityMusicFade( 1.0f, qtrue );
++#endif
+ 			}
+ 			return;
+ 
+@@ -3168,11 +3184,18 @@ static void CG_ServerCommand( void ) {
+ 
+ 				trap_S_FadeBackgroundTrack(0.0f, fadeTime, 0);
+ 				trap_S_StartBackgroundTrack( "", "", -2);	// '-2' for 'queue looping track' (QUEUED_PLAY_LOOPED)
++#ifdef FEATURE_ACCESSIBILITY
++				CG_AccessibilityMusicFade( 0.0f, qtrue );
++#endif
+ 			}
+ 			return;
+ 
+ 		case MU_FADE_HASH:
+ 			trap_S_FadeBackgroundTrack(atof(CG_Argv(1)), atoi(CG_Argv(2)), 0 );
++#ifdef FEATURE_ACCESSIBILITY
++			/* The level the map wants: the duck is a share of it. */
++			CG_AccessibilityMusicFade( atof(CG_Argv(1)), qfalse );
++#endif
+ 			return;
+ 
+ 		case SND_FADE_HASH:
+diff --git a/src/ui/ui_loadpanel.c b/src/ui/ui_loadpanel.c
+index e508e68..4b038ed 100644
+--- a/src/ui/ui_loadpanel.c
++++ b/src/ui/ui_loadpanel.c
+@@ -477,6 +477,83 @@ const char *UI_DownloadInfo( const char *downloadName ) {
+     return "";
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "speech/speech_manager.h"
++
++/*
++ * [Accessibility]: the connection screen, said as it changes. Before the
++ * map loads the screen says who the game is connecting to and what it is
++ * waiting for, with a bar when a file is being downloaded; silent, that
++ * stretch sounds like the game has hung. Each new state is said once,
++ * not the packet counter beside it, a download at each quarter, and the
++ * server's own message, such as a refusal, when it changes.
++ */
++static void ETA_UiNarrateConnect( const uiClientState_t *cstate, const char *downloadName ) {
++	static int lastState = -1;
++	static char lastDownload[MAX_QPATH];
++	static char lastMessage[MAX_STRING_CHARS];
++	static int lastQuarter;
++	char text[MAX_STRING_CHARS];
++
++	if( cstate->connState != lastState ) {
++		lastState = cstate->connState;
++
++		switch( cstate->connState ) {
++			case CA_CONNECTING:
++				Q_strncpyz( text, va( "Connecting to %s", cstate->servername ), sizeof(text) );
++				Q_CleanStr( text );
++				ETA_Speech_Say( text );
++				break;
++			case CA_CHALLENGING:
++				ETA_Speech_Say( "Awaiting challenge" );
++				break;
++			case CA_CONNECTED:
++				if( !*downloadName ) {
++					ETA_Speech_Say( "Connected. Awaiting game state" );
++				}
++				break;
++			default:
++				/* Loading is the map's to say. */
++				break;
++		}
++	}
++
++	if( *downloadName ) {
++		int count = (int)trap_Cvar_VariableValue( "cl_downloadCount" );
++		int size = (int)trap_Cvar_VariableValue( "cl_downloadSize" );
++
++		if( Q_stricmp( downloadName, lastDownload ) ) {
++			Q_strncpyz( lastDownload, downloadName, sizeof(lastDownload) );
++			lastQuarter = 0;
++			ETA_Speech_Say( va( "Downloading %s", COM_SkipPath( (char *)downloadName ) ) );
++		}
++		else if( size > 0 ) {
++			int quarter = (4 * (count / 1024)) / ((size / 1024) > 0 ? (size / 1024) : 1);
++
++			if( quarter > 3 ) {
++				quarter = 3;
++			}
++			if( quarter > lastQuarter ) {
++				lastQuarter = quarter;
++				ETA_Speech_Say( va( "Downloading, %i percent", quarter * 25 ) );
++			}
++		}
++	}
++	else {
++		lastDownload[0] = '\0';
++	}
++
++	if( cstate->connState < CA_CONNECTED && Q_stricmp( cstate->messageString, lastMessage ) ) {
++		Q_strncpyz( lastMessage, cstate->messageString, sizeof(lastMessage) );
++		if( lastMessage[0] ) {
++			Q_strncpyz( text, lastMessage, sizeof(text) );
++			Q_CleanStr( text );
++			ETA_Speech_Say( text );
++		}
++	}
++}
++#endif
++
+ void UI_LoadPanel_RenderLoadingText( panel_button_t* button )
+ {
+ 	uiClientState_t	cstate;
+@@ -502,6 +579,10 @@ void UI_LoadPanel_RenderLoadingText( panel_button_t* button )
+ 
+ 	trap_Cvar_VariableStringBuffer( "cl_downloadName", downloadName, sizeof(downloadName) );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_UiNarrateConnect( &cstate, downloadName );
++#endif
++
+ 	if ( lastConnState > cstate.connState ) {
+ 		lastLoadingText[0] = '\0';
+ 	}
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index d5bc4c7..98fed97 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -7923,18 +7923,36 @@ static void UI_AccessibilityConsoleFrame( void ) {
+  * so a key deliberately unbound does not come back - while rows added
+  * by a later version, with a newer generation, still are offered.
+  *
+- * F6 and F8 are free in the stock default.cfg, which binds F1 to F4, F7
+- * and F11 and F12. The match's own keys join this table as the mod's
+- * match speech comes to No Quarter.
++ * F5, F6 and F8 are free in the stock default.cfg, which binds F1 to F4,
++ * F7 and F11 and F12; so are the keypad slash and O.
++ *
++ * The one exception to "leave it alone" is 9 and 0. The stock config
++ * puts "weaponbank 9" and "weaponbank 10" on them, and in No Quarter, as
++ * in the original game, neither does anything: bank 9 is empty and there
++ * is no bank 10. A key that does nothing is worth more to a blind player
++ * as health and ammo, and only those exact commands are replaced.
+  */
+ void UI_AccessibilityInstallBinds( void ) {
+ 	static const struct {
+ 		int			key;
+ 		const char	*command;
++		const char	*replaces;
+ 		int			generation;
+ 	} binds[] = {
+-		{ K_F6, "accessibilityRepeat",     1 },
+-		{ K_F8, "accessibilityStopSpeech", 1 },
++		{ K_F6,			"accessibilityRepeat",		NULL,				1 },
++		{ K_F8,			"accessibilityStopSpeech",	NULL,				1 },
++		/* The match: the whole picture, then health and ammo alone,
++		   under the movement hand. */
++		{ K_F5,			"accessibilityStatus",		NULL,				2 },
++		{ '9',			"accessibilityHealth",		"weaponbank 9",		2 },
++		{ '0',			"accessibilityAmmo",		"weaponbank 10",	2 },
++		/* What the map asks of your side. O is the objectives key in
++		   the accessibility mode for ET: Legacy too. */
++		{ 'o',			"accessibilityObjectives",	NULL,				2 },
++		/* Not speech: the scope, a set mortar and the satchel detonator
++		   are on weapalt, which the stock config puts on the right mouse
++		   button and nothing else. */
++		{ K_KP_SLASH,	"weapalt",					NULL,				2 },
+ 	};
+ 
+ 	vmCvar_t installed;
+@@ -7957,7 +7975,8 @@ void UI_AccessibilityInstallBinds( void ) {
+ 		current[0] = '\0';
+ 		trap_Key_GetBindingBuf( binds[i].key, current, sizeof( current ) );
+ 
+-		if( current[0] == '\0' ) {
++		if( current[0] == '\0'
++			|| (binds[i].replaces && !Q_stricmp( current, binds[i].replaces )) ) {
+ 			trap_Key_SetBinding( binds[i].key, binds[i].command );
+ 		}
+ 	}

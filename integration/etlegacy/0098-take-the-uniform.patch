@@ -1,0 +1,284 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index a0051ea..03c296c 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1818,6 +1818,7 @@ static void ETA_TurnStopStep(qboolean arrived)
+ #define ETA_AIM_AUTO_METERS 40.0f
+ #define ETA_USE_KEY         "994"
+ #define ETA_USE_REACH_METERS 2.5f
++#define ETA_UNIFORM_HOLD_MS  4000
+ 
+ typedef enum
+ {
+@@ -1852,6 +1853,10 @@ static struct
+ 	qboolean pending;   /* use it on arriving */
+ 	qboolean held;      /* the player's key is still down */
+ 	int      releaseAt;
++	qboolean uniform;   /* what is pressed at on arrival is an enemy body */
++	int      body;      /* the body whose uniform is being taken */
++	int      bodyUntil; /* held on it until then: 0, not taking one */
++	qboolean disguised; /* in disguise already when it began */
+ } eta_use;
+ 
+ static void ETA_UseKey(qboolean down)
+@@ -1864,6 +1869,76 @@ static void ETA_UseKey(qboolean down)
+ 	trap_SendConsoleCommand(va("%sactivate %s\n", down ? "+" : "-", ETA_USE_KEY));
+ 	eta_use.pressed   = down;
+ 	eta_use.releaseAt = 0;
++	if (!down)
++	{
++		eta_use.bodyUntil = 0;
++	}
++}
++
++/**
++ * @brief Taking an enemy's uniform: use held on the body until it is on.
++ *
++ * The game takes a uniform only for use held on the body for two and a
++ * half seconds; F pressed at it and let go a moment later, so a blind
++ * covert op never got one. So on arriving at a body F holds use for the
++ * player, until the uniform is taken, the body is gone, or
++ * ETA_UNIFORM_HOLD_MS have passed - and says which.
++ */
++static void ETA_UniformStart(int body)
++{
++	ETA_UseKey(qtrue);
++	eta_use.releaseAt = 0;
++	eta_use.body      = body;
++	eta_use.bodyUntil = cg.time + ETA_UNIFORM_HOLD_MS;
++	eta_use.disguised = (qboolean)(cg.predictedPlayerState.powerups[PW_OPS_DISGUISED] != 0);
++	ETA_Speech_Say("Taking the uniform");
++}
++
++static void ETA_UniformEnd(const char *text)
++{
++	ETA_UseKey(qfalse);
++	eta_use.bodyUntil = 0;
++	ETA_Speech_Say(text);
++}
++
++static void ETA_UniformFrame(void)
++{
++	const centity_t *cent;
++
++	if (!eta_use.bodyUntil)
++	{
++		return;
++	}
++
++	cent = (eta_use.body >= 0 && eta_use.body < MAX_GENTITIES) ? &cg_entities[eta_use.body] : NULL;
++
++	/* Taken: the body's uniform is marked gone - or, with two bodies
++	   close together, the player is in disguise who was not. */
++	if ((cent && cent->currentValid && cent->currentState.eType == ET_CORPSE && cent->currentState.time2 == 1)
++	    || (!eta_use.disguised && cg.predictedPlayerState.powerups[PW_OPS_DISGUISED]))
++	{
++		ETA_UniformEnd("Uniform taken, you are in disguise");
++		return;
++	}
++
++	/* The player down themselves: nothing to say about the uniform. */
++	if (cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		ETA_UseKey(qfalse);
++		eta_use.bodyUntil = 0;
++		return;
++	}
++
++	if (!cent || !cent->currentValid || cent->currentState.eType != ET_CORPSE)
++	{
++		ETA_UniformEnd("The body is gone");
++		return;
++	}
++
++	if (cg.time >= eta_use.bodyUntil || eta_use.bodyUntil - cg.time > ETA_UNIFORM_HOLD_MS)
++	{
++		ETA_UniformEnd("No uniform taken. Walk right up to the body and press F again");
++	}
+ }
+ 
+ static void ETA_AimKeys(int yaw, int pitch)
+@@ -2414,6 +2489,12 @@ static void CG_AccessibilityActivateDown_f(void)
+ 
+ 	eta_use.held = qtrue;
+ 
++	/* Taking a uniform: F again leaves it to finish. */
++	if (eta_use.bodyUntil)
++	{
++		return;
++	}
++
+ 	/* The game's ladder icon is not something the use key does anything
+ 	   with, so it is not a hint here: the key climbs the ladder. */
+ 	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintIcon != HINT_LADDER
+@@ -2448,6 +2529,7 @@ static void CG_AccessibilityActivateDown_f(void)
+ 				ETA_AimStartSnap(&list[index], list[index].name);
+ 				eta_use.pending = (qboolean)(!list[index].ladder && !list[index].locked
+ 				                             && list[index].meters <= ETA_USE_REACH_METERS);
++				eta_use.uniform = list[index].uniform;
+ 			}
+ 			eta_aim.cycleIndex = index;
+ 			eta_aim.cycleAt    = cg.time;
+@@ -2477,6 +2559,23 @@ static void CG_AccessibilityActivateDown_f(void)
+ 		}
+ 	}
+ 
++	/* The crosshair already on an enemy body: its uniform is taken, the
++	   key held for the player, whether F is held or tapped. */
++	if (hint && cg.cursorHintIcon == HINT_UNIFORM && cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL)
++	{
++		int j;
++
++		count = CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS);
++		for (j = 0; j < count; j++)
++		{
++			if (list[j].uniform)
++			{
++				ETA_UniformStart(list[j].entityNum);
++				return;
++			}
++		}
++	}
++
+ 	if (hint || count <= 0)
+ 	{
+ 		ETA_UseKey(qtrue);
+@@ -2532,6 +2631,7 @@ static void CG_AccessibilityActivateDown_f(void)
+ 	{
+ 		ETA_AimStartSnap(&list[index], list[index].name);
+ 		eta_use.pending = (qboolean)!list[index].locked;
++		eta_use.uniform = list[index].uniform;
+ 		return;
+ 	}
+ 
+@@ -2544,8 +2644,9 @@ static void CG_AccessibilityActivateUp_f(void)
+ 	eta_use.held = qfalse;
+ 
+ 	/* Pressed for the player: let go with them, unless it is still to be
+-	   pressed on arrival, which lets go by itself a moment later. */
+-	if (eta_use.pressed && !eta_use.pending)
++	   pressed on arrival, which lets go by itself a moment later, or a
++	   uniform is being taken. */
++	if (eta_use.pressed && !eta_use.pending && !eta_use.bodyUntil)
+ 	{
+ 		ETA_UseKey(qfalse);
+ 	}
+@@ -2795,6 +2896,8 @@ void CG_AccessibilityAimFrame(void)
+ 		return;
+ 	}
+ 
++	ETA_UniformFrame();
++
+ 	/* A use pressed on arrival lets go a moment later, if the player's
+ 	   own key already has. */
+ 	if (eta_use.pressed && !eta_use.held && eta_use.releaseAt
+@@ -2841,11 +2944,16 @@ void CG_AccessibilityAimFrame(void)
+ 
+ 		if (ETA_AimSteer(eta_aim.point, 2.0f) || cg.time - eta_aim.started > ETA_AIM_SNAP_MS)
+ 		{
+-			qboolean use = eta_use.pending;
++			qboolean use  = eta_use.pending;
++			int      body = eta_aim.entityNum;
+ 
+ 			ETA_AimStop();
+ 
+-			if (use)
++			if (use && eta_use.uniform)
++			{
++				ETA_UniformStart(body);
++			}
++			else if (use)
+ 			{
+ 				ETA_UseKey(qtrue);
+ 				if (!eta_use.held)
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 94a66a7..9091e9a 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4720,7 +4720,8 @@ static int ETA_StairsNear(const vec3_t origin, etaAimTarget_t *out, int max)
+  * things the game draws a use icon for: a door, a health or ammo
+  * cabinet, a mounted gun, something on the ground, a wounded teammate,
+  * for an engineer dynamite to arm or defuse, and for a covert op an
+- * enemy body with its uniform on. Everything but
++ * enemy body with its uniform on, or an enemy down who will leave one.
++ * Everything but
+  * an objective must be in sight; an objective's own marker sits where
+  * the engine puts it, often inside what it marks.
+  */
+@@ -4818,12 +4819,31 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 			break;
+ 		case ET_PLAYER:
+ 			if (!(es->eFlags & EF_DEAD) || es->clientNum < 0 || es->clientNum >= MAX_CLIENTS
+-			    || es->clientNum == ps->clientNum || ETA_SeenAsEnemy(es->clientNum))
++			    || es->clientNum == ps->clientNum)
+ 			{
+ 				continue;
+ 			}
+-			Q_strncpyz(target.name, va("Wounded %s", cgs.clientinfo[es->clientNum].name),
+-			           sizeof(target.name));
++			if (ETA_SeenAsEnemy(es->clientNum))
++			{
++				/* The tester, a covert op, killed an enemy and found no
++				   uniform to take: an enemy lying wounded is still a
++				   player, and the game leaves a body with a uniform only
++				   once they give up waiting for a medic - shot again they
++				   are gone, uniform and all. So to a covert op they are
++				   listed and said as that, and never pressed at. */
++				if (!covert)
++				{
++					continue;
++				}
++				Q_strncpyz(target.name, "Enemy down, uniform once they give up, don't shoot",
++				           sizeof(target.name));
++				target.locked = qtrue;
++			}
++			else
++			{
++				Q_strncpyz(target.name, va("Wounded %s", cgs.clientinfo[es->clientNum].name),
++				           sizeof(target.name));
++			}
+ 			target.point[2] -= 16.0f;
+ 			break;
+ 		case ET_MISSILE:
+@@ -4850,9 +4870,25 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 			{
+ 				continue;
+ 			}
++		{
++			vec3_t belt;
++
++			/* The server keeps a body's box round its belt, which on a
++			   body lying stretched out is well away from where it stood
++			   - aimed at that, use found nothing. The belt is where the
++			   body is drawn; a stale drawing is let go by the distance. */
+ 			Q_strncpyz(target.name, "Enemy body with a uniform", sizeof(target.name));
++			if (cent->pe.bodyRefEnt.hModel
++			    && CG_GetOriginForTag((centity_t *)cent, (refEntity_t *)&cent->pe.bodyRefEnt, "tag_ubelt", 0, belt, NULL) >= 0
++			    && fabs(belt[0] - cent->lerpOrigin[0]) < 64.0f && fabs(belt[1] - cent->lerpOrigin[1]) < 64.0f)
++			{
++				target.point[0] = belt[0];
++				target.point[1] = belt[1];
++			}
+ 			target.point[2] -= 16.0f;
++			target.uniform   = qtrue;
+ 			break;
++		}
+ 		default:
+ 			continue;
+ 		}
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 441becb..47685be 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3495,9 +3495,10 @@ typedef struct
+ 	float  meters;
+ 	char   name[64];
+ 	qboolean ladder;    ///< one of the map's ladders: F turns to it, and climbs it there
+-	qboolean locked;    ///< a door this player cannot open: said, never pressed at
++	qboolean locked;    ///< nothing to press: a door this player cannot open, an enemy not yet a body; said, never pressed at
+ 	qboolean stairs;    ///< a flight of stairs: F turns to its foot, and there up or down it
+ 	vec3_t   along;     ///< stairs: a point up or down the flight from its foot, at eye height
++	qboolean uniform;   ///< an enemy body: use is held until its uniform is taken
+ } etaAimTarget_t;
+ 
+ int      CG_AccessibilityUseTargets(etaAimTarget_t *list, int max);

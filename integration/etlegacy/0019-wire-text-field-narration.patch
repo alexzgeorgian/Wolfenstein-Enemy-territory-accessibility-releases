@@ -1,0 +1,407 @@
+diff --git a/src/ui/ui_menu.c b/src/ui/ui_menu.c
+index d243150..63d47d4 100644
+--- a/src/ui/ui_menu.c
++++ b/src/ui/ui_menu.c
+@@ -1241,12 +1241,42 @@ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down)
+ 		}
+ 		else
+ 		{
++#ifdef FEATURE_ACCESSIBILITY
++			/* Every key that reaches a text box comes through this one
++			   call, so the field's state is taken here before the engine
++			   sees the key and compared with what it left behind. What is
++			   spoken is then the change the engine actually made, not a
++			   reading of the keycode - a key it rejects says nothing. */
++			char eta_before[ETA_MAX_MENU_TEXT_LENGTH];
++			int  eta_beforeCursor = g_editItem->cursorPos;
++			int  eta_narrate      = TEXTFIELD(g_editItem->type);
++
++			eta_before[0] = '\0';
++
++			if (eta_narrate && g_editItem->cvar)
++			{
++				DC->getCVarString(EDITFIELD_TEMP_CVAR, eta_before, sizeof(eta_before));
++			}
++#endif
++
+ 			if (!Item_TextField_HandleKey(g_editItem, key))
+ 			{
+ 				Item_HandleTextFieldDeSelect(g_editItem);
+ 				return;
+ 			}
+-			else if (key == K_MOUSE1 || key == K_MOUSE2 || key == K_MOUSE3)
++
++#ifdef FEATURE_ACCESSIBILITY
++			if (eta_narrate)
++			{
++				ETA_MenuItem_NarrateTextFieldKey(g_editItem, eta_before, eta_beforeCursor);
++			}
++#endif
++
++			/* Was `else if` on the branch above, which returns either way;
++			   the narration hook has to sit between the two, so the chain
++			   is split here rather than the hook moved somewhere it would
++			   miss keys. */
++			if (key == K_MOUSE1 || key == K_MOUSE2 || key == K_MOUSE3)
+ 			{
+ 				Item_HandleTextFieldDeSelect(g_editItem);
+ 				Display_MouseMove(NULL, DC->cursorx, DC->cursory);
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 5ca7b07..0541cdd 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -37,6 +37,7 @@
+ #include "ui_local.h"
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++#include "core/runtime_guard.h"
+ #include "menu/menu_narrator.h"
+ #endif
+ 
+@@ -62,6 +63,305 @@ static qboolean Item_IsPasswordField(const itemDef_t *item)
+ 	return qfalse;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++
++/**
++ * @brief The name to speak for one character, for the few where the
++ * character itself says nothing useful out loud.
++ *
++ * A space spoken as " " is silence, which is indistinguishable from the
++ * key not having registered. The rest are the ones a server address or a
++ * player name is actually made of.
++ * @param[in] c
++ * @return the spoken name, or NULL to speak the character as it is.
++ */
++static const char *ETA_SpokenPunctuation(char c)
++{
++	switch (c)
++	{
++	case ' ':  return "space";
++	case '.':  return "dot";
++	case '-':  return "dash";
++	case '_':  return "underscore";
++	case ':':  return "colon";
++	case '/':  return "slash";
++	case '\\': return "backslash";
++	case '@':  return "at";
++	default:   return NULL;
++	}
++}
++
++/**
++ * @brief Copies one character out of a UTF-8 string by character index.
++ * @param[in]  text
++ * @param[in]  index
++ * @param[out] out
++ * @param[in]  size
++ * @return qtrue when a character was written.
++ */
++static qboolean ETA_CharacterAt(const char *text, int index, char *out, size_t size)
++{
++	int from, to, len;
++
++	out[0] = '\0';
++
++	if (!text || index < 0 || index >= (int)Q_UTF8_Strlen(text))
++	{
++		return qfalse;
++	}
++
++	from = Q_UTF8_ByteOffset(text, index);
++	to   = Q_UTF8_ByteOffset(text, index + 1);
++	len  = to - from;
++
++	if (len <= 0 || (size_t)len >= size)
++	{
++		return qfalse;
++	}
++
++	if (len == 1)
++	{
++		const char *named = ETA_SpokenPunctuation(text[from]);
++
++		if (named)
++		{
++			Q_strncpyz(out, named, size);
++			return qtrue;
++		}
++	}
++
++	Com_Memcpy(out, &text[from], len);
++	out[len] = '\0';
++	return qtrue;
++}
++
++/**
++ * @brief The text a field is holding right now.
++ *
++ * Deliberately not `item->cvar`. While a field is being edited the engine
++ * works on a scratch cvar (EDITFIELD_TEMP_CVAR) and only writes back to
++ * the real one when the field is left, so reading item->cvar mid-edit
++ * returns what the field held before the player started typing - which is
++ * exactly the wrong answer for speech.
++ * @param[in]  item
++ * @param[out] out
++ * @param[in]  size
++ */
++static void ETA_TextFieldValue(itemDef_t *item, char *out, size_t size)
++{
++	char raw[1024];
++
++	out[0] = '\0';
++
++	if (!item || !item->cvar)
++	{
++		return;
++	}
++
++	Com_Memset(raw, 0, sizeof(raw));
++
++	if (item == g_editItem)
++	{
++		DC->getCVarString(EDITFIELD_TEMP_CVAR, raw, sizeof(raw));
++	}
++	else
++	{
++		DC->getCVarString(item->cvar, raw, sizeof(raw));
++	}
++
++	/* A password is spoken as its length and never its content. The panel
++	   draws it masked on purpose, and speech that read it out would say
++	   aloud, in a room, exactly what the screen is hiding. */
++	if (Item_IsPasswordField(item))
++	{
++		int len = (int)Q_UTF8_Strlen(raw);
++
++		Com_sprintf(out, size, len == 1 ? "%i character" : "%i characters", len);
++		return;
++	}
++
++	Q_strncpyz(out, raw, size);
++}
++
++/**
++ * @brief What a menu item says when focus lands on it.
++ *
++ * Everything but a text box speaks its label, which is what the label is
++ * for. A text box's label alone is useless: "Player name" does not say
++ * what the name currently is, and there is no other way to find out
++ * without sight.
++ * @param[in] item
++ * @return
++ */
++/* The last thing said about a text box, so the two paths that can announce
++   one do not both say it. Arrowing onto a field narrates through
++   Item_SetFocus; becoming the edit target narrates through
++   Item_HandleTextFieldSelect; tabbing between fields fires only the
++   second, and arriving from elsewhere fires both. */
++static char eta_lastFieldText[ETA_MAX_MENU_TEXT_LENGTH + 1];
++
++const char *ETA_MenuItem_FocusText(itemDef_t *item)
++{
++	static char text[ETA_MAX_MENU_TEXT_LENGTH + 1];
++	char        value[ETA_MAX_MENU_TEXT_LENGTH];
++
++	if (!item)
++	{
++		return NULL;
++	}
++
++	if (!TEXTFIELD(item->type))
++	{
++		eta_lastFieldText[0] = '\0';
++		return item->text;
++	}
++
++	ETA_TextFieldValue(item, value, sizeof(value));
++
++	Com_sprintf(text, sizeof(text), "%s, %s, %s",
++	            item->text ? item->text : "Text box",
++	            item->type == ITEM_TYPE_NUMERICFIELD ? "number box" : "edit box",
++	            value[0] ? value : "empty");
++
++	/* Recorded here because this is the one place both paths pass through:
++	   whoever speaks next can tell it would be repeating itself. */
++	Q_strncpyz(eta_lastFieldText, text, sizeof(eta_lastFieldText));
++	return text;
++}
++
++/**
++ * @brief Speaks what one keypress did to a text box.
++ *
++ * Called after the engine has handled the key, with what the field held
++ * before it, so what is spoken is the difference the engine actually made
++ * rather than a guess at what the key should have done. A key the engine
++ * ignored - a letter in a number box, a character past the field's limit -
++ * therefore says nothing, which is the honest answer.
++ * @param[in] item
++ * @param[in] before
++ * @param[in] beforeCursor
++ */
++void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int beforeCursor)
++{
++	char after[ETA_MAX_MENU_TEXT_LENGTH];
++	char spoken[64];
++	int  beforeLen, afterLen;
++
++	if (!item || !TEXTFIELD(item->type) || !before)
++	{
++		return;
++	}
++
++	ETA_TextFieldValue(item, after, sizeof(after));
++
++	beforeLen = (int)Q_UTF8_Strlen(before);
++	afterLen  = (int)Q_UTF8_Strlen(after);
++
++	if (!strcmp(before, after))
++	{
++		/* Nothing changed, so this was either the cursor moving or a key the
++		   engine refused - a letter typed into a number box, a character
++		   past the field's limit. A refused key saying nothing is the honest
++		   answer; a cursor move is read out, because stepping through a
++		   field character by character is how it gets checked without
++		   sight. */
++		if (item->cursorPos == beforeCursor || Item_IsPasswordField(item))
++		{
++			return;
++		}
++
++		if (ETA_CharacterAt(after, item->cursorPos, spoken, sizeof(spoken)))
++		{
++			ETA_MenuNarrator_OnValueChanged(item->text, spoken);
++		}
++		else
++		{
++			ETA_MenuNarrator_OnValueChanged(item->text, "end");
++		}
++
++		/* The cursor moved but the text did not, so what was last announced
++		   about this field still stands. */
++		return;
++	}
++
++	/* The contents changed, so a later arrival at this field has to read it
++	   out again rather than suppress itself as a repeat. */
++	eta_lastFieldText[0] = '\0';
++
++	if (Item_IsPasswordField(item))
++	{
++		/* Enough to confirm the key registered, and nothing more: a
++		   password is masked on screen for a reason that speech does not
++		   get to overrule. */
++		ETA_MenuNarrator_OnValueChanged(item->text, afterLen < beforeLen ? "deleted" : "star");
++		return;
++	}
++
++	if (afterLen < beforeLen)
++	{
++		/* Backspace takes the character before the old cursor, Delete the
++		   one at it. Which happened is read off where the cursor ended up
++		   rather than off the keycode, so a rebound key still speaks right.
++		   Emptying the field is said in the same breath, because two
++		   utterances in a row cut each other off. */
++		int removed = (item->cursorPos < beforeCursor) ? beforeCursor - 1 : beforeCursor;
++
++		if (!ETA_CharacterAt(before, removed, spoken, sizeof(spoken)))
++		{
++			Q_strncpyz(spoken, "character", sizeof(spoken));
++		}
++
++		ETA_MenuNarrator_OnValueChanged(item->text,
++		                                afterLen == 0 ? va("%s deleted, empty", spoken)
++		                                              : va("%s deleted", spoken));
++		return;
++	}
++
++	if (afterLen - beforeLen > 1)
++	{
++		/* More than one character at once is a paste, which is read whole -
++		   spelling out a pasted server address would be worse than useless. */
++		ETA_MenuNarrator_OnValueChanged(item->text, after[0] ? after : "empty");
++		return;
++	}
++
++	/* One character typed, or one overwritten in overstrike mode - which
++	   replaces rather than inserts, so the length does not grow and only
++	   comparing lengths would have missed it. Either way the cursor has
++	   moved past what was just put in. */
++	if (ETA_CharacterAt(after, item->cursorPos - 1, spoken, sizeof(spoken)))
++	{
++		ETA_MenuNarrator_OnValueChanged(item->text, spoken);
++	}
++}
++
++/**
++ * @brief Reads a text box's whole contents, for arriving at one.
++ * @param[in] item
++ */
++void ETA_MenuItem_NarrateTextFieldValue(itemDef_t *item)
++{
++	char previous[ETA_MAX_MENU_TEXT_LENGTH + 1];
++
++	if (!item || !TEXTFIELD(item->type))
++	{
++		return;
++	}
++
++	Q_strncpyz(previous, eta_lastFieldText, sizeof(previous));
++
++	/* FocusText refreshes eta_lastFieldText, so this compares against what
++	   was said before the call. */
++	if (!Q_stricmp(previous, ETA_MenuItem_FocusText(item)))
++	{
++		return;
++	}
++
++	ETA_MenuNarrator_OnFocusChanged(item->parent ? ((menuDef_t *)item->parent)->window.name : NULL,
++	                                ETA_MenuItem_FocusText(item));
++}
++#endif
++
+ /**
+  * @brief Item_Tooltip_Initialize
+  * @param[in,out] item
+@@ -345,7 +645,7 @@ qboolean Item_SetFocus(itemDef_t *item, float x, float y)
+ #ifdef FEATURE_ACCESSIBILITY
+ 	if (item->window.flags & WINDOW_HASFOCUS)
+ 	{
+-		ETA_MenuNarrator_OnFocusChanged(parent ? parent->window.name : NULL, item->text);
++		ETA_MenuNarrator_OnFocusChanged(parent ? parent->window.name : NULL, ETA_MenuItem_FocusText(item));
+ 	}
+ #endif
+ 
+@@ -1806,6 +2106,14 @@ void Item_HandleTextFieldSelect(itemDef_t *item)
+ 	{
+ 		Item_CalcTextFieldCursor(item);
+ 		SET_EDITITEM(item);
++
++#ifdef FEATURE_ACCESSIBILITY
++		/* Tabbing between fields moves the edit target without ever
++		   changing focus, so Item_SetFocus's narration never fires and
++		   the player is left typing into a box that never said what it
++		   was. Reading it here covers that, and the click path too. */
++		ETA_MenuItem_NarrateTextFieldValue(item);
++#endif
+ 	}
+ }
+ 
+diff --git a/src/ui/ui_shared.h b/src/ui/ui_shared.h
+index c9d8dfb..217cfec 100644
+--- a/src/ui/ui_shared.h
++++ b/src/ui/ui_shared.h
+@@ -670,6 +670,12 @@ qboolean Item_Bind_HandleKey(itemDef_t *item, int key, qboolean down);
+ qboolean Item_Combo_HandleKey(itemDef_t *item, int key);
+ void Item_ComboDeSelect(itemDef_t *item);
+ qboolean Item_TextField_HandleKey(itemDef_t *item, int key);
++
++#ifdef FEATURE_ACCESSIBILITY
++const char *ETA_MenuItem_FocusText(itemDef_t *item);
++void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int beforeCursor);
++void ETA_MenuItem_NarrateTextFieldValue(itemDef_t *item);
++#endif
+ void Item_HandleTextFieldDeSelect(itemDef_t *item);
+ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down);
+ void Item_Action(itemDef_t *item);

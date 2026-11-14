@@ -1,0 +1,271 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index c7f3786..65b99d7 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -789,6 +789,10 @@ static void CG_AccessibilityStatus_f(void)
+ 	   not running NVDA heard the last fragment and nothing before it. */
+ 	ETA_Speech_BeginReport();
+ 
++	/* First, whether any of the rest is the player's own: watching
++	   someone, it is theirs. */
++	CG_AccessibilitySpeakPlayState();
++
+ 	ETA_HudNarrator_SpeakHealth(ps->stats[STAT_HEALTH]);
+ 
+ 	weap = (weapon_t)ps->weapon;
+@@ -1959,11 +1963,13 @@ static qboolean ETA_AimSteer(const vec3_t point, float tolerance)
+  *
+  * It stops at the top or the bottom, says so, and gives the keys back.
+  * The player turning by hand, the use key again, the map, death, or a
+- * climb that never got onto the ladder all stop it too.
++ * climb that never got onto the ladder all stop it too - after five
++ * seconds, not three: a tester's walk from two metres off sometimes
++ * needed more.
+  */
+ #define ETA_CLIMB_KEY_FORWARD "993"
+ #define ETA_CLIMB_KEY_BACK    "992"
+-#define ETA_CLIMB_GRAB_MS     3000
++#define ETA_CLIMB_GRAB_MS     5000
+ #define ETA_CLIMB_LIMIT_MS    20000
+ #define ETA_CLIMB_STEP_OFF_MS 400
+ #define ETA_CLIMB_FACING      20.0f
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index c21e339..f4e3bb9 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -5183,6 +5183,137 @@ static qboolean ETA_GroundRiseAhead(const playerState_t *ps, const vec3_t forwar
+  * are looking when they are standing still, which is the same rule the
+  * drop warning uses and for the same reason.
+  */
++/**
++ * @brief Whether the player is in the match or watching it, from the
++ *        game's own flags.
++ *
++ * Watching someone - as a spectator, or from limbo between lives - the
++ * snapshot's player state is the watched player's, with PMF_FOLLOW set
++ * on it by the server (SpectatorClientEndFrame), and PMF_LIMBO too when
++ * it is limbo. So the player's own team comes from their client info,
++ * never from the state being watched, and a watched player's health is
++ * never taken for the player's own.
++ */
++static ETA_PlayState ETA_PlayStateNow(char *following, size_t followingSize)
++{
++	const playerState_t *ps   = &cg.snap->ps;
++	team_t              team  = cgs.clientinfo[cg.clientNum].team;
++	qboolean            watch = (qboolean)((ps->pm_flags & PMF_FOLLOW) && ps->clientNum != cg.clientNum
++	                                       && ps->clientNum >= 0 && ps->clientNum < MAX_CLIENTS);
++
++	following[0] = '\0';
++
++	if (watch)
++	{
++		Q_strncpyz(following, cgs.clientinfo[ps->clientNum].name, (int)followingSize);
++		Q_CleanStr(following);
++	}
++
++	if (ps->pm_type == PM_INTERMISSION)
++	{
++		return ETA_PLAY_MATCH_OVER;
++	}
++
++	if (team != TEAM_AXIS && team != TEAM_ALLIES)
++	{
++		return ETA_PLAY_SPECTATING;
++	}
++
++	if ((ps->pm_flags & PMF_LIMBO) || watch)
++	{
++		return ETA_PLAY_LIMBO;
++	}
++
++	if (ps->stats[STAT_HEALTH] <= 0 || ps->pm_type == PM_DEAD)
++	{
++		return ETA_PLAY_DOWN;
++	}
++
++	return ETA_PLAY_IN_PLAY;
++}
++
++static void ETA_SpeakPlayState(ETA_PlayState state, const char *following)
++{
++	team_t      team = cgs.clientinfo[cg.clientNum].team;
++	const char *side = team == TEAM_AXIS ? "Axis" : team == TEAM_ALLIES ? "Allies" : "";
++
++	ETA_HudNarrator_SpeakPlayState(state, side,
++	                               state == ETA_PLAY_IN_PLAY ? BG_ClassnameForNumber(cgs.clientinfo[cg.clientNum].cls) : "",
++	                               following);
++}
++
++/**
++ * @brief The status key's opening words: in the match or watching it.
++ */
++void CG_AccessibilitySpeakPlayState(void)
++{
++	char following[MAX_NAME_LENGTH];
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	ETA_SpeakPlayState(ETA_PlayStateNow(following, sizeof(following)), following);
++}
++
++/**
++ * @brief Says it when the player goes from watching to playing, or back.
++ *
++ * A change has to hold for a moment before it is said: joining a team
++ * passes through a frame or two of states that are not where the player
++ * ends up, and a spectator cycling through players should hear the one
++ * they stop on rather than every one they skipped. It is an event, said
++ * once, so it is not held back by the quiet after a question.
++ */
++#define ETA_PLAY_STATE_SETTLE_MS 400
++
++static void ETA_NarratePlayState(void)
++{
++	static ETA_PlayState said    = ETA_PLAY_UNKNOWN;
++	static char          saidFollowing[MAX_NAME_LENGTH];
++	static ETA_PlayState pending = ETA_PLAY_UNKNOWN;
++	static char          pendingFollowing[MAX_NAME_LENGTH];
++	static int           pendingSince;
++	char                 following[MAX_NAME_LENGTH];
++	ETA_PlayState        now;
++
++	if (!cg.snap)
++	{
++		said = ETA_PLAY_UNKNOWN;
++		return;
++	}
++
++	now = ETA_PlayStateNow(following, sizeof(following));
++
++	if (now == said && !strcmp(following, saidFollowing))
++	{
++		pending = ETA_PLAY_UNKNOWN;
++		return;
++	}
++
++	if (now != pending || strcmp(following, pendingFollowing))
++	{
++		pending      = now;
++		pendingSince = cg.time;
++		Q_strncpyz(pendingFollowing, following, sizeof(pendingFollowing));
++		return;
++	}
++
++	if (cg.time - pendingSince < ETA_PLAY_STATE_SETTLE_MS && cg.time >= pendingSince)
++	{
++		return;
++	}
++
++	said = now;
++	Q_strncpyz(saidFollowing, following, sizeof(saidFollowing));
++	pending = ETA_PLAY_UNKNOWN;
++
++	ETA_Speech_BeginReport();
++	ETA_SpeakPlayState(now, following);
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief How near a ladder has to be to be said, and to be climbed with
+  *        the use key: two metres, a couple of steps.
+@@ -5212,6 +5343,58 @@ static qboolean ETA_LadderHit(const trace_t *tr)
+ 	                  && Q_fabs(tr->plane.normal[2]) < 0.7f);
+ }
+ 
++/**
++ * @brief Moves a found ladder point to the middle of the ladder.
++ *
++ * The search stops at the first ladder face a trace touches, which can be
++ * its very edge - and a climb aimed at the edge walks into the wall
++ * beside the ladder, where the game finds no ladder at all. A tester
++ * heard "Could not get onto the ladder" that way. So the face is felt
++ * along to each side, the way a hand would, and the point put halfway
++ * between where it ends.
++ */
++static void ETA_LadderCentre(etaLadder_t *ladder)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	vec3_t              tangent;
++	float               reach[2] = { 0.0f, 0.0f };
++	int                 side;
++
++	tangent[0] = -ladder->normal[1];
++	tangent[1] = ladder->normal[0];
++	tangent[2] = 0.0f;
++
++	if (VectorNormalize(tangent) < 0.5f)
++	{
++		return;
++	}
++
++	for (side = 0; side < 2; side++)
++	{
++		float step;
++
++		for (step = 4.0f; step <= 64.0f; step += 4.0f)
++		{
++			vec3_t  from, end;
++			trace_t tr;
++
++			VectorMA(ladder->point, 8.0f, ladder->normal, from);
++			VectorMA(from, side ? -step : step, tangent, from);
++			VectorMA(from, -24.0f, ladder->normal, end);
++
++			CG_Trace(&tr, from, NULL, NULL, end, ps->clientNum, ETA_LADDER_MASK);
++
++			if (!ETA_LadderHit(&tr))
++			{
++				break;
++			}
++			reach[side] = step;
++		}
++	}
++
++	VectorMA(ladder->point, 0.5f * (reach[0] - reach[1]), tangent, ladder->point);
++}
++
+ /**
+  * @brief The nearest ladder the player could climb from where they stand.
+  *
+@@ -5285,6 +5468,7 @@ qboolean CG_AccessibilityLadderNear(etaLadder_t *out)
+ 	if (best <= ETA_LADDER_REACH)
+ 	{
+ 		out->meters = best * ETA_QU_TO_METERS;
++		ETA_LadderCentre(out);
+ 		return qtrue;
+ 	}
+ 
+@@ -5361,6 +5545,7 @@ qboolean CG_AccessibilityLadderNear(etaLadder_t *out)
+ 	if (best <= ETA_LADDER_REACH)
+ 	{
+ 		out->meters = best * ETA_QU_TO_METERS;
++		ETA_LadderCentre(out);
+ 		return qtrue;
+ 	}
+ 
+@@ -8929,6 +9114,10 @@ void CG_DrawActive()
+ 	/* Who and what is near. It keeps time while held, and is quiet. */
+ 	ETA_NarrateAwareness(ETA_HudNarrator_PassiveHeld(cg.time) ? qtrue : qfalse);
+ 
++	/* In the match or watching it: said when it changes, not held back -
++	   it is what everything else the narrator says is about. */
++	ETA_NarratePlayState();
++
+ 	/* Neither of these is held back. A drop warning is the one report
+ 	   worth interrupting an answer for - and finishing an objective is
+ 	   the other: it happens once, it is what the whole map is for, and
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1f901de..3d737bb 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3511,6 +3511,7 @@ typedef struct
+ 
+ qboolean CG_AccessibilityLadderNear(etaLadder_t *out);
+ qboolean CG_AccessibilityClimbing(void);
++void     CG_AccessibilitySpeakPlayState(void);
+ 
+ /**
+  * @brief The mod's own looping sounds, shipped inside the pk3.

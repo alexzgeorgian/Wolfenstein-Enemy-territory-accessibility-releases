@@ -1,0 +1,281 @@
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index 0e917a7..9781370 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -2946,6 +2946,17 @@ void CG_EntityEvent( centity_t *cent, vec3_t position ) {
+ 			}
+ 
+ 			if ( sound ) {
++#ifdef FEATURE_ACCESSIBILITY
++				/* the map's voice, at the player's own volume for it */
++				int volume = CG_AccessibilityAnnouncerVolume();
++
++				if ( volume >= 0 ) {
++					if ( volume > 0 ) {
++						trap_S_StartSoundVControl( NULL, cg.snap->ps.clientNum, CHAN_AUTO, sound, (127 * volume) / 100 );
++					}
++					break;
++				}
++#endif
+ 				// no origin!
+ 				trap_S_StartSound( NULL, cg.snap->ps.clientNum, CHAN_AUTO, sound );
+ 			}
+diff --git a/src/cgame/cg_sound.c b/src/cgame/cg_sound.c
+index 3dc53fc..3718d76 100644
+--- a/src/cgame/cg_sound.c
++++ b/src/cgame/cg_sound.c
+@@ -87,7 +87,22 @@ int CG_SoundScriptPrecache( const char *name ) {
+ CG_SoundPickOldestRandomSound
+ ==============
+ */
++#ifdef FEATURE_ACCESSIBILITY
++static int CG_SoundPickOldestRandomSoundVolume( soundScript_t *sound, vec3_t org, int entnum, int volume );
++
+ int CG_SoundPickOldestRandomSound( soundScript_t *sound, vec3_t org, int entnum ) {
++	return CG_SoundPickOldestRandomSoundVolume( sound, org, entnum, -1 );
++}
++
++/* The same, at a share of full volume: 0 to 99, or -1 for the game's own
++   way. The map's voice is streamed from disk, and a stream takes no
++   volume of its own, so below full it is loaded and played as an
++   ordinary sound, which does - from the player's own head, as a stream
++   with no place is heard. A loop is left to stream. */
++static int CG_SoundPickOldestRandomSoundVolume( soundScript_t *sound, vec3_t org, int entnum, int volume ) {
++#else
++int CG_SoundPickOldestRandomSound( soundScript_t *sound, vec3_t org, int entnum ) {
++#endif
+ 	int oldestTime = 0; // TTimo: init
+ 	soundScriptSound_t *oldestSound = NULL;
+ 	soundScriptSound_t *scriptSound = sound->soundList;
+@@ -104,6 +119,21 @@ int CG_SoundPickOldestRandomSound( soundScript_t *sound, vec3_t org, int entnum
+ 		int pos = rand() % oldestSound->numsounds;
+ 
+ 		// play this sound
++#ifdef FEATURE_ACCESSIBILITY
++		if( volume >= 0 && !sound->looping && cg.snap ) {
++			if( !oldestSound->sounds[pos].sfxHandle ) {
++				oldestSound->sounds[pos].sfxHandle = trap_S_RegisterSound( oldestSound->sounds[pos].filename, qfalse );
++			}
++			oldestSound->lastPlayed = cg.time;
++			if( volume > 0 ) {
++				/* a stream plays as loud as an ordinary sound at 255; an
++				   ordinary one, at the game's 127 */
++				trap_S_StartSoundVControl( org, org ? entnum : cg.snap->ps.clientNum, sound->channel,
++					oldestSound->sounds[pos].sfxHandle, ((sound->streaming ? 255 : 127) * volume) / 100 );
++			}
++			return trap_S_GetSoundLength( oldestSound->sounds[pos].sfxHandle );
++		}
++#endif
+ 		if( !sound->streaming ) {
+ 			if( !oldestSound->sounds[pos].sfxHandle ) {
+ 				// tmp: remove on 1.3.0 release .. we shouldn't have these calls anymore
+@@ -133,7 +163,12 @@ void CG_AddBufferedSoundScript( soundScript_t* sound ) {
+ 	cg.bufferSoundScripts[cg.numbufferedSoundScripts++] = sound;
+ 	// CG_Printf("Current sound size add %d\n", cg.numbufferedSoundScripts);
+ 	if( cg.numbufferedSoundScripts == 1 ) {
+-		cg.bufferedSoundScriptEndTime = cg.time + CG_SoundPickOldestRandomSound( cg.bufferSoundScripts[0], NULL, -1 );
++		cg.bufferedSoundScriptEndTime = cg.time +
++#ifdef FEATURE_ACCESSIBILITY
++			CG_SoundPickOldestRandomSoundVolume( cg.bufferSoundScripts[0], NULL, -1, CG_AccessibilityAnnouncerVolume() );
++#else
++			CG_SoundPickOldestRandomSound( cg.bufferSoundScripts[0], NULL, -1 );
++#endif
+ 	}
+ }
+ 
+@@ -155,7 +190,12 @@ void CG_UpdateBufferedSoundScripts( void ) {
+ 			return;
+ 		}
+ 
+-		cg.bufferedSoundScriptEndTime = cg.time + CG_SoundPickOldestRandomSound( cg.bufferSoundScripts[0], NULL, -1 );
++		cg.bufferedSoundScriptEndTime = cg.time +
++#ifdef FEATURE_ACCESSIBILITY
++			CG_SoundPickOldestRandomSoundVolume( cg.bufferSoundScripts[0], NULL, -1, CG_AccessibilityAnnouncerVolume() );
++#else
++			CG_SoundPickOldestRandomSound( cg.bufferSoundScripts[0], NULL, -1 );
++#endif
+ 	}
+ }
+ 
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 11d8523..39d25cc 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -53,6 +53,9 @@ static void UI_StopServerRefresh( void );
+ 
+ static void UI_AccessibilityConsoleFrame( void );
+ static void UI_AccessibilitySay( const char *text );
++static void UI_AccessibilityRegisterHostCvars( void );
++static void UI_AccessibilityHostServer( void );
++static void UI_AccessibilityBotsFrame( void );
+ #ifdef __APPLE__
+ static void UI_AccessibilitySayLater( const char *text );
+ static void UI_AccessibilityMacInstallGame( void );
+@@ -965,6 +968,7 @@ void _UI_Refresh( int realtime ) {
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	UI_AccessibilityConsoleFrame();
++	UI_AccessibilityBotsFrame();
+ #endif
+ 
+ 	if (Menu_Count() > 0) {
+@@ -1329,6 +1333,20 @@ void UI_LoadMenus( const char *menuFile, qboolean reset ) {
+ 		}
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* The mode's pages, added after No Quarter's own list rather than by
++	   shipping a copy of that list, which would freeze the set of menus
++	   at the one this was written against. A missing file only prints a
++	   complaint; the rest are loaded already. The page itself is reached
++	   from ACCESSIBILITY on the Options menu, and holds the others. */
++	UI_ParseMenu("ui/options_accessibility.menu");
++	UI_ParseMenu("ui/options_accessibility_environment.menu");
++	UI_ParseMenu("ui/options_accessibility_speech.menu");
++	UI_ParseMenu("ui/options_accessibility_sound.menu");
++	UI_ParseMenu("ui/options_accessibility_keys.menu");
++	UI_ParseMenu("ui/options_accessibility_hosting.menu");
++#endif
++
+ 	Com_DPrintf("UI menu load time = %d milli seconds\n", trap_Milliseconds() - start);
+ 
+ 	trap_PC_FreeSource( handle );
+@@ -3814,6 +3832,10 @@ void UI_RunMenuScript(char **args) {
+ 			else
+ 				trap_Cmd_ExecuteText( EXEC_APPEND, va( "wait ; wait ; map %s\n", uiInfo.mapList[ui_currentNetMap.integer].mapLoadName ) );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++			UI_AccessibilityHostServer();
++#endif
++
+ 			skill = trap_Cvar_VariableValue( "g_spSkill" );
+ 
+ 			// NERVE - SMF - set user cvars here
+@@ -6809,6 +6831,7 @@ void _UI_Init( qboolean inGameLoad ) {
+ 	ETA_AccessibilityRuntime_Init();
+ 	ETA_MenuNarrator_Init();
+ 	UI_AccessibilityInstallBinds();
++	UI_AccessibilityRegisterHostCvars();
+ 	ETA_FeederRowText = UI_AccessibilityFeederRow;
+ #ifdef __APPLE__
+ 	UI_AccessibilityMacLastSession();
+@@ -7905,6 +7928,119 @@ static void UI_AccessibilitySay( const char *text ) {
+ 	ETA_MenuNarrator_OnConfirmDialogShown( text );
+ }
+ 
++/*
++=====================================================================
++Hosting
++
++The mode's Hosting page, as in the ET: Legacy mode: friends joining
++with the plain game, how many bots and how good, and here also map
++voting, which No Quarter's Host Game screen does not offer. Applied on
++Start Server, before the map command it queues has run.
++=====================================================================
++*/
++static vmCvar_t eta_hostPlain;
++static vmCvar_t eta_hostBotCount;
++static vmCvar_t eta_hostBotSkill;
++static vmCvar_t eta_hostMapVote;
++
++/* With the host, the 20 players the Host Game screen makes room for. */
++#define ETA_HOST_BOTS_MAX 19
++
++static void UI_AccessibilityRegisterHostCvars( void ) {
++	trap_Cvar_Register( &eta_hostPlain, "eta_hostPlain", "1", CVAR_ARCHIVE );
++	trap_Cvar_Register( &eta_hostBotCount, "eta_hostBotCount", "0", CVAR_ARCHIVE );
++	trap_Cvar_Register( &eta_hostBotSkill, "eta_hostBotSkill", "2", CVAR_ARCHIVE );
++	trap_Cvar_Register( &eta_hostMapVote, "eta_hostMapVote", "0", CVAR_ARCHIVE );
++}
++
++/* That many bots, however many people join: Omni-bot adds bots up to
++   minbots whoever else is playing, and takes them away only past
++   maxbots players in all - so with both at the count, it stays. */
++static const char *UI_AccessibilityBotCommand( int bots ) {
++	return va( "bot minbots %i ; bot maxbots %i", bots, bots );
++}
++
++static void UI_AccessibilityHostServer( void ) {
++	trap_Cvar_Update( &eta_hostPlain );
++	trap_Cvar_Update( &eta_hostBotCount );
++	trap_Cvar_Update( &eta_hostBotSkill );
++	trap_Cvar_Update( &eta_hostMapVote );
++
++	/* The mode's pk3 is in the nq folder, and a pure server asks everyone
++	   who joins for it; this lets friends join with the game they have. */
++	if( eta_hostPlain.integer ) {
++		trap_Cvar_Set( "sv_pure", "0" );
++		trap_Cvar_Set( "sv_allowDownload", "0" );
++	}
++
++	/* Map voting is a game type of its own, after the match and between
++	   maps: the server offers a list, and the debriefing says it. */
++	if( eta_hostMapVote.integer && ui_netGameType.integer != GT_WOLF_CAMPAIGN ) {
++		trap_Cvar_Set( "g_gametype", va( "%i", GT_WOLF_MAPVOTE ) );
++	}
++
++	if( eta_hostBotCount.integer <= 0 ) {
++		/* Off means off: omnibot_enable is archived, so a server hosted
++		   with bots once would otherwise have them every time after. */
++		trap_Cvar_Set( "omnibot_enable", "0" );
++		return;
++	}
++
++	trap_Cvar_Set( "omnibot_enable", "1" );
++#ifndef __APPLE__
++	/* Where the No Quarter download keeps Omni-bot, unless the player
++	   has said otherwise. On a Mac the game looks in its own places. */
++	{
++		char path[MAX_OSPATH];
++
++		trap_Cvar_VariableStringBuffer( "omnibot_path", path, sizeof(path) );
++		if( !path[0] ) {
++			char base[MAX_OSPATH];
++
++			trap_Cvar_VariableStringBuffer( "fs_basepath", base, sizeof(base) );
++			trap_Cvar_Set( "omnibot_path", va( "%s/nq/omni-bot", base ) );
++		}
++	}
++#endif
++	/* Omni-bot loads with the map, so the count waits behind it */
++	trap_Cmd_ExecuteText( EXEC_APPEND, va( "wait 10 ; bot difficulty %i ; %s\n",
++		(int)Com_Clamp( 1, 6, eta_hostBotSkill.integer ),
++		UI_AccessibilityBotCommand( (int)Com_Clamp( 1, ETA_HOST_BOTS_MAX, eta_hostBotCount.integer ) ) ) );
++}
++
++/* The bot count changed during a match the player hosts: sent to
++   Omni-bot at once, and said. On somebody else's server it waits for
++   the next game they host. */
++static void UI_AccessibilityBotsFrame( void ) {
++	static int		said = -1;
++	uiClientState_t	cstate;
++	int				bots;
++
++	trap_Cvar_Update( &eta_hostBotCount );
++	bots = (int)Com_Clamp( 0, ETA_HOST_BOTS_MAX, eta_hostBotCount.integer );
++
++	trap_GetClientState( &cstate );
++	if( said < 0 || cstate.connState != CA_ACTIVE || trap_Cvar_VariableValue( "sv_running" ) == 0.f ) {
++		said = bots;
++		return;
++	}
++	if( bots == said ) {
++		return;
++	}
++	said = bots;
++
++	if( trap_Cvar_VariableValue( "omnibot_enable" ) == 0.f ) {
++		if( bots > 0 ) {
++			trap_Cvar_Set( "omnibot_enable", "1" );
++			UI_AccessibilitySay( va( "%i %s from the next map: this one started without bots", bots, bots == 1 ? "bot joins" : "bots join" ) );
++		}
++		return;
++	}
++
++	trap_Cmd_ExecuteText( EXEC_APPEND, va( "%s\n", UI_AccessibilityBotCommand( bots ) ) );
++	UI_AccessibilitySay( bots ? va( "%i %s now", bots, bots == 1 ? "bot" : "bots" ) : "No bots now" );
++}
++
+ /*
+  * Says when the console opens or closes over the menus. A tester opened
+  * it by mistake and never knew. Only before a match: in one, the cgame's

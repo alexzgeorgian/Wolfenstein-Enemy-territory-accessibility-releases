@@ -1,0 +1,102 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 263c182..57cbbc2 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -8059,6 +8059,78 @@ static void ETA_NarrateBuildProgress(void)
+ 	ETA_HudNarrator_UpdateBuildProgress(percent);
+ }
+ 
++/**
++ * @brief What the game's plainest use icon is on, in words - or "".
++ *
++ * The icon says only that something can be used, and so did the words
++ * for it: the tester, in a tank, heard "Usable" and was left to guess.
++ * The thing under the crosshair is named the way F names things: what
++ * the line of sight hits, or failing that - the use is often a trigger
++ * the client cannot see, wrapped round the thing - the nameable thing
++ * nearest where the line ends, a little way ahead.
++ */
++#define ETA_USABLE_LOOK   160.0f
++#define ETA_USABLE_NEAR   128.0f
++
++static void ETA_UsableThingName(char *out, size_t outSize)
++{
++	vec3_t  end;
++	trace_t tr;
++	float   best = ETA_USABLE_NEAR;
++	int     i;
++
++	out[0] = '\0';
++
++	VectorMA(cg.refdef.vieworg, ETA_USABLE_LOOK, cg.refdef.viewaxis[0], end);
++	CG_Trace(&tr, cg.refdef.vieworg, NULL, NULL, end, cg.snap->ps.clientNum,
++	         CONTENTS_SOLID | CONTENTS_BODY | CONTENTS_CORPSE);
++
++	if (tr.entityNum >= 0 && tr.entityNum < ENTITYNUM_WORLD
++	    && cg_entities[tr.entityNum].currentValid
++	    && CG_AccessibilityObjectName(&cg_entities[tr.entityNum].currentState, out, outSize))
++	{
++		return;
++	}
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		char                name[64];
++		vec3_t              at, to;
++		float               distance;
++
++		if (es->eType == ET_MG42_BARREL)
++		{
++			Q_strncpyz(name, "mounted machine gun", sizeof(name));
++		}
++		else if (es->eType == ET_ITEM || !CG_AccessibilityObjectName(es, name, sizeof(name)))
++		{
++			/* A pickup has its own icon, never this one. */
++			continue;
++		}
++
++		VectorCopy(cg_entities[es->number].lerpOrigin, at);
++		if (es->solid == SOLID_BMODEL && es->modelindex > 0 && es->modelindex < MAX_MODELS)
++		{
++			VectorAdd(at, cgs.inlineModelMidpoints[es->modelindex], at);
++		}
++
++		/* Ahead, not behind the player's shoulder. */
++		VectorSubtract(at, cg.refdef.vieworg, to);
++		if (DotProduct(to, cg.refdef.viewaxis[0]) <= 0.0f)
++		{
++			continue;
++		}
++
++		distance = Distance(at, tr.endpos);
++		if (distance < best)
++		{
++			best = distance;
++			Q_strncpyz(out, name, outSize);
++		}
++	}
++}
++
+ static void ETA_NarrateInteractionHint(void)
+ {
+ 	static qboolean wasActive = qfalse;
+@@ -8124,7 +8196,17 @@ static void ETA_NarrateInteractionHint(void)
+ 	          (int)MIN(((float)cg.cursorHintValue / 255.0f) * 100.0f, 100.0f) : -1;
+ 
+ 	ETA_Speech_BeginReport();
+-	ETA_HudNarrator_SpeakInteraction(what, percent);
++	if (what == ETA_INTERACT_USABLE)
++	{
++		char thing[64];
++
++		ETA_UsableThingName(thing, sizeof(thing));
++		ETA_HudNarrator_SpeakNamedInteraction(thing, what, percent);
++	}
++	else
++	{
++		ETA_HudNarrator_SpeakInteraction(what, percent);
++	}
+ 	ETA_Speech_EndReport();
+ }
+ #endif

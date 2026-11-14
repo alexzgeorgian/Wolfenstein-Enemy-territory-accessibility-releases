@@ -1,0 +1,72 @@
+diff --git a/.gitmodules b/.gitmodules
+index 7d3d737..dedb24b 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -10,3 +10,6 @@
+ 	url = ../../etlegacy/JoyStick.git
+ 	branch = master
+ 	ignore = dirty
++[submodule "accessibility-mode"]
++	path = accessibility-mode
++	url = https://github.com/alexzgeorgian/Wolfenstein-Enemy-territory-accessibility-mode.git
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9bce4a2..39e8bfa 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -75,6 +75,7 @@ option(FEATURE_PNG				"Enable PNG screenshot support (client)"				ON)
+ option(FEATURE_TRACKER			"Enable extended server statistics (server)"			ON)
+ option(FEATURE_MULTIVIEW		"Enable multiview support (mod)"						ON)
+ option(FEATURE_EDV				"Enable extended demo viewer support (mod)"				ON)
++option(FEATURE_ACCESSIBILITY	"Enable spoken accessibility narration (mod)"			OFF)
+ option(FEATURE_ANTICHEAT		"Enable server side anti-wallhack code (server)"		ON)
+ option(FEATURE_AUTOUPDATE		"Enable updater which downloads latest ET:L files"		ON)
+ option(FEATURE_RENDERER1		"Build and use the vanilla renderer (OpenGL 1/2)"		ON)
+diff --git a/cmake/ETLSetupFeatures.cmake b/cmake/ETLSetupFeatures.cmake
+index 373ba23..13b9384 100644
+--- a/cmake/ETLSetupFeatures.cmake
++++ b/cmake/ETLSetupFeatures.cmake
+@@ -307,6 +307,15 @@ if(BUILD_MOD)
+ 		target_compile_definitions(mod_libraries INTERFACE FEATURE_MULTIVIEW)
+ 	endif()
+ 
++	if(FEATURE_ACCESSIBILITY)
++		target_compile_definitions(mod_libraries INTERFACE FEATURE_ACCESSIBILITY)
++
++		set(ETA_BUILD_SMOKE_TEST OFF CACHE BOOL "" FORCE)
++		add_subdirectory("${CMAKE_SOURCE_DIR}/accessibility-mode" "${CMAKE_BINARY_DIR}/accessibility-mode")
++
++		target_link_libraries(mod_libraries INTERFACE eta_accessibility)
++	endif()
++
+ 	if(FEATURE_XPSAVE)
+ 		target_compile_definitions(mod_libraries INTERFACE FEATURE_XPSAVE)
+ 	endif()
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 689906f..859431f 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -36,6 +36,10 @@
+ #include "ui_shared.h"
+ #include "ui_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "menu/menu_narrator.h"
++#endif
++
+ #define SCROLLBAR_THUMB_MIN_SIZE 14
+ 
+ static qboolean Item_IsPasswordField(const itemDef_t *item)
+@@ -338,6 +342,13 @@ qboolean Item_SetFocus(itemDef_t *item, float x, float y)
+ 		DC->startLocalSound(*sfx, CHAN_LOCAL_SOUND);
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	if (item->window.flags & WINDOW_HASFOCUS)
++	{
++		ETA_MenuNarrator_OnFocusChanged(parent ? parent->window.name : NULL, item->text);
++	}
++#endif
++
+ 	for (i = 0; i < parent->itemCount; i++)
+ 	{
+ 		if (parent->items[i] == item)

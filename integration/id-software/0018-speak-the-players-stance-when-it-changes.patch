@@ -1,0 +1,84 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index e552d8a..1f68aee 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4578,6 +4578,66 @@ void CG_DrawMiscGamemodels( void ) {
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Narrates the player's posture when it changes.
++ *
++ * A sighted player reads their stance off the screen without thinking
++ * about it. Without that, "did the crouch take" is genuinely unanswerable
++ * - and the engine can refuse the change: PM_CheckDuck (bg_pmove.c) only
++ * clears PMF_DUCKED when a trace says there is headroom, so releasing
++ * crouch under a low ceiling leaves the player crouched with nothing to
++ * say so.
++ *
++ * Read from cg.predictedPlayerState rather than cg.snap->ps because
++ * posture is predicted locally: the predicted state changes on the frame
++ * the key is pressed, while the snapshot is still a round trip behind.
++ * CG_PredictPlayerState runs before this in CG_DrawActiveFrame.
++ *
++ * Prone is tested before crouch because going prone sets PMF_DUCKED as
++ * well (bg_pmove.c, "crouched as well"), so the other order reports every
++ * prone player as crouched. Leaving prone sets PMF_DUCKED too, which is
++ * why standing up from prone is heard as "Crouched" then "Standing" -
++ * that is the engine's own behaviour, not an artifact of this narration.
++ */
++static void ETA_NarrateStanceChange( void ) {
++	static ETA_Stance spoken = (ETA_Stance)-1;
++	const playerState_t *ps;
++	ETA_Stance stance;
++
++	if ( !cg.snap ) {
++		return;
++	}
++
++	ps = &cg.predictedPlayerState;
++
++	if ( ps->pm_type != PM_NORMAL ) {
++		/* Dead, in the limbo panel, riding a tank, spectating: the posture
++		   is not the player's to change and announcing it would be noise.
++		   Forgetting what was said means the first stance after regaining
++		   control is announced rather than swallowed as unchanged. */
++		spoken = (ETA_Stance)-1;
++		return;
++	}
++
++	if ( ps->eFlags & EF_PRONE ) {
++		stance = ETA_STANCE_PRONE;
++	} else if ( ps->pm_flags & PMF_DUCKED ) {
++		stance = ETA_STANCE_CROUCHED;
++	} else {
++		stance = ETA_STANCE_STANDING;
++	}
++
++	if ( stance == spoken ) {
++		return;
++	}
++
++	spoken = stance;
++
++	ETA_HudNarrator_SpeakStance( stance );
++}
++#endif
++
+ /*
+ =====================
+ CG_DrawActive
+@@ -4673,6 +4733,12 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 		VectorCopy( baseOrg, cg.refdef_current->vieworg );
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Every active frame, so a stance change is caught however it came
++	   about - the player's own key, or the engine refusing to let them up. */
++	ETA_NarrateStanceChange();
++#endif
++
+ 	if ( !cg.showGameView ) {
+ 		// draw status bar and other floating elements
+ 		CG_Draw2D();

@@ -1,0 +1,7 @@
+# The NoQuarter EoTS release these patches apply to, read by
+# release/build-noquarter.sh. The commit is checked after cloning the
+# tag, so a tag moved upstream fails the build instead of shipping
+# something else.
+repo=https://github.com/DL-LAM/NoQuarter-EoTS.git
+tag=NQ_EoTS_v1.0.7b
+commit=f41b59e0159276e67682ddeda6728ce0792dc4c2

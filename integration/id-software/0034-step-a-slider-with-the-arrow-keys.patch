@@ -1,0 +1,120 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 1e8ad0c..87b20b0 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -3115,10 +3115,115 @@ void Item_StopCapture( itemDef_t *item ) {
+ 
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/* How far one arrow-key press moves a slider.
++
++   A slider is the last control in this game a keyboard cannot work. It
++   takes its value from where in the bar the pointer was when you
++   clicked, so unlike the checkboxes and the multi fields there was
++   never a key press to un-break - the behaviour has to be invented.
++
++   Twenty presses end to end, rounded to a round number. The rounding is
++   what matters: these ranges are wildly different - 0 to 1 for a
++   volume, 1 to 30 for mouse sensitivity - and a flat twentieth of each
++   gives ladders like 1, 2.45, 3.9, which are miserable to listen to.
++   Snapping the step to the nearest 1, 2 or 5 gives 0.05 for the volume
++   and a whole 1 for the sensitivity. */
++static float ETA_SliderStep( float minVal, float maxVal ) {
++	float range = maxVal - minVal;
++	float magnitude = 1.0f;
++	float raw;
++	int guard;
++
++	if ( !( range > 0.0f ) ) {
++		return 0.0f;
++	}
++
++	raw = range / 20.0f;
++
++	/* Move the decimal point until raw sits in [1, 10) rather than going
++	   through log10: no library call, and exact at the powers of ten
++	   where a logarithm can land a hair under. */
++	for ( guard = 0; raw >= 10.0f && guard < 64; guard++ ) {
++		raw /= 10.0f;
++		magnitude *= 10.0f;
++	}
++
++	for ( guard = 0; raw < 1.0f && guard < 64; guard++ ) {
++		raw *= 10.0f;
++		magnitude /= 10.0f;
++	}
++
++	if ( raw < 1.5f ) {
++		raw = 1.0f;
++	} else if ( raw < 3.5f ) {
++		raw = 2.0f;
++	} else if ( raw < 7.5f ) {
++		raw = 5.0f;
++	} else {
++		raw = 10.0f;
++	}
++
++	return raw * magnitude;
++}
++
++/* One arrow-key press. Snaps to the nearest rung before moving, so a
++   slider left at 0.3712 by the mouse puts the player onto a ladder they
++   can predict from the first press. */
++static float ETA_SliderNudge( editFieldDef_t *editDef, float current, int direction ) {
++	float step = ETA_SliderStep( editDef->minVal, editDef->maxVal );
++	float rung;
++	float value;
++
++	if ( step <= 0.0f ) {
++		return current;
++	}
++
++	rung = (float)floor( (double)( ( current - editDef->minVal ) / step ) + 0.5 );
++	value = editDef->minVal + ( rung + (float)direction ) * step;
++
++	if ( value < editDef->minVal ) {
++		value = editDef->minVal;
++	}
++
++	if ( value > editDef->maxVal ) {
++		value = editDef->maxVal;
++	}
++
++	return value;
++}
++#endif
++
+ qboolean Item_Slider_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 	float x, value, width, work;
+ 
+ 	//DC->Print("slider handle key\n");
++#ifdef FEATURE_ACCESSIBILITY
++	/* The keyboard path, ahead of the pointer test below: that test can
++	   never be satisfied from the keyboard, because arrowing onto a
++	   control does not move the cursor. Left and right are free here -
++	   the menu navigates on up, down and tab - so nothing is taken. */
++	if ( item->window.flags & WINDOW_HASFOCUS && item->cvar
++		 && ( key == K_LEFTARROW || key == K_KP_LEFTARROW
++			  || key == K_RIGHTARROW || key == K_KP_RIGHTARROW ) ) {
++		editFieldDef_t *editDef = item->typeData;
++
++		if ( editDef ) {
++			float current = DC->getCVarValue( item->cvar );
++			float nudged = ETA_SliderNudge( editDef, current,
++											( key == K_LEFTARROW || key == K_KP_LEFTARROW ) ? -1 : 1 );
++
++			if ( nudged != current ) {
++				DC->setCVar( item->cvar, va( "%f", nudged ) );
++			}
++
++			/* Answered even when the value did not move, so the end of
++			   the range says itself rather than going silent. */
++			return qtrue;
++		}
++	}
++#endif
++
+ 	if ( item->window.flags & WINDOW_HASFOCUS && item->cvar && Rect_ContainsPoint( &item->window.rect, DC->cursorx, DC->cursory ) ) {
+ 		if ( key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3 ) {
+ 			editFieldDef_t *editDef = item->typeData;

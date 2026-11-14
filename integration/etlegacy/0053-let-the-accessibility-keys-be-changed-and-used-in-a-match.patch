@@ -1,0 +1,96 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 9c63d56..9c98966 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -4595,10 +4595,22 @@ void CG_InitConsoleCommands(void)
+ 	CG_AddGameConsoleCommand();
+ 
+ 	// remove engine commands to avoid abuse
++#ifndef FEATURE_ACCESSIBILITY
+ 	trap_RemoveCommand("+lookup");
+ 	trap_RemoveCommand("-lookup");
+ 	trap_RemoveCommand("+lookdown");
+ 	trap_RemoveCommand("-lookdown");
++#else
++	/* Kept. They are the only way to tip the view without a mouse, and
++	   this was deleting them the moment a match loaded: the up and down
++	   arrows looked fine in the controls list and did nothing in play,
++	   and nothing brings them back short of restarting the game.
++
++	   What they are removed "to avoid abuse" of is not recorded here or
++	   upstream, and a key held down to tip the view at cl_pitchspeed is
++	   slower than any mouse. Turning with +left and +right, the same
++	   kind of command, was never removed. */
++#endif
+ 
+ 	// only allow configstrings command when cheats enabled
+ 	if (!cgs.sv_cheats)
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 67a9da0..bad1bb9 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -1575,7 +1575,6 @@ void UI_LoadMenus(const char *menuFile, qboolean reset)
+ 	   by this point, and a player whose pk3 is half-installed is better
+ 	   off with a game that runs. */
+ 	UI_ParseMenu("ui/options_accessibility.menu");
+-	UI_ParseMenu("ui/options_controls_accessibility.menu");
+ #endif
+ 
+ 	Com_DPrintf("UI menu load time = %d milli seconds\n", trap_Milliseconds() - start);
+@@ -8972,6 +8971,13 @@ void UI_AccessibilityInstallBinds(void)
+ 
+ 	/* Records the newest generation offered, not merely "yes". */
+ 	trap_Cvar_Set("eta_bindsInstalled", va("%i", newest));
++
++	/* The controls pages keep their own copy of which key each command
++	   is on, read once at start-up - before this ran. Left stale, the
++	   first key the player changes writes that copy back over the whole
++	   keyboard: the keypad goes back to selectbuddy and 9 and 0 to the
++	   weapon banks, undoing what was just installed. */
++	Controls_GetConfig();
+ }
+ #endif
+ 
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 6b4d464..a2246da 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -837,6 +837,38 @@ static bind_t g_bindings[] =
+ 	{ "cycle cg_spawntimer_set 2147483647 0 1000", -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+zoom;+attack;-attack;-zoom",               -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "edithud",                                   K_F7,            -1,  -1,              -1,  -1, -1, -1 },
++#ifdef FEATURE_ACCESSIBILITY
++	/* The accessibility mod's keys, so its controls page can change them.
++
++	   A BIND row finds its command in this table and nowhere else: a
++	   command missing from here is shown with whatever key it is on, and
++	   pressing a new key on it does nothing at all. Every row on the
++	   ACCESSIBILITY CONTROLS page was in that state - read out correctly,
++	   and impossible to change - which a tester found by trying to move
++	   Look Down.
++
++	   No default keys. Defaults here are what the DEFAULT button writes,
++	   and the mod's keys are not the game's: they are installed by
++	   UI_AccessibilityInstallBinds, which never takes a key the player
++	   is using and which the DEFAULT button already asks to run again. */
++	{ "+left",                                     -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "+right",                                    -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "+lookup",                                   -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "+lookdown",                                 -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitystatus",                       -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilityhealth",                       -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilityammo",                         -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilityrepeat",                       -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitystopspeech",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymapnorth",                     -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymapsouth",                     -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymapeast",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymapwest",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymapup",                        -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymapdown",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymaphere",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymapnext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++#endif
+ };
+ 
+ static const int g_bindCount = sizeof(g_bindings) / sizeof(bind_t);

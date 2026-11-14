@@ -1,0 +1,411 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 323d6d6..afc7c8e 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -5357,6 +5357,162 @@ static void ETA_NarrateObstacleAhead( void ) {
+ 	ETA_Speech_EndReport();
+ }
+ 
++/* How far ahead the first and second treads are sampled. The near one is
++   about half a stride, the far one a stride; the far one's only job is to
++   tell a single step from a flight of them. */
++#define ETA_STAIR_NEAR 28.0f
++#define ETA_STAIR_FAR 56.0f
++
++/* The smallest change in ground height worth calling a step. Below this
++   the ground is simply not level, which is most of this game. */
++#define ETA_STAIR_MIN_RISE 4.0f
++
++/* How flat a tread has to be, as the cosine of its slope - about eight
++   degrees. Stairs here are built of flat brushes and come back at exactly
++   1.0; ramps, rubble and desert do not. Anything short of flat is left
++   unsaid rather than called a staircase, because a player told to expect
++   steps and given a slope has been sent to feel for something that is not
++   there. Much stricter than the engine's own MIN_WALK_NORMAL of 0.7,
++   deliberately: that one answers "can this be walked on", which nearly
++   everything can. */
++#define ETA_STAIR_FLAT 0.99f
++
++#define ETA_STAIR_MIN_INTERVAL 3000
++
++/* The height of the flat ground a short way ahead, relative to fromZ.
++
++   A point trace straight down, from one step above the reference to one
++   step below it. That window is the engine's own step height on purpose:
++   ground outside it is not somewhere the player can simply walk to, so it
++   is not a step - it is a wall (the obstacle report's business) or a drop
++   (the drop warning's). */
++static qboolean ETA_GroundRiseAhead( const playerState_t *ps, const vec3_t forward,
++									 float distance, float fromZ, float *rise ) {
++	trace_t trace;
++	vec3_t start, end;
++
++	VectorMA( ps->origin, distance, forward, start );
++	start[2] = fromZ + ETA_DROP_STEP_UNITS + 1.0f;
++
++	VectorCopy( start, end );
++	end[2] = fromZ - ETA_DROP_STEP_UNITS - 1.0f;
++
++	CG_Trace( &trace, start, NULL, NULL, end, ps->clientNum, MASK_PLAYERSOLID );
++
++	if ( trace.startsolid || trace.allsolid || trace.fraction == 1.0f ) {
++		return qfalse;
++	}
++
++	if ( trace.plane.normal[2] < ETA_STAIR_FLAT ) {
++		return qfalse;
++	}
++
++	*rise = trace.endpos[2] - fromZ;
++
++	return qtrue;
++}
++
++/* Says when the ground ahead climbs or falls away in steps.
++
++   This is the other half of the obstacle fix, and it is owed. That fix
++   lifted the probe by the engine's step height so a stair riser would stop
++   being announced as a wall - which was right, and which left stairs
++   silent altogether. A sighted player sees a staircase from the far side
++   of a room; without this, someone playing by ear finds one by walking
++   into it.
++
++   It measures rather than looks: flat ground a short way ahead, at a
++   height the player could step to, is a step; two of those going the same
++   way is a flight. Nothing else is claimed - a slope comes back as nothing
++   at all rather than as stairs. */
++static void ETA_NarrateStairsAhead( void ) {
++	static int lastSpoken = -1;
++	static int lastTime;
++
++	const playerState_t *ps;
++	vec3_t angles, forward;
++	float footZ, first, second, speedSq;
++	ETA_Stairs kind;
++
++	if ( !cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer ) {
++		lastSpoken = -1;
++		return;
++	}
++
++	ps = &cg.predictedPlayerState;
++
++	/* Only from the ground: in the air every reading is about wherever
++	   the player has fallen to by the time it is spoken. */
++	if ( ps->groundEntityNum == ENTITYNUM_NONE ) {
++		lastSpoken = -1;
++		return;
++	}
++
++	/* A ladder is not a staircase and swimming is not walking; both have
++	   their own narration and neither wants this one over the top. */
++	if ( ( ps->pm_flags & PMF_LADDER ) || ETA_WaterLevel() > 1 ) {
++		lastSpoken = -1;
++		return;
++	}
++
++	speedSq = ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1];
++
++	if ( speedSq > 40.0f * 40.0f ) {
++		forward[0] = ps->velocity[0];
++		forward[1] = ps->velocity[1];
++		forward[2] = 0.0f;
++		VectorNormalize( forward );
++	} else {
++		angles[PITCH] = 0.0f;
++		angles[YAW] = cg.refdefViewAngles[YAW];
++		angles[ROLL] = 0.0f;
++		AngleVectors( angles, forward, NULL, NULL );
++	}
++
++	footZ = ps->origin[2] + ps->mins[2];
++
++	if ( !ETA_GroundRiseAhead( ps, forward, ETA_STAIR_NEAR, footZ, &first ) ) {
++		lastSpoken = -1;
++		return;
++	}
++
++	if ( first > ETA_STAIR_MIN_RISE ) {
++		kind = ETA_STAIRS_STEP_UP;
++	} else if ( first < -ETA_STAIR_MIN_RISE ) {
++		kind = ETA_STAIRS_STEP_DOWN;
++	} else {
++		/* Level ground. Forgetting what was last said here is what lets
++		   walking away from a staircase and back be news again. */
++		lastSpoken = -1;
++		return;
++	}
++
++	/* The second tread is measured from the first, not from the player:
++	   three steps up is well past anything a trace from foot height could
++	   see, so measuring both against the feet would report every staircase
++	   as a single step. What is being asked is only whether the ground
++	   carries on the same way, which holds whatever the run of the steps -
++	   and that differs from map to map. */
++	if ( ETA_GroundRiseAhead( ps, forward, ETA_STAIR_FAR, footZ + first, &second ) ) {
++		if ( kind == ETA_STAIRS_STEP_UP && second > ETA_STAIR_MIN_RISE ) {
++			kind = ETA_STAIRS_UP;
++		} else if ( kind == ETA_STAIRS_STEP_DOWN && second < -ETA_STAIR_MIN_RISE ) {
++			kind = ETA_STAIRS_DOWN;
++		}
++	}
++
++	if ( (int)kind == lastSpoken || cg.time - lastTime < ETA_STAIR_MIN_INTERVAL ) {
++		return;
++	}
++
++	lastSpoken = (int)kind;
++	lastTime = cg.time;
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakStairs( kind );
++	ETA_Speech_EndReport();
++}
++
+ static void ETA_NarrateStanceChange( void ) {
+ 	static ETA_Stance spoken = (ETA_Stance)-1;
+ 	const playerState_t *ps;
+@@ -5500,6 +5656,9 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 	   report. */
+ 	ETA_NarrateObstacleAhead();
+ 
++	/* Scenery too, and before the objective for the same reason. */
++	ETA_NarrateStairsAhead();
++
+ 	ETA_NarrateObjectiveApproach();
+ 
+ 	/* Last, so everything above still sees the previous frame's totals. */
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 20ccff2..218ef8c 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2408,6 +2408,7 @@ void CG_AccessibilitySampleTotals( void );
+ extern vmCvar_t eta_objectiveCallouts;
+ extern vmCvar_t eta_environmentCallouts;
+ extern vmCvar_t eta_facingCallouts;
++extern vmCvar_t eta_interactionCallouts;
+ 
+ qboolean ETA_MapObjectiveAt( const mapEntityData_t *mEnt, vec3_t origin, int *oidIndex );
+ qboolean ETA_CurrentObjective( team_t team, const vec3_t from, etaObjective_t *out );
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 0f77f1d..846a481 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -323,6 +323,7 @@ vmCvar_t cl_waveoffset;
+ vmCvar_t eta_objectiveCallouts;
+ vmCvar_t eta_environmentCallouts;
+ vmCvar_t eta_facingCallouts;
++vmCvar_t eta_interactionCallouts;
+ #endif
+ vmCvar_t cg_recording_statusline;
+ 
+@@ -552,6 +553,7 @@ cvarTable_t cvarTable[] = {
+ 	{ &eta_objectiveCallouts, "eta_objectiveCallouts", "1", CVAR_ARCHIVE },
+ 	{ &eta_environmentCallouts, "eta_environmentCallouts", "1", CVAR_ARCHIVE },
+ 	{ &eta_facingCallouts, "eta_facingCallouts", "1", CVAR_ARCHIVE },
++	{ &eta_interactionCallouts, "eta_interactionCallouts", "1", CVAR_ARCHIVE },
+ #endif
+ };
+ 
+diff --git a/src/cgame/cg_newDraw.c b/src/cgame/cg_newDraw.c
+index 9eabae4..523155f 100644
+--- a/src/cgame/cg_newDraw.c
++++ b/src/cgame/cg_newDraw.c
+@@ -31,6 +31,8 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "audio/audio_cue_system.h"
++#include "hud/hud_narrator.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ int CG_DrawField( int x, int y, int width, int value, int charWidth, int charHeight, qboolean dodrawpic, qboolean leftAlign );      // NERVE - SMF
+@@ -385,9 +387,141 @@ void CG_DrawPlayerWeaponIcon( rectDef_t *rect, qboolean drawHighlighted, int ali
+  * fade window the icon itself is drawn with) - so the cue never fires for
+  * a hint the player can't actually see.
+  */
++/* The words for one of the engine's cursor hint icons.
++
++   Switched on the names, never the numbers. This tree still carries the
++   whole Wolfenstein list while ET: Legacy has struck a dozen of them out
++   without renumbering what was left, so the same icon is a different
++   number in the two engines and a table indexed by position would be
++   quietly wrong in one of them.
++
++   Every hint CG_DrawCursorhint below gives an icon to has a case here,
++   including the ones that deliberately say nothing. That is not tidiness:
++   a hint that falls through to a default would be announced as whatever
++   the last case happened to be, and there is no worse failure available
++   to this mod than confidently naming the wrong thing. */
++static ETA_Interaction ETA_InteractionForHint( int icon ) {
++	switch ( icon ) {
++	case HINT_ACTIVATE:
++	case HINT_PLAYER:
++	case HINT_BAD_USER:
++		return ETA_INTERACT_USABLE;
++	case HINT_CHAIR:
++		/* The engine draws "not usable" for this one - the chair icon
++		   behind it is #if 0'd out - so this is what a sighted player is
++		   actually being told. */
++		return ETA_INTERACT_NOT_USABLE;
++	case HINT_DOOR:
++	case HINT_DOOR_ROTATING:
++		return ETA_INTERACT_DOOR;
++	case HINT_DOOR_LOCKED:
++	case HINT_DOOR_ROTATING_LOCKED:
++	case HINT_LOCKPICK:
++		/* The lockpick draws the locked-door icon, and this game has no
++		   lockpick to use on it. What is on screen is a locked door. */
++		return ETA_INTERACT_DOOR_LOCKED;
++	case HINT_BUTTON:
++		return ETA_INTERACT_BUTTON;
++	case HINT_LADDER:
++		return ETA_INTERACT_LADDER;
++	case HINT_WATER:
++		return ETA_INTERACT_WATER;
++	case HINT_MG42:
++		return ETA_INTERACT_MG42;
++	case HINT_TANK:
++		return ETA_INTERACT_TANK;
++	case HINT_BREAKABLE:
++		return ETA_INTERACT_BREAKABLE;
++	case HINT_BREAKABLE_DYNAMITE:
++		return ETA_INTERACT_NEEDS_DYNAMITE;
++	/* The pliers, both ways round. The engine draws the same build icon
++	   for a construction as for a repair, so they are one report; the
++	   disarm is its own icon and its own words, because planting where
++	   you meant to defuse loses the round. */
++	case HINT_BUILD:
++	case HINT_CONSTRUCTIBLE:
++		return ETA_INTERACT_BUILD;
++	case HINT_DISARM:
++		return ETA_INTERACT_DISARM;
++	case HINT_DYNAMITE:
++		return ETA_INTERACT_PLANT_DYNAMITE;
++	case HINT_LANDMINE:
++		return ETA_INTERACT_LANDMINE;
++	case HINT_SATCHELCHARGE:
++		return ETA_INTERACT_SATCHEL;
++	case HINT_REVIVE:
++		return ETA_INTERACT_REVIVE;
++	case HINT_HEALTH:
++		return ETA_INTERACT_HEALTH;
++	case HINT_AMMO:
++		return ETA_INTERACT_AMMO;
++	case HINT_WEAPON:
++		return ETA_INTERACT_WEAPON;
++	case HINT_POWERUP:
++		return ETA_INTERACT_OBJECTIVE;
++	case HINT_UNIFORM:
++		return ETA_INTERACT_UNIFORM;
++	case HINT_KNIFE:
++		return ETA_INTERACT_KNIFE;
++	/* Wolfenstein signage. ET's own server code raises none of these,
++	   but a map can still ask for one by name through the cursorhint
++	   key, and a hint with no words is indistinguishable from no hint. */
++	case HINT_ALARM:
++		return ETA_INTERACT_ALARM;
++	case HINT_TREASURE:
++		return ETA_INTERACT_TREASURE;
++	case HINT_CAUTION:
++		return ETA_INTERACT_CAUTION;
++	case HINT_DANGER:
++		return ETA_INTERACT_DANGER;
++	case HINT_SECRET:
++		return ETA_INTERACT_SECRET;
++	case HINT_CLIPBOARD:
++		return ETA_INTERACT_NOTE;
++	case HINT_QUESTION:
++		return ETA_INTERACT_QUESTION;
++	case HINT_EXCLAMATION:
++		return ETA_INTERACT_ATTENTION;
++	case HINT_ARMOR:
++		return ETA_INTERACT_ARMOUR;
++	case HINT_HOLDABLE:
++	case HINT_INVENTORY:
++		return ETA_INTERACT_ITEM;
++	/* Said deliberately as nothing. HINT_NONE and HINT_FORCENONE mean
++	   there is nothing there; the four player icons name whoever is
++	   under the crosshair, which is a different question with a rule of
++	   its own - a disguised covert operative must sound like what a
++	   sighted player sees, and these icons do not carry that. */
++	case HINT_NONE:
++	case HINT_FORCENONE:
++	case HINT_PLYR_FRIEND:
++	case HINT_PLYR_NEUTRAL:
++	case HINT_PLYR_ENEMY:
++	case HINT_PLYR_UNKNOWN:
++	default:
++		return ETA_INTERACT_NONE;
++	}
++}
++
++/* How long a hint has to stay up before it is worth saying.
++
++   The cue fires the instant an icon appears, and should: that is the
++   sighted player's flicker of movement at the edge of the eye. The words
++   are different. Turning through a supply room puts four or five hints
++   under the crosshair in under a second, and naming every one of them is
++   a voice that cannot be listened to. So the sound says "there is
++   something here" at once, and the words follow for whatever the player
++   is still looking at a quarter of a second later. */
++#define ETA_HINT_SETTLE_MS 250
++
+ static void ETA_NarrateInteractionHint( qboolean active ) {
+ 	static qboolean wasActive = qfalse;
+ 	static int lastIcon = HINT_NONE;
++	static int heldIcon = -1;
++	static int heldSince;
++	static qboolean heldSpoken = qfalse;
++	ETA_Interaction what;
++	int percent;
+ 
+ 	if ( active && ( !wasActive || cg.cursorHintIcon != lastIcon ) ) {
+ 		ETA_AudioCueSystem_PlayInteractionCue();
+@@ -395,6 +529,46 @@ static void ETA_NarrateInteractionHint( qboolean active ) {
+ 	}
+ 
+ 	wasActive = active;
++
++	if ( !eta_interactionCallouts.integer || !active ) {
++		heldIcon = -1;
++		return;
++	}
++
++	if ( cg.cursorHintIcon != heldIcon ) {
++		heldIcon = cg.cursorHintIcon;
++		heldSince = cg.time;
++		heldSpoken = qfalse;
++		return;
++	}
++
++	if ( heldSpoken || cg.time - heldSince < ETA_HINT_SETTLE_MS ) {
++		return;
++	}
++
++	heldSpoken = qtrue;
++
++	what = ETA_InteractionForHint( cg.cursorHintIcon );
++
++	if ( what == ETA_INTERACT_NONE ) {
++		return;
++	}
++
++	/* The same number the status bar under the icon draws, on the same
++	   condition it draws it: how far a construction has got, how much is
++	   left of a breakable. Without it "pliers, build here" is the same
++	   sentence whether nobody has started or somebody is about to
++	   finish. */
++	percent = cg.cursorHintValue ?
++			  (int)( ( (float)cg.cursorHintValue / 255.0f ) * 100.0f ) : -1;
++
++	if ( percent > 100 ) {
++		percent = 100;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakInteraction( what, percent );
++	ETA_Speech_EndReport();
+ }
+ #endif
+ 

@@ -1,0 +1,224 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 7edc4d6..3dcf826 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -5547,7 +5547,7 @@ void CG_AccessibilityMarkerFrame(void)
+ 			length = VectorNormalize(direction);
+ 			VectorMA(eye, MIN(length, ETA_MARKER_BEACON_DISTANCE), direction, origin);
+ 
+-			trap_S_AddLoopingSound(origin, vec3_origin, sfx, 255, 0);
++			trap_S_AddLoopingSound(origin, vec3_origin, sfx, CG_AccessibilityLoopVolume(ETA_LOOP_MARKER), 0);
+ 		}
+ 	}
+ }
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index d6b41b2..23c80ee 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3502,7 +3502,8 @@ static void ETA_BeaconDoors(void)
+ 
+ 		if (sfx)
+ 		{
+-			trap_S_AddLoopingSound(origin, vec3_origin, sfx, 255, 0);
++			trap_S_AddLoopingSound(origin, vec3_origin, sfx,
++			                       CG_AccessibilityLoopVolume(locked ? ETA_LOOP_DOOR_LOCKED : ETA_LOOP_DOOR), 0);
+ 		}
+ 	}
+ }
+@@ -3654,7 +3655,7 @@ static void ETA_BeaconSites(void)
+ 
+ 		if (sfx)
+ 		{
+-			trap_S_AddLoopingSound(origin, vec3_origin, sfx, 255, 0);
++			trap_S_AddLoopingSound(origin, vec3_origin, sfx, CG_AccessibilityLoopVolume(which), 0);
+ 		}
+ 	}
+ }
+@@ -3937,7 +3938,7 @@ static void ETA_BeaconLadders(void)
+ 
+ 	for (i = 0; sfx && i < used; i++)
+ 	{
+-		trap_S_AddLoopingSound(points[i], vec3_origin, sfx, 255, 0);
++		trap_S_AddLoopingSound(points[i], vec3_origin, sfx, CG_AccessibilityLoopVolume(ETA_LOOP_LADDER), 0);
+ 	}
+ }
+ 
+@@ -5391,7 +5392,8 @@ static void ETA_NarrateCrosshair(void)
+ 		/* At the view origin, so it sits centred: this is about the
+ 		   crosshair, which is always straight ahead, not about where
+ 		   the other player is. */
+-		trap_S_AddLoopingSound(cg.refdef.vieworg, vec3_origin, sfx, 255, 0);
++		trap_S_AddLoopingSound(cg.refdef.vieworg, vec3_origin, sfx,
++		                       CG_AccessibilityLoopVolume(enemy ? ETA_LOOP_CROSSHAIR_ENEMY : ETA_LOOP_CROSSHAIR_TEAMMATE), 0);
+ 	}
+ }
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 7409845..77b82fd 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3549,6 +3549,7 @@ typedef enum
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
++int         CG_AccessibilityLoopVolume(eta_loopSoundType_t which);
+ 
+ extern vmCvar_t eta_doorCues;
+ extern vmCvar_t eta_siteCues;
+@@ -3572,6 +3573,12 @@ extern vmCvar_t eta_speechRate;
+ extern vmCvar_t eta_speechPitch;
+ extern vmCvar_t eta_speechVolume;
+ extern vmCvar_t eta_announcerVolume;
++extern vmCvar_t eta_markerVolume;
++extern vmCvar_t eta_siteVolume;
++extern vmCvar_t eta_doorVolume;
++extern vmCvar_t eta_ladderVolume;
++extern vmCvar_t eta_crosshairVolume;
++extern vmCvar_t eta_cueVolume;
+ int CG_AccessibilityAnnouncerVolume(void);
+ 
+ /* Called where the game itself moves the music, so the accessibility
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 7ea6fc9..3f80e65 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2198,6 +2198,15 @@ vmCvar_t eta_speechVolume;
+    been destroyed". The tester found it louder than the marker; 100 is
+    the game's own level. */
+ vmCvar_t eta_announcerVolume;
++/* How loud each kind of the mod's own sounds is, 0 to 100, on the Sound
++   page: the tester asked for the sounds to have a page of their own,
++   apart from the speech settings, which belong to the screen reader. */
++vmCvar_t eta_markerVolume;
++vmCvar_t eta_siteVolume;
++vmCvar_t eta_doorVolume;
++vmCvar_t eta_ladderVolume;
++vmCvar_t eta_crosshairVolume;
++vmCvar_t eta_cueVolume;
+ vmCvar_t eta_locationCallouts;
+ vmCvar_t eta_placeCallouts;
+ vmCvar_t eta_interactionCallouts;
+@@ -2305,6 +2314,14 @@ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which)
+ 	return ETA_CueSound(&eta_loopSounds[which]);
+ }
+ 
++/**
++ * @brief A share of full from a 0-100 volume setting.
++ */
++static int ETA_VolumePercent(const vmCvar_t *cvar)
++{
++	return cvar->integer <= 0 ? 0 : cvar->integer >= 100 ? 100 : cvar->integer;
++}
++
+ /**
+  * @brief Plays an accessibility cue through the engine's sound system.
+  * @param[in] type the cue being played
+@@ -2315,6 +2332,7 @@ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which)
+ static void ETA_PlayCueSound(ETA_AudioCueType type, int directionDegrees, int hasDirection, void *userData)
+ {
+ 	sfxHandle_t sfx;
++	int         volume;
+ 
+ 	(void)userData;
+ 
+@@ -2330,9 +2348,24 @@ static void ETA_PlayCueSound(ETA_AudioCueType type, int directionDegrees, int ha
+ 		return;
+ 	}
+ 
++	/* At eta_cueVolume; at 100 played as they always were, at the game's
++	   own 127. */
++	volume = (127 * ETA_VolumePercent(&eta_cueVolume)) / 100;
++	if (!volume)
++	{
++		return;
++	}
++
+ 	if (!hasDirection || !cg.snap)
+ 	{
+-		trap_S_StartLocalSound(sfx, CHAN_AUTO);
++		if (volume >= 127 || !cg.snap)
++		{
++			trap_S_StartLocalSound(sfx, CHAN_AUTO);
++		}
++		else
++		{
++			trap_S_StartSoundVControl(NULL, cg.snap->ps.clientNum, CHAN_AUTO, sfx, volume);
++		}
+ 		return;
+ 	}
+ 
+@@ -2349,7 +2382,7 @@ static void ETA_PlayCueSound(ETA_AudioCueType type, int directionDegrees, int ha
+ 		AngleVectors(angles, forward, NULL, NULL);
+ 		VectorMA(cg.snap->ps.origin, ETA_CUE_DISTANCE, forward, origin);
+ 
+-		trap_S_StartSound(origin, -1, CHAN_AUTO, sfx);
++		trap_S_StartSoundVControl(origin, -1, CHAN_AUTO, sfx, volume);
+ 	}
+ }
+ 
+@@ -2409,9 +2442,49 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },
+ 	{ &eta_speechVolume,        "eta_speechVolume",        "100" },
+-	{ &eta_announcerVolume,     "eta_announcerVolume",     "100" }
++	{ &eta_announcerVolume,     "eta_announcerVolume",     "100" },
++	{ &eta_markerVolume,        "eta_markerVolume",        "100" },
++	{ &eta_siteVolume,          "eta_siteVolume",          "100" },
++	{ &eta_doorVolume,          "eta_doorVolume",          "100" },
++	{ &eta_ladderVolume,        "eta_ladderVolume",        "100" },
++	{ &eta_crosshairVolume,     "eta_crosshairVolume",     "100" },
++	{ &eta_cueVolume,           "eta_cueVolume",           "100" }
+ };
+ 
++/**
++ * @brief How loud one of the mod's looping sounds plays, on the scale the
++ * game hands a looping sound: 255 is full, the level they always had.
++ */
++int CG_AccessibilityLoopVolume(eta_loopSoundType_t which)
++{
++	const vmCvar_t *cvar;
++
++	switch (which)
++	{
++	case ETA_LOOP_DOOR:
++	case ETA_LOOP_DOOR_LOCKED:
++		cvar = &eta_doorVolume;
++		break;
++	case ETA_LOOP_CROSSHAIR_ENEMY:
++	case ETA_LOOP_CROSSHAIR_TEAMMATE:
++		cvar = &eta_crosshairVolume;
++		break;
++	case ETA_LOOP_BUILD_SITE:
++	case ETA_LOOP_DEMOLITION_TARGET:
++	case ETA_LOOP_FLAG:
++		cvar = &eta_siteVolume;
++		break;
++	case ETA_LOOP_LADDER:
++		cvar = &eta_ladderVolume;
++		break;
++	default:
++		cvar = &eta_markerVolume;
++		break;
++	}
++
++	return (255 * ETA_VolumePercent(cvar)) / 100;
++}
++
+ /**
+  * @brief The map's voice at eta_announcerVolume, as a share of full:
+  * 0 to 99 - or -1 at 100, for the game's own way of playing it.
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 4f7eaca..f33f968 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -1597,6 +1597,10 @@ void UI_LoadMenus(const char *menuFile, qboolean reset)
+ 	UI_ParseMenu("ui/options_accessibility_speech.menu");
+ 	UI_ParseMenu("ui/options_accessibility_keys.menu");
+ 
++	/* How loud the mod's sounds and the announcer are: asked for on a
++	   page of its own, apart from the screen reader's speech settings. */
++	UI_ParseMenu("ui/options_accessibility_sound.menu");
++
+ 	/* And one for hosting your own game: bots, and friends joining with
+ 	   the plain game. */
+ 	UI_ParseMenu("ui/options_accessibility_hosting.menu");

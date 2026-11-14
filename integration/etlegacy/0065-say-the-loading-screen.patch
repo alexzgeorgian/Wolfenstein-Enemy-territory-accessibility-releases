@@ -1,0 +1,353 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index eb772b0..b04376e 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -7793,6 +7793,9 @@ void CG_DrawActive()
+ 
+ 	ETA_NarrateCrosshair();
+ 
++	/* The load is over: said once, after the briefing. */
++	CG_AccessibilityLoadingFrame();
++
+ 	/* The marker's sound, and arriving at it. The sound is not speech,
+ 	   and arriving is the one thing the marker exists to say. */
+ 	CG_AccessibilityMarkerFrame();
+diff --git a/src/cgame/cg_info.c b/src/cgame/cg_info.c
+index 7acd456..339f48c 100644
+--- a/src/cgame/cg_info.c
++++ b/src/cgame/cg_info.c
+@@ -105,6 +105,11 @@ void CG_LoadingString(const char *s)
+ 		CG_Printf("LOADING... %s\n", s);      // added so you can see from the console what's going on
+ 
+ 	}
++
++#ifdef FEATURE_ACCESSIBILITY
++	/* How far the bar under this has got. */
++	CG_AccessibilityLoadingProgress();
++#endif
+ }
+ 
+ /**
+diff --git a/src/cgame/cg_loadpanel.c b/src/cgame/cg_loadpanel.c
+index 3548333..778c1bf 100644
+--- a/src/cgame/cg_loadpanel.c
++++ b/src/cgame/cg_loadpanel.c
+@@ -34,6 +34,12 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/accessibility_runtime.h"
++#include "core/runtime_guard.h"
++#include "speech/speech_manager.h"
++#endif
++
+ extern displayContextDef_t *DC;
+ 
+ qboolean  bg_loadscreeninited = qfalse;
+@@ -783,3 +789,158 @@ void CG_LoadPanel_LoadingBarText(panel_button_t *button)
+ {
+ 	CG_Text_Paint_Ext(button->rect.x, button->rect.y, button->font->scalex, button->font->scaley, button->font->colour, cg.infoScreenText, 0, 0, 0, button->font->font);
+ }
++
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief The loading screen, said.
++ *
++ * A sighted player spends the load reading it: the map's name, the game
++ * type, and the mission briefing, with a bar filling underneath. A
++ * tester asked for the same, and to be told when the load was over and
++ * the team and class menu could be opened.
++ *
++ * The briefing is said as the load begins - the game has it by then -
++ * and the bar at a quarter, a half and three quarters, but never over
++ * the top of the briefing: every speech backend cuts off the line in
++ * progress, so a figure arriving mid-briefing would lose the briefing.
++ * The line that the load is over waits for the briefing too, once.
++ */
++static int      eta_loadingBriefingUntil;   /* in trap_Milliseconds */
++static int      eta_loadingMilestones;      /* bit per quarter said */
++static qboolean eta_loadingReadySaid = qtrue;
++
++static void ETA_LoadingSay(const char *text)
++{
++	ETA_Speech_Say(text);
++	eta_loadingBriefingUntil = trap_Milliseconds() + ETA_Speech_EstimateDurationMs(text);
++}
++
++void CG_AccessibilityLoadingBegin(void)
++{
++	char       text[ETA_MAX_SPEECH_TEXT_LENGTH + 1];
++	char       briefing[2048];
++	const char *name        = cgs.rawmapname;
++	const char *description = "";
++	char       *end;
++
++	/* The rest of the mod's start-up comes at the end of the load. The
++	   voice is needed now, and starting it twice is harmless. */
++	ETA_AccessibilityRuntime_Init();
++
++	eta_loadingMilestones = 0;
++	eta_loadingReadySaid  = qfalse;
++
++	if (cgs.gametype == GT_WOLF_CAMPAIGN && cgs.campaignInfoLoaded)
++	{
++		name        = va("%s, map %i of %i", cgs.campaignData.campaignName,
++		                 cgs.currentCampaignMap + 1, cgs.campaignData.mapCount);
++		description = cgs.campaignData.campaignDescription;
++	}
++	else if (cgs.arenaInfoLoaded)
++	{
++		name        = cgs.arenaData.longname;
++		description = (cgs.gametype == GT_WOLF_LMS) ? cgs.arenaData.lmsdescription
++		                                           : cgs.arenaData.description;
++	}
++
++	CG_AccessibilitySpeakableText(description, briefing, sizeof(briefing));
++
++	Com_sprintf(text, sizeof(text), "Loading %s. %s. %s", name,
++	            CG_LoadPanel_GameTypeName(cgs.gametype), briefing);
++
++	/* Too long for one line: end at the last whole sentence that fits,
++	   rather than lose the lot. */
++	if (strlen(text) >= ETA_MAX_SPEECH_TEXT_LENGTH)
++	{
++		text[ETA_MAX_SPEECH_TEXT_LENGTH - 1] = '\0';
++		end = strrchr(text, '.');
++		if (end)
++		{
++			end[1] = '\0';
++		}
++	}
++
++	ETA_LoadingSay(text);
++}
++
++void CG_AccessibilityLoadingProgress(void)
++{
++	int used, expected, percent, quarter;
++
++	if (eta_loadingReadySaid)
++	{
++		return;
++	}
++
++	trap_GetHunkData(&used, &expected);
++
++	if (expected <= 0)
++	{
++		/* The first load of a map on this machine has nothing to measure
++		   against; the bar on screen is empty then too. */
++		return;
++	}
++
++	percent = (int)(100.0f * (float)used / (float)expected);
++	quarter = MIN(percent / 25, 3);
++
++	if (quarter < 1 || (eta_loadingMilestones & (1 << quarter)))
++	{
++		return;
++	}
++
++	/* Spent even when not said, so a briefing that outlasts the first
++	   quarter is not followed by three numbers at once. */
++	eta_loadingMilestones |= (1 << quarter);
++
++	if (trap_Milliseconds() < eta_loadingBriefingUntil)
++	{
++		return;
++	}
++
++	ETA_LoadingSay(va("Loading, %i percent", MIN(percent, 99)));
++}
++
++void CG_AccessibilityLoadingFrame(void)
++{
++	char text[128];
++	int  key1 = -1, key2 = -1;
++
++	if (eta_loadingReadySaid || !cg.snap)
++	{
++		return;
++	}
++
++	if (trap_Milliseconds() < eta_loadingBriefingUntil)
++	{
++		return;
++	}
++
++	eta_loadingReadySaid = qtrue;
++
++	if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR)
++	{
++		ETA_Speech_Say("Loaded");
++		return;
++	}
++
++	trap_Key_KeysForBinding("openlimbomenu", &key1, &key2);
++
++	if (key1 != -1)
++	{
++		char keyName[32];
++
++		trap_Key_KeynumToStringBuf(key1, keyName, sizeof(keyName));
++		Q_strupr(keyName);
++		Com_sprintf(text, sizeof(text),
++		            "Loaded. Press %s to choose your team and class", keyName);
++	}
++	else
++	{
++		Q_strncpyz(text, "Loaded. Open the limbo menu to choose your team and class",
++		           sizeof(text));
++	}
++
++	ETA_Speech_Say(text);
++}
++#endif
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 82671f4..db20e8d 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3417,6 +3417,9 @@ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObj
+ int CG_AccessibilityObjectiveCount(team_t team);
+ int CG_AccessibilityObjectiveState(team_t team, int number);
+ void CG_AccessibilitySpeakableText(const char *in, char *out, size_t outSize);
++void CG_AccessibilityLoadingBegin(void);
++void CG_AccessibilityLoadingProgress(void);
++void CG_AccessibilityLoadingFrame(void);
+ const char *CG_AccessibilityObjectiveDescription(team_t team, int number);
+ int CG_AccessibilityCurrentObjective(team_t team);
+ qboolean CG_AccessibilityObjectiveByNumber(team_t team, int number, etaObjective_t *out);
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index e71e179..a19e50c 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2620,6 +2620,12 @@ void CG_Init(int serverMessageNum, int serverCommandSequence, int clientNum, qbo
+ 		CG_LocateArena();
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* The loading screen's words, now that the map's name and briefing
++	   are known. */
++	CG_AccessibilityLoadingBegin();
++#endif
++
+ 	CG_ClearTrails();
+ 
+ 	// check version
+diff --git a/src/ui/ui_loadpanel.c b/src/ui/ui_loadpanel.c
+index 3411587..926d076 100644
+--- a/src/ui/ui_loadpanel.c
++++ b/src/ui/ui_loadpanel.c
+@@ -33,6 +33,10 @@
+  */
+ 
+ #include "ui_local.h"
++
++#ifdef FEATURE_ACCESSIBILITY
++#include "speech/speech_manager.h"
++#endif
+ #include "ui_shared.h"
+ 
+ qboolean bg_loadscreeninited = qfalse;
+@@ -340,6 +344,89 @@ const char *UI_DownloadInfo(const char *downloadName)
+ 	return s;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief The connection screen, said as it changes.
++ *
++ * Before the map loads there is a stretch where the screen says who the
++ * game is connecting to and what it is waiting for, and a download bar
++ * when the server has a file the player does not. Silent, that stretch
++ * is indistinguishable from the game having hung. Each new state is
++ * said once - not the packet counter that ticks beside it - and a
++ * download at a quarter, a half and three quarters. The server's own
++ * message, such as a refusal, is said when it changes.
++ */
++static void ETA_UiNarrateConnect(const uiClientState_t *cstate, char *downloadName)
++{
++	static int  lastState = -1;
++	static char lastDownload[MAX_QPATH];
++	static char lastMessage[MAX_STRING_CHARS];
++	static int  lastQuarter;
++
++	if (cstate->connState != lastState)
++	{
++		lastState = cstate->connState;
++
++		switch (cstate->connState)
++		{
++		case CA_CONNECTING:
++			ETA_Speech_Say(va("Connecting to %s", cstate->servername));
++			break;
++		case CA_CHALLENGING:
++			ETA_Speech_Say("Awaiting challenge");
++			break;
++		case CA_CONNECTED:
++			if (!*downloadName)
++			{
++				ETA_Speech_Say("Connected. Awaiting game state");
++			}
++			break;
++		default:
++			/* Loading is the map's to say: the game speaks its name and
++			   briefing from there. */
++			break;
++		}
++	}
++
++	if (*downloadName)
++	{
++		int count = (int)trap_Cvar_VariableValue("cl_downloadCount");
++		int size  = (int)trap_Cvar_VariableValue("cl_downloadSize");
++
++		if (Q_stricmp(downloadName, lastDownload))
++		{
++			Q_strncpyz(lastDownload, downloadName, sizeof(lastDownload));
++			lastQuarter = 0;
++			ETA_Speech_Say(va("Downloading %s", COM_SkipPath(downloadName)));
++		}
++		else if (size > 0)
++		{
++			int quarter = MIN(4 * count / size, 3);
++
++			if (quarter > lastQuarter)
++			{
++				lastQuarter = quarter;
++				ETA_Speech_Say(va("Downloading, %i percent", 100 * count / size));
++			}
++		}
++	}
++	else
++	{
++		lastDownload[0] = '\0';
++	}
++
++	if (cstate->connState < CA_CONNECTED && Q_stricmp(cstate->messageString, lastMessage))
++	{
++		Q_strncpyz(lastMessage, cstate->messageString, sizeof(lastMessage));
++
++		if (lastMessage[0])
++		{
++			ETA_Speech_Say(lastMessage);
++		}
++	}
++}
++#endif
++
+ /**
+  * @brief UI_LoadPanel_RenderLoadingText
+  * @param[in] button
+@@ -365,6 +452,10 @@ void UI_LoadPanel_RenderLoadingText(panel_button_t *button)
+ 
+ 	trap_Cvar_VariableStringBuffer("cl_downloadName", downloadName, sizeof(downloadName));
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_UiNarrateConnect(&cstate, downloadName);
++#endif
++
+ 	if (!connect_ownerdraw)
+ 	{
+ 		if (trap_Cvar_VariableValue("ui_connecting") == 0.f)

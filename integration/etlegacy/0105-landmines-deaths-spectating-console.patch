@@ -1,0 +1,930 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index cceb7b2..241d68f 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -3008,6 +3008,7 @@ typedef struct
+ 	qboolean overEdge;    /* steer is across a jump or up a ladder */
+ 	qboolean onWay;       /* steer is the way's next point, from on the way */
+ 	qboolean jumps;       /* this search may jump: there was no way without */
++	qboolean throughMines; /* this search may cross a mine: there was no way round */
+ 	vec3_t   stairsAt;    /* the foot of the stairs last told of */
+ 	qboolean saidStairs;
+ } eta_route_t;
+@@ -3208,6 +3209,121 @@ static int ETA_RouteMoveExact(void *context, const float from[3], float to[3])
+ 	return ledge ? ETA_PATH_JUMP : crouch ? ETA_PATH_CROUCH : ETA_PATH_WALK;
+ }
+ 
++/**
++ * @brief The landmines the player has been shown: the way keeps clear
++ * of them.
++ *
++ * The tester kept dying to landmines. Only the ones the game shows the
++ * player are here - spotted by a teammate, or seen with the skill to see
++ * them (cg_draw.c sets them each frame) - so the way never steers round
++ * a mine a sighted player could not know of. A mine goes off for a
++ * player 64 units from it (sEntWillTriggerMine), so a square nearer
++ * than that and a little more is no square to step on. Where there is
++ * no way round - a mine in the one doorway - the way goes on through,
++ * and the warning says it is there.
++ */
++#define ETA_ROUTE_AVOID_RADIUS 72.0f
++#define ETA_ROUTE_AVOID_MAX    32   /* the most kept clear of at once */
++
++static float    eta_routeAvoid[ETA_ROUTE_AVOID_MAX][3];
++static int      eta_routeAvoidCount;
++static qboolean eta_routeAvoidNew;   /* a mine not known when the way was planned */
++
++void CG_AccessibilityRouteAvoid(const float (*points)[3], int count)
++{
++	float was[ETA_ROUTE_AVOID_MAX][3];
++	int   wasCount = eta_routeAvoidCount, i, k;
++
++	memcpy(was, eta_routeAvoid, sizeof(was));
++	eta_routeAvoidCount = 0;
++	for (i = 0; i < count && i < ETA_ROUTE_AVOID_MAX; i++)
++	{
++		qboolean known = qfalse;
++
++		eta_routeAvoid[i][0] = points[i][0];
++		eta_routeAvoid[i][1] = points[i][1];
++		eta_routeAvoid[i][2] = points[i][2];
++		eta_routeAvoidCount++;
++
++		for (k = 0; k < wasCount && !known; k++)
++		{
++			known = fabs(was[k][0] - points[i][0]) < 1.0f && fabs(was[k][1] - points[i][1]) < 1.0f
++			        && fabs(was[k][2] - points[i][2]) < 1.0f;
++		}
++		if (!known)
++		{
++			eta_routeAvoidNew = qtrue;
++		}
++	}
++}
++
++static qboolean ETA_RouteAvoided(const float at[3])
++{
++	int i;
++
++	if (eta_route.throughMines)
++	{
++		return qfalse;
++	}
++
++	for (i = 0; i < eta_routeAvoidCount; i++)
++	{
++		float dx = at[0] - eta_routeAvoid[i][0], dy = at[1] - eta_routeAvoid[i][1];
++
++		if (dx * dx + dy * dy < ETA_ROUTE_AVOID_RADIUS * ETA_ROUTE_AVOID_RADIUS
++		    && fabs(at[2] - eta_routeAvoid[i][2]) < 64.0f)
++		{
++			return qtrue;
++		}
++	}
++	return qfalse;
++}
++
++/**
++ * @brief Whether a straight walk goes nearer a mine than the way keeps.
++ *
++ * Every step of the way, and the straight walks that follow it: the way
++ * is followed by walking straight to the furthest point of it that can
++ * be walked to, which cuts its corners - and a corner round a mine, cut,
++ * goes over the mine. A walk that only takes the player further from a
++ * mine they are already near is let through: it is the way out.
++ */
++static qboolean ETA_RouteLineAvoided(const float from[3], const float to[3])
++{
++	float dx = to[0] - from[0], dy = to[1] - from[1];
++	float length2 = dx * dx + dy * dy;
++	int   i;
++
++	if (eta_route.throughMines)
++	{
++		return qfalse;
++	}
++
++	for (i = 0; i < eta_routeAvoidCount; i++)
++	{
++		const float *mine = eta_routeAvoid[i];
++		float       f     = length2 > 0.0f ? ((mine[0] - from[0]) * dx + (mine[1] - from[1]) * dy) / length2 : 0.0f;
++		float       ax, ay, closest, already;
++
++		if (fabs(from[2] - mine[2]) >= 64.0f && fabs(to[2] - mine[2]) >= 64.0f)
++		{
++			continue;
++		}
++
++		f       = f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
++		ax      = from[0] + dx * f - mine[0];
++		ay      = from[1] + dy * f - mine[1];
++		closest = sqrt(ax * ax + ay * ay);
++		already = sqrt((from[0] - mine[0]) * (from[0] - mine[0]) + (from[1] - mine[1]) * (from[1] - mine[1]));
++
++		if (closest < ETA_ROUTE_AVOID_RADIUS && closest < already - 1.0f)
++		{
++			return qtrue;
++		}
++	}
++	return qfalse;
++}
++
+ /**
+  * @brief A step to the next square, or to a point a little to either
+  * side of it.
+@@ -3262,6 +3378,11 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ 			tried[across] += shifts[i];
+ 		}
+ 
++		if (ETA_RouteLineAvoided(from, tried))
++		{
++			continue;
++		}
++
+ 		kind = ETA_RouteMoveExact(context, from, tried);
+ 
+ 		if (kind == ETA_PATH_WALK)
+@@ -3407,7 +3528,7 @@ static float ETA_RouteWalkable(const vec3_t from, const vec3_t to)
+ 
+ static qboolean ETA_RouteClear(const vec3_t from, const vec3_t to)
+ {
+-	return (qboolean)(ETA_RouteWalkable(from, to) >= 1.0f);
++	return (qboolean)(ETA_RouteWalkable(from, to) >= 1.0f && !ETA_RouteLineAvoided(from, to));
+ }
+ 
+ /**
+@@ -3501,6 +3622,9 @@ static void ETA_RoutePlanWith(qboolean jumps)
+ 	eta_route.along     = 0;
+ 	eta_route.saidJump  = -1;
+ 	eta_route.jumps     = jumps;
++
++	eta_route.throughMines = qfalse;
++	eta_routeAvoidNew      = qfalse;
+ }
+ 
+ static void ETA_RoutePlan(void)
+@@ -3936,6 +4060,34 @@ static void ETA_RouteFrame(void)
+ 		ETA_RoutePlanWith(qtrue);
+ 		state = ETA_PathFinder_State();
+ 	}
++	/* No way round the mines at all: the way goes through, and the
++	   warning says where they are. */
++	else if (eta_route.jumps && !eta_route.throughMines && eta_routeAvoidCount > 0
++	         && (state == ETA_PATH_FAILED || state == ETA_PATH_PARTIAL))
++	{
++		ETA_RoutePlanWith(qtrue);
++		eta_route.throughMines = qtrue;
++		state                  = ETA_PathFinder_State();
++	}
++	/* A mine come into sight on the way already found: find it again. */
++	else if (eta_routeAvoidNew && !eta_route.throughMines && state != ETA_PATH_SEARCHING)
++	{
++		int count = ETA_PathFinder_PointCount(), i;
++
++		eta_routeAvoidNew = qfalse;
++		for (i = eta_route.along; i < count; i++)
++		{
++			float point[3];
++
++			ETA_PathFinder_Point(i, point);
++			if (ETA_RouteAvoided(point))
++			{
++				ETA_RoutePlanWith(eta_route.jumps);
++				state = ETA_PathFinder_State();
++				break;
++			}
++		}
++	}
+ 
+ 	if (state == ETA_PATH_FAILED
+ 	    && (cg.time - eta_route.startedAt > ETA_ROUTE_RETRY_MS || cg.time < eta_route.startedAt))
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index eb8e44e..49b1914 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4656,6 +4656,235 @@ static void ETA_BeaconPickups(void)
+ 	}
+ }
+ 
++/**
++ * @brief The armed landmines this player can see, by the game's own
++ * rule: ETA_MINE_ENEMY, ETA_MINE_FRIENDLY, or ETA_MINE_NONE.
++ *
++ * The tester kept dying on enemy mines the narrator never named. What a
++ * sighted player sees of a mine is decided in CG_Missile, and this is
++ * that rule, no more: an enemy mine once armed is hidden in the ground,
++ * and shows only once someone on this team has spotted it - the flag a
++ * covert op or a field op's binoculars leaves on it - or, with the
++ * battle sense skill that shows traps, within 256 units. A spectator
++ * sees no armed mine at all. The player's own team's mines are always
++ * shown; a teammate sets one off as surely as an enemy does
++ * (G_LandmineThink checks no team), and with friendly fire on it hurts.
++ */
++#define ETA_MINE_SEEN_CLOSE 256.0f   /* CG_Missile's trap awareness reach */
++
++typedef enum
++{
++	ETA_MINE_NONE = 0,
++	ETA_MINE_ENEMY,
++	ETA_MINE_FRIENDLY
++} eta_mineSeen_t;
++
++static eta_mineSeen_t ETA_MineSeen(const centity_t *cent)
++{
++	const entityState_t *es = &cent->currentState;
++	team_t              team;
++
++	if (es->eType != ET_MISSILE || es->weapon != WP_LANDMINE || es->effect1Time != 1)
++	{
++		return ETA_MINE_NONE;
++	}
++
++	if (cgs.clientinfo[cg.clientNum].team == TEAM_SPECTATOR && !cgs.clientinfo[cg.clientNum].shoutcaster)
++	{
++		return ETA_MINE_NONE;
++	}
++
++	team = cgs.clientinfo[cg.snap->ps.clientNum].team;
++	if (team == TEAM_SPECTATOR)
++	{
++		return ETA_MINE_NONE;
++	}
++
++	if (es->teamNum == team || es->density - 1 == cg.snap->ps.clientNum)
++	{
++		return ETA_MINE_FRIENDLY;
++	}
++
++	if (es->modelindex2 || cgs.clientinfo[cg.clientNum].shoutcaster)
++	{
++		return ETA_MINE_ENEMY;
++	}
++
++	if (BG_IsSkillAvailable(cgs.clientinfo[cg.snap->ps.clientNum].skill, SK_BATTLE_SENSE, SK_BATTLE_SENSE_TRAP_AWARENESS)
++	    && DistanceSquared(cent->lerpOrigin, cg.predictedPlayerEntity.lerpOrigin) <= Square(ETA_MINE_SEEN_CLOSE))
++	{
++		return ETA_MINE_ENEMY;
++	}
++
++	return ETA_MINE_NONE;
++}
++
++/**
++ * @brief Warns of each landmine the player can see: said as they come
++ * near it, with a fast warning beep from where it lies.
++ *
++ * Said once a mine is within ETA_MINE_SAY and in sight, with where it is
++ * and how far - "Enemy landmine, ahead, 6 meters" - and not again until
++ * the player has been ETA_MINE_REARM away. Several close together are
++ * said as one: "3 enemy landmines". The team's own are "Friendly
++ * landmine". The beep plays from the nearest two within ETA_MINE_BEEP,
++ * so stepping round one is heard as it happens.
++ *
++ * Every mine seen, in sight or not, is handed to the marker's way, which
++ * steps round it: one spotted is on the command map too, for a sighted
++ * player to walk round.
++ */
++#define ETA_MINE_SAY      400.0f   /* about ten metres */
++#define ETA_MINE_REARM    600.0f
++#define ETA_MINE_BEEP     240.0f   /* about six metres */
++#define ETA_MINE_BEEPS    2
++#define ETA_MINE_GROUP    160.0f   /* mines this close to the one said are said with it */
++#define ETA_MINE_AVOID    32       /* the most handed to the way at once */
++
++/* Where each mine said was lying, so a number the game hands to a new
++   mine later is a new mine. */
++static qboolean eta_mineSaid[MAX_GENTITIES];
++static vec3_t   eta_mineSaidAt[MAX_GENTITIES];
++
++static void ETA_NarrateMines(void)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	float               avoid[ETA_MINE_AVOID][3];
++	int                 beep[ETA_MINE_BEEPS];
++	float               beepDistance[ETA_MINE_BEEPS];
++	int                 avoidCount = 0, beepCount = 0, best = -1, i, k;
++	float               bestDistance = ETA_MINE_SAY;
++	vec3_t              eye;
++	static byte         seen[MAX_GENTITIES];
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	VectorCopy(ps->origin, eye);
++	eye[2] += ps->viewheight;
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		const centity_t     *cent = &cg_entities[es->number];
++		vec3_t              flag;
++		float               distance;
++
++		eta_mineSeen_t      kind = ETA_MineSeen(cent);
++
++		seen[es->number] = ETA_MINE_NONE;
++		if (kind == ETA_MINE_NONE)
++		{
++			continue;
++		}
++
++		if (avoidCount < ETA_MINE_AVOID)
++		{
++			VectorCopy(cent->lerpOrigin, avoid[avoidCount]);
++			avoidCount++;
++		}
++
++		if (eta_mineSaid[es->number] && Distance(eta_mineSaidAt[es->number], cent->lerpOrigin) > 1.0f)
++		{
++			eta_mineSaid[es->number] = qfalse;
++		}
++
++		distance = Distance(ps->origin, cent->lerpOrigin);
++		if (distance > ETA_MINE_REARM)
++		{
++			eta_mineSaid[es->number] = qfalse;
++			continue;
++		}
++
++		/* Its flag stands a little out of the ground. */
++		VectorCopy(cent->lerpOrigin, flag);
++		flag[2] += 16.0f;
++		if (ps->pm_type != PM_NORMAL || !ETA_ClearLine(eye, flag))
++		{
++			continue;
++		}
++		seen[es->number] = (byte)kind;
++
++		if (!eta_mineSaid[es->number] && distance <= bestDistance)
++		{
++			bestDistance = distance;
++			best         = es->number;
++		}
++
++		if (distance <= ETA_MINE_BEEP)
++		{
++			/* Nearest first; the furthest drops off the end. */
++			for (k = beepCount; k > 0 && beepDistance[k - 1] > distance; k--)
++			{
++				if (k < ETA_MINE_BEEPS)
++				{
++					beep[k]         = beep[k - 1];
++					beepDistance[k] = beepDistance[k - 1];
++				}
++			}
++			if (k < ETA_MINE_BEEPS)
++			{
++				beep[k]         = es->number;
++				beepDistance[k] = distance;
++				if (beepCount < ETA_MINE_BEEPS)
++				{
++					beepCount++;
++				}
++			}
++		}
++	}
++
++	CG_AccessibilityRouteAvoid((const float (*)[3])avoid, avoidCount);
++
++	if (eta_mineCues.integer)
++	{
++		sfxHandle_t sfx = CG_AccessibilityLoopSound(ETA_LOOP_MINE);
++
++		for (i = 0; sfx && i < beepCount; i++)
++		{
++			trap_S_AddLoopingSound(cg_entities[beep[i]].lerpOrigin, vec3_origin, sfx,
++			                       CG_AccessibilityLoopVolume(ETA_LOOP_MINE), 0);
++		}
++	}
++
++	if (best >= 0 && eta_mineCues.integer)
++	{
++		const centity_t *mine = &cg_entities[best];
++		char            what[32];
++		int             count = 0;
++
++		for (i = 0; i < cg.snap->numEntities; i++)
++		{
++			int number = cg.snap->entities[i].number;
++
++			if (seen[number] == seen[best] && Distance(cg_entities[number].lerpOrigin, mine->lerpOrigin) <= ETA_MINE_GROUP)
++			{
++				eta_mineSaid[number] = qtrue;
++				VectorCopy(cg_entities[number].lerpOrigin, eta_mineSaidAt[number]);
++				count++;
++			}
++		}
++
++		if (count > 1)
++		{
++			Com_sprintf(what, sizeof(what), "%d %s landmines", count,
++			            seen[best] == ETA_MINE_ENEMY ? "enemy" : "friendly");
++		}
++		else
++		{
++			Q_strncpyz(what, seen[best] == ETA_MINE_ENEMY ? "Enemy landmine" : "Friendly landmine", sizeof(what));
++		}
++
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(va("%s, %s, %d meters", what,
++		                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(mine->lerpOrigin)),
++		                  (int)(bestDistance * ETA_QU_TO_METERS + 0.5f)));
++		ETA_Speech_EndReport();
++	}
++}
++
+ /**
+  * @brief How far a point lies from where the player faces, positive to
+  * the left - the engine's yaw sense, which is what the words for a
+@@ -6360,14 +6589,98 @@ static ETA_PlayState ETA_PlayStateNow(char *following, size_t followingSize)
+ 	return ETA_PLAY_IN_PLAY;
+ }
+ 
++/**
++ * @brief Who is being watched, as it is said: "Hans, Axis Medic, 85
++ * health" - or "down" while they wait for a medic.
++ *
++ * The tester, spectating, wanted to know what the others were doing.
++ * Who it is, which side and class, and how they are, is what a sighted
++ * spectator reads off the screen the moment the view lands on them; the
++ * rest - what they kill, what kills them, the gun they change to, being
++ * revived - is said as it happens.
++ */
++static void ETA_DescribeFollowed(const char *name, char *out, int outSize)
++{
++	const playerState_t *ps = &cg.snap->ps;
++	const clientInfo_t  *ci = &cgs.clientinfo[ps->clientNum];
++	const char          *side = ci->team == TEAM_AXIS ? "Axis " : ci->team == TEAM_ALLIES ? "Allied " : "";
++
++	if (ps->stats[STAT_HEALTH] <= 0 || ps->pm_type == PM_DEAD)
++	{
++		Com_sprintf(out, outSize, "%s, %s%s, down", name, side, BG_ClassnameForNumber(ci->cls));
++	}
++	else
++	{
++		Com_sprintf(out, outSize, "%s, %s%s, %d health", name, side, BG_ClassnameForNumber(ci->cls),
++		            ps->stats[STAT_HEALTH]);
++	}
++}
++
+ static void ETA_SpeakPlayState(ETA_PlayState state, const char *following)
+ {
+ 	team_t      team = cgs.clientinfo[cg.clientNum].team;
+ 	const char *side = team == TEAM_AXIS ? "Axis" : team == TEAM_ALLIES ? "Allies" : "";
++	char        who[MAX_NAME_LENGTH + 48];
++
++	who[0] = '\0';
++	if (following[0])
++	{
++		ETA_DescribeFollowed(following, who, sizeof(who));
++	}
+ 
+ 	ETA_HudNarrator_SpeakPlayState(state, side,
+ 	                               state == ETA_PLAY_IN_PLAY ? BG_ClassnameForNumber(cgs.clientinfo[cg.clientNum].cls) : "",
+-	                               following);
++	                               who);
++}
++
++/**
++ * @brief "Hans revived": the one watched, back up where they fell.
++ *
++ * A player who is revived gets up where they lay; one who spawns again
++ * appears somewhere else. So back on their feet near where they went
++ * down is a revive, and anywhere else is not said - the play state
++ * says the rest.
++ */
++#define ETA_REVIVED_NEAR 128.0f
++
++static void ETA_NarrateFollowedRevive(void)
++{
++	static int    watched = -1;
++	static qboolean down;
++	static vec3_t downAt;
++	const playerState_t *ps = &cg.snap->ps;
++	qboolean      isDown;
++
++	if (!(ps->pm_flags & PMF_FOLLOW) || ps->clientNum == cg.clientNum)
++	{
++		watched = -1;
++		return;
++	}
++
++	isDown = (qboolean)(ps->stats[STAT_HEALTH] <= 0 || ps->pm_type == PM_DEAD);
++	if (ps->clientNum != watched)
++	{
++		watched = ps->clientNum;
++		down    = isDown;
++		VectorCopy(ps->origin, downAt);
++		return;
++	}
++
++	if (isDown && !down)
++	{
++		VectorCopy(ps->origin, downAt);
++	}
++	else if (!isDown && down && Distance(ps->origin, downAt) <= ETA_REVIVED_NEAR)
++	{
++		char name[MAX_NAME_LENGTH];
++
++		Q_strncpyz(name, cgs.clientinfo[ps->clientNum].name, sizeof(name));
++		Q_CleanStr(name);
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(va("%s revived", name));
++		ETA_Speech_EndReport();
++	}
++	down = isDown;
+ }
+ 
+ /**
+@@ -6438,10 +6751,58 @@ static void ETA_NarratePlayState(void)
+ 	pending = ETA_PLAY_UNKNOWN;
+ 
+ 	ETA_Speech_BeginReport();
++	if (now == ETA_PLAY_DOWN || now == ETA_PLAY_LIMBO)
++	{
++		const char *died = CG_AccessibilityDeathWords(qfalse);
++
++		if (died)
++		{
++			ETA_Speech_Say(died);
++		}
++	}
+ 	ETA_SpeakPlayState(now, following);
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief How the player died, said alone when no change of play state
++ * came to say it with.
++ */
++static void ETA_NarrateDeathWords(void)
++{
++	const char *died = CG_AccessibilityDeathWords(qtrue);
++
++	if (died)
++	{
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(died);
++		ETA_Speech_EndReport();
++	}
++}
++
++/**
++ * @brief Says when the console opens or closes.
++ *
++ * The tester opened it three times by mistake with the key beside 1 and
++ * never knew: everything typed went into it, and the game went on
++ * without them. So both are said, and how to close it.
++ */
++static void ETA_NarrateConsole(void)
++{
++	static qboolean wasOpen;
++	qboolean        open = (qboolean)((trap_Key_GetCatcher() & KEYCATCH_CONSOLE) != 0);
++
++	if (open == wasOpen)
++	{
++		return;
++	}
++	wasOpen = open;
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(open ? "Console open. The same key closes it" : "Console closed");
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief How near a ladder has to be to be said, and to be climbed with
+  *        the use key: two metres, a couple of steps.
+@@ -10270,6 +10631,9 @@ void CG_DrawActive()
+ 	   than what they had when the map loaded. */
+ 	ETA_UpdateAccessibilitySettings();
+ 
++	/* The console opening over the match, or closing. */
++	ETA_NarrateConsole();
++
+ 	/* Every active frame, so a weapon change is caught wherever it came
+ 	   from - a number key, the mouse wheel, running dry, or being handed a
+ 	   weapon on spawn. */
+@@ -10303,6 +10667,10 @@ void CG_DrawActive()
+ 	ETA_BeaconLadders();
+ 	ETA_BeaconPickups();
+ 
++	/* Enemy mines in sight: the beep, the warning, and the marker's way
++	   round them. A warning is worth interrupting anything for. */
++	ETA_NarrateMines();
++
+ 	ETA_NarrateCrosshair();
+ 
+ 	/* The load is over: said once, after the briefing. */
+@@ -10390,6 +10758,12 @@ void CG_DrawActive()
+ 	   it is what everything else the narrator says is about. */
+ 	ETA_NarratePlayState();
+ 
++	/* Who is being watched, back on their feet. */
++	ETA_NarrateFollowedRevive();
++
++	/* How the player died, if the play state did not say it. */
++	ETA_NarrateDeathWords();
++
+ 	/* Neither of these is held back. A drop warning is the one report
+ 	   worth interrupting an answer for - and finishing an objective is
+ 	   the other: it happens once, it is what the whole map is for, and
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index 2e8033f..822e331 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -179,6 +179,151 @@ static ID_INLINE void CG_ColorObituaryEntName(clientInfo_t *ci, vec4_t color, ch
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/* The player's own death, in the game's words, waiting to be said. */
++static char eta_deathWords[256];
++static int  eta_deathWordsAt;
++
++/**
++ * @brief A name as it is said: the player's own as "You", any other
++ * without its colour codes.
++ */
++static void ETA_ObituaryName(int client, char *out, size_t outSize)
++{
++	if (client == cg.clientNum)
++	{
++		Q_strncpyz(out, "You", (int)outSize);
++		return;
++	}
++	Q_strncpyz(out, cgs.clientinfo[client].name, (int)outSize);
++	Q_CleanStr(out);
++}
++
++/**
++ * @brief The game's own death message, made for "You": "was" is "were",
++ * "his own" is "your own", "himself" is "yourself".
++ */
++static void ETA_ObituaryForYou(char *text, size_t size)
++{
++	static const char *const swaps[][2] =
++	{
++		{ "You was ", "You were " }, { "himself", "yourself" }, { "his own", "your own" }, { " his ", " your " }
++	};
++	int i;
++
++	for (i = 0; i < (int)(sizeof(swaps) / sizeof(swaps[0])); i++)
++	{
++		char *at = strstr(text, swaps[i][0]);
++
++		if (at)
++		{
++			char rest[256];
++
++			Q_strncpyz(rest, at + strlen(swaps[i][0]), sizeof(rest));
++			*at = '\0';
++			Q_strcat(text, (int)size, swaps[i][1]);
++			Q_strcat(text, (int)size, rest);
++		}
++	}
++}
++
++/**
++ * @brief Who killed whom, said when it is the player - or, watching
++ * someone, the one being watched.
++ *
++ * The tester kept dying to landmines and never heard what had killed
++ * them: the game shows it in the kill feed and the middle of the screen,
++ * and said nothing. So a death of the player's, or a kill, is said in
++ * the game's own words - "You failed to spot Hans's Landmine", "You
++ * killed Hans" - and so are the deaths and kills of a player being
++ * watched. Everyone else's stay in the feed: a match's every death would
++ * bury everything else.
++ */
++static void ETA_NarrateObituary(int target, int attacker, meansOfDeath_t mod)
++{
++	int         viewed = cg.snap ? cg.snap->ps.clientNum : cg.clientNum;
++	const char *message1, *message2;
++	char        targetName[MAX_NAME_LENGTH], attackerName[MAX_NAME_LENGTH];
++	char        text[256];
++
++	if (target != viewed && attacker != viewed)
++	{
++		return;
++	}
++
++	ETA_ObituaryName(target, targetName, sizeof(targetName));
++
++	if (attacker == viewed && attacker != target && attacker >= 0 && attacker < MAX_CLIENTS)
++	{
++		ETA_ObituaryName(attacker, attackerName, sizeof(attackerName));
++		Com_sprintf(text, sizeof(text), "%s killed %s%s", attackerName,
++		            cgs.clientinfo[attacker].team == cgs.clientinfo[target].team ? "teammate " : "", targetName);
++	}
++	else if (attacker < 0 || attacker >= MAX_CLIENTS || attacker == target)
++	{
++		message1 = attacker == target ? GetMODTableData(mod)->obituarySelfKillMessage
++		                              : GetMODTableData(mod)->obituaryNoAttackerMessage;
++		Com_sprintf(text, sizeof(text), "%s %s", targetName, message1 ? CG_TranslateString(message1) : "died");
++	}
++	else
++	{
++		message1 = GetMODTableData(mod)->obituaryKillMessage1;
++		message2 = GetMODTableData(mod)->obituaryKillMessage2;
++		ETA_ObituaryName(attacker, attackerName, sizeof(attackerName));
++		if (message1)
++		{
++			Com_sprintf(text, sizeof(text), "%s %s %s%s", targetName, CG_TranslateString(message1), attackerName,
++			            message2 ? CG_TranslateString(message2) : "");
++		}
++		else
++		{
++			Com_sprintf(text, sizeof(text), "%s was killed by %s", targetName, attackerName);
++		}
++	}
++
++	Q_CleanStr(text);
++	if (target == cg.clientNum)
++	{
++		/* Said with the "Down" or "Waiting to respawn" that follows it,
++		   as one line, so neither cuts the other off. */
++		ETA_ObituaryForYou(text, sizeof(text));
++		Q_strncpyz(eta_deathWords, text, sizeof(eta_deathWords));
++		eta_deathWordsAt = cg.time;
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(text);
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief How the player died, if it is still to be said: handed out
++ * once, then gone. Said alone once it has waited ETA_DEATH_WORDS_WAIT
++ * for the play state to say it with.
++ */
++#define ETA_DEATH_WORDS_WAIT 1500
++
++const char *CG_AccessibilityDeathWords(qboolean alone)
++{
++	static char said[256];
++
++	if (!eta_deathWords[0])
++	{
++		return NULL;
++	}
++
++	if (alone && cg.time - eta_deathWordsAt < ETA_DEATH_WORDS_WAIT && cg.time >= eta_deathWordsAt)
++	{
++		return NULL;
++	}
++
++	Q_strncpyz(said, eta_deathWords, sizeof(said));
++	eta_deathWords[0] = '\0';
++	return said;
++}
++#endif
++
+ /**
+  * @brief CG_CheckPopupMessageObituaryFilter
+  * @param[in] ca attacker
+@@ -269,6 +414,10 @@ static void CG_Obituary(entityState_t *ent)
+ 		ca = &cgs.clientinfo[attacker];
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NarrateObituary(target, attacker, mod);
++#endif
++
+ 	// check for kill messages from the current clientNum
+ 	if (attacker != target)
+ 	{
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index bf50dc7..9f1dae1 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3448,6 +3448,8 @@ void CG_AccessibilityMarkerObjective(void);
+ void CG_AccessibilitySniperSpot(void);
+ void CG_AccessibilityRoom(void);
+ void CG_AccessibilityWayOut(void);
++void CG_AccessibilityRouteAvoid(const float (*points)[3], int count);
++const char *CG_AccessibilityDeathWords(qboolean alone);
+ void CG_AccessibilityMarkerReset(void);
+ void CG_AccessibilityMarkerFrame(void);
+ void CG_AccessibilityMarkerApproach(void);
+@@ -3551,7 +3553,8 @@ typedef enum
+ 	ETA_LOOP_HEALTH,          /* a health pack on the ground */
+ 	ETA_LOOP_AMMO,            /* an ammo pack */
+ 	ETA_LOOP_WEAPON,          /* a weapon */
+-	ETA_LOOP_TANK             /* the tank to escort */
++	ETA_LOOP_TANK,            /* the tank to escort */
++	ETA_LOOP_MINE             /* a landmine the player can see, close by */
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+@@ -3588,6 +3591,7 @@ extern vmCvar_t eta_crosshairVolume;
+ extern vmCvar_t eta_cueVolume;
+ extern vmCvar_t eta_pickupVolume;
+ extern vmCvar_t eta_pickupCues;
++extern vmCvar_t eta_mineCues;
+ int CG_AccessibilityAnnouncerVolume(void);
+ 
+ /* Called where the game itself moves the music, so the accessibility
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index ad0e9ae..169c38c 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2210,6 +2210,8 @@ vmCvar_t eta_cueVolume;
+ vmCvar_t eta_pickupVolume;
+ /* A sound on each health pack, ammo pack and weapon lying close by. */
+ vmCvar_t eta_pickupCues;
++/* The landmines the player can see, said and heard as they come near. */
++vmCvar_t eta_mineCues;
+ vmCvar_t eta_locationCallouts;
+ vmCvar_t eta_placeCallouts;
+ vmCvar_t eta_interactionCallouts;
+@@ -2259,7 +2261,8 @@ static eta_cueSound_t eta_loopSounds[] =
+ 	{ "eta_cueHealthPack",        "sound/accessibility/health_pack.wav",        { 0 }, 0, { 0 } },
+ 	{ "eta_cueAmmoPack",          "sound/accessibility/ammo_pack.wav",          { 0 }, 0, { 0 } },
+ 	{ "eta_cueWeapon",            "sound/accessibility/weapon_ground.wav",      { 0 }, 0, { 0 } },
+-	{ "eta_cueTank",              "sound/accessibility/tank.wav",               { 0 }, 0, { 0 } }
++	{ "eta_cueTank",              "sound/accessibility/tank.wav",               { 0 }, 0, { 0 } },
++	{ "eta_cueMine",              "sound/accessibility/landmine.wav",           { 0 }, 0, { 0 } }
+ };
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+@@ -2460,7 +2463,8 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_crosshairVolume,     "eta_crosshairVolume",     "100" },
+ 	{ &eta_cueVolume,           "eta_cueVolume",           "100" },
+ 	{ &eta_pickupVolume,        "eta_pickupVolume",        "100" },
+-	{ &eta_pickupCues,          "eta_pickupCues",          "1" }
++	{ &eta_pickupCues,          "eta_pickupCues",          "1" },
++	{ &eta_mineCues,            "eta_mineCues",            "1" }
+ };
+ 
+ /**
+@@ -2495,6 +2499,9 @@ int CG_AccessibilityLoopVolume(eta_loopSoundType_t which)
+ 	case ETA_LOOP_LADDER:
+ 		cvar = &eta_ladderVolume;
+ 		break;
++	case ETA_LOOP_MINE:
++		cvar = &eta_cueVolume;
++		break;
+ 	default:
+ 		cvar = &eta_markerVolume;
+ 		break;
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index ff331d4..462a86c 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -43,6 +43,7 @@
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ static void UI_AccessibilityUpdateFrame(void);
++static void UI_AccessibilityConsoleFrame(void);
+ #endif
+ #include "../qcommon/q_oss.h"
+ #include "ui_cvars.h"
+@@ -1083,6 +1084,7 @@ void UI_Refresh(int realtime)
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	UI_AccessibilityUpdateFrame();
++	UI_AccessibilityConsoleFrame();
+ #endif
+ 
+ 	if (Menu_Count() > 0)
+@@ -5099,6 +5101,35 @@ static qboolean UI_AccessibilityAtMenus(void)
+ 	       && (trap_Key_GetCatcher() & KEYCATCH_UI);
+ }
+ 
++/**
++ * @brief Says when the console opens or closes over the menus.
++ *
++ * The tester opened it by mistake and never knew. In a match the cgame
++ * says it (cg_draw.c), so here it is only before one: the menus, and
++ * connecting.
++ */
++static void UI_AccessibilityConsoleFrame(void)
++{
++	static qboolean wasOpen;
++	uiClientState_t cstate;
++	qboolean        open = (qboolean)((trap_Key_GetCatcher() & KEYCATCH_CONSOLE) != 0);
++
++	trap_GetClientState(&cstate);
++	if (cstate.connState == CA_ACTIVE)
++	{
++		wasOpen = open;
++		return;
++	}
++
++	if (open == wasOpen)
++	{
++		return;
++	}
++	wasOpen = open;
++
++	UI_AccessibilityUpdateSay(open ? "Console open. The same key closes it" : "Console closed");
++}
++
+ static qboolean UI_AccessibilityUpdatePaths(void)
+ {
+ 	char home[MAX_OSPATH];

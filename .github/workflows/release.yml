@@ -1,0 +1,457 @@
+name: Release
+
+# Publishes a GitHub Release with the playable build attached, so a
+# release lives in the repository's Releases section rather than as a
+# binary committed into the source tree. A browser can download a
+# release asset in one click; a file in the code area is awkward to get
+# at and clutters the history of a source repository with megabytes that
+# change wholesale every build.
+on:
+  push:
+    tags:
+      - 'alpha-*'
+      - 'beta-*'
+      - 'v*'
+      - '[1-9]*'
+  # Lets a release be cut from the Actions tab without pushing a tag.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. alpha-0.2.0'
+        required: true
+        type: string
+      notes_only:
+        description: 'Only re-render the release page text; leave the assets alone'
+        required: false
+        default: false
+        type: boolean
+
+# The default token is read-only; publishing a release needs write.
+permissions:
+  contents: write
+
+# Where the game fetches updates from: this repository. It is public, so
+# its releases answer anybody, signed in or not, and the in-game updater
+# (ETA_UPDATE_RELEASES_URL in update_check.h) asks it directly. The code
+# of each released version is copied here from the private repository,
+# where the work and the test builds stay; the release is then built and
+# published here with the repository's own token - no key from anywhere
+# else, as the RTCW mode does.
+env:
+  PUBLIC_RELEASES: ${{ github.repository }}
+
+jobs:
+  # The Mac libraries can only be built on a Mac. They are built first,
+  # with this release's version baked in so the Mac updater knows what it
+  # is running, and packed into the same pk3 as the Windows ones.
+  mac-libs:
+    name: Build cgame_mac and ui_mac
+    if: ${{ !inputs.notes_only }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: accessibility-mode
+
+      - name: Clone ET Legacy at the pinned tag and apply the patch series
+        run: |
+          set -e
+          tag="$(sed -n 's/^  ETLEGACY_TAG: //p' accessibility-mode/.github/workflows/ci.yml)"
+          commit="$(sed -n 's/^  ETLEGACY_COMMIT: //p' accessibility-mode/.github/workflows/ci.yml)"
+          git clone --depth 1 --branch "$tag" https://github.com/etlegacy/etlegacy.git engine
+          cd engine
+          test "$(git rev-parse HEAD)" = "$commit" || { echo "::error::$tag is not $commit"; exit 1; }
+          git submodule update --init --depth 1 libs
+          ln -s "$GITHUB_WORKSPACE/accessibility-mode" accessibility-mode
+          for patch in "$GITHUB_WORKSPACE"/accessibility-mode/integration/etlegacy/0*.patch; do
+            git apply "$patch"
+          done
+          echo "ETLEGACY_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Build the Mac libraries, and the game module with bots
+        run: |
+          accessibility-mode/release/build-mac-libs.sh engine "$RUNNER_TEMP/mac-libs" \
+            "${{ inputs.version || github.ref_name }}" "$ETLEGACY_TAG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-libraries
+          path: |
+            ${{ runner.temp }}/mac-libs/cgame_mac
+            ${{ runner.temp }}/mac-libs/ui_mac
+            ${{ runner.temp }}/mac-libs/qagame_mac
+
+  release:
+    name: Build and publish
+    needs: mac-libs
+    # A notes-only run builds nothing, so it does not wait for a Mac.
+    if: ${{ !cancelled() && (inputs.notes_only || needs.mac-libs.result == 'success') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: accessibility-mode
+
+      - name: Work out which version this is
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # The archives and the folders they unzip to, as
+          # build-release.sh names them: one download for each system.
+          echo "bundle=wolfenstein-enemy-territory-accessibility-$version-windows" >> "$GITHUB_OUTPUT"
+          echo "mac_bundle=wolfenstein-enemy-territory-accessibility-$version-mac" >> "$GITHUB_OUTPUT"
+          echo "releasing $version"
+
+      # Correcting wording on a published page must not re-upload a
+      # binary: the archive is pinned to SOURCE_DATE_EPOCH, so a rebuild
+      # moves the checksum even when the libraries are identical, and
+      # anyone who recorded the old one is told a good download is bad.
+      - name: Re-render the page text only
+        if: ${{ inputs.notes_only }}
+        working-directory: accessibility-mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          version="${{ steps.version.outputs.version }}"
+          mkdir -p "$RUNNER_TEMP/release"
+
+          # The checksum and the build commit both come from the
+          # published release, so the page keeps describing the archive
+          # that is actually attached to it.
+          gh release download "$version" --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS --dir "$RUNNER_TEMP/release" --clobber
+
+          built_from="$(gh release view "$version" --repo "$GITHUB_REPOSITORY" \
+            --json body -q .body | grep -oE 'Built from .[0-9a-f]{40}' \
+            | grep -oE '[0-9a-f]{40}' | head -1)"
+          if [ -z "$built_from" ]; then
+            echo "::error::could not read the build commit from the published notes"
+            exit 1
+          fi
+
+          ./release/build-release.sh --notes-only \
+            --out "$RUNNER_TEMP/release" \
+            --version "$version" \
+            --built-from "$built_from"
+
+          gh release edit "$version" --repo "$GITHUB_REPOSITORY" \
+            --title "$version for Windows and Mac - accessibility mode for Wolfenstein: Enemy Territory" \
+            --notes-file "$RUNNER_TEMP/release/NOTES.md"
+
+          echo "notes updated for $version; assets untouched"
+
+      # The g++ packages matter even though the mod libraries are pure C:
+      # ET: Legacy's project() declares C and C++, so CMake insists on a
+      # working C++ compiler before it will configure anything.
+      # The archive's changelog covers every build back to the first, so
+      # a reader never has to open a browser to find out what changed
+      # since the version they had. That only stays true if someone
+      # remembers to roll the previous CHANGES.md into HISTORY.md, and
+      # forgetting leaves a gap that nothing else would notice. The tags
+      # already published are the authority on what must be in there.
+      - name: Check the history covers every published version
+        if: ${{ !inputs.notes_only }}
+        working-directory: accessibility-mode
+        run: |
+          set -e
+          missing=0
+          # Plain numbers count from 1.0.0 on: a stray 0.16.0 tag from the
+          # alpha days, never released, would otherwise stop every release.
+          for tag in $(git ls-remote --tags --refs origin \
+                       | sed 's#.*refs/tags/##' | grep -E '^(alpha|beta|v|[1-9])' || true); do
+            # The version being cut is described by CHANGES.md, not by
+            # the history, so it is the one tag allowed to be absent.
+            [ "$tag" = "${{ steps.version.outputs.version }}" ] && continue
+            if ! grep -qF "## $tag " release/HISTORY.md; then
+              echo "::error file=release/HISTORY.md::$tag is published but has no entry in HISTORY.md"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "every published tag has a history entry"
+
+      # The package mirror has twice left this step hanging for a quarter
+      # of an hour with nothing built, and a release only came out after
+      # the run was cancelled by hand and started again. So each attempt
+      # is capped, the mirror is given up on rather than waited on, and a
+      # stuck attempt is tried again - three times before the run fails
+      # loudly, which is better than a run that never ends.
+      - name: Install the cross-compilers
+        if: ${{ !inputs.notes_only }}
+        timeout-minutes: 15
+        run: |
+          apt_opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          for attempt in 1 2 3; do
+            if sudo timeout 240 apt-get $apt_opts update \
+               && sudo timeout 240 apt-get $apt_opts install -y --no-install-recommends \
+                    gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+                    gcc-mingw-w64-i686   g++-mingw-w64-i686; then
+              exit 0
+            fi
+            echo "::warning::installing the cross-compilers failed or stalled (attempt $attempt of 3)"
+            sleep 10
+          done
+          echo "::error::could not install the cross-compilers after three attempts"
+          exit 1
+
+      - uses: actions/download-artifact@v4
+        if: ${{ !inputs.notes_only }}
+        with:
+          name: macos-libraries
+          path: ${{ runner.temp }}/mac
+
+      # The same script anyone can run locally, so a published release is
+      # never something only CI knows how to make.
+      - name: Build the package, Windows and Mac
+        if: ${{ !inputs.notes_only }}
+        working-directory: accessibility-mode
+        run: |
+          ./release/build-release.sh \
+            --out "$RUNNER_TEMP/release" \
+            --version "${{ steps.version.outputs.version }}" \
+            --mac-libs "$RUNNER_TEMP/mac"
+
+      - name: Check the package is what it claims
+        if: ${{ !inputs.notes_only }}
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          set -e
+          sha256sum -c SHA256SUMS
+          unzip -q "${{ steps.version.outputs.bundle }}.zip" -d extracted
+          echo "the archive unpacks to:"
+          ls -1 extracted
+          test -f "extracted/${{ steps.version.outputs.bundle }}/zzz_accessibility.pk3" \
+            || { echo "::error::the archive does not contain the mod"; exit 1; }
+          # The in-game updater downloads the pk3 on its own and trusts it
+          # only if it matches eta-update.txt. So the loose pk3 has to be
+          # the very one in the archive, and the file has to describe it:
+          # a mismatch here is an update every player is told arrived
+          # damaged, or worse, one that never says it is newer.
+          cmp zzz_accessibility.pk3 "extracted/${{ steps.version.outputs.bundle }}/zzz_accessibility.pk3" \
+            || { echo "::error::the loose pk3 is not the one in the archive"; exit 1; }
+          grep -qx "version=${{ steps.version.outputs.version }}" eta-update.txt \
+            || { echo "::error::eta-update.txt does not name this version"; exit 1; }
+          grep -qx "engine=$(sed -n 's/^  ETLEGACY_TAG: //p' "$GITHUB_WORKSPACE/accessibility-mode/.github/workflows/ci.yml")" eta-update.txt \
+            || { echo "::error::eta-update.txt does not name the pinned ET: Legacy"; exit 1; }
+          grep -qx "sha256=$(sha256sum zzz_accessibility.pk3 | cut -d' ' -f1)" eta-update.txt \
+            || { echo "::error::eta-update.txt does not carry the pk3's checksum"; exit 1; }
+          grep -qx "size=$(wc -c < zzz_accessibility.pk3 | tr -d ' ')" eta-update.txt \
+            || { echo "::error::eta-update.txt does not carry the pk3's size"; exit 1; }
+          # One pk3 for both systems, and the file says so: a Mac takes
+          # only a release that names macos.
+          for lib in cgame_mp_x64.dll ui_mp_x64.dll cgame_mp_x86.dll ui_mp_x86.dll cgame_mac ui_mac; do
+            unzip -l zzz_accessibility.pk3 "$lib" >/dev/null || { echo "::error::$lib is not in the pk3"; exit 1; }
+          done
+          grep -qx "platforms=windows,macos" eta-update.txt \
+            || { echo "::error::eta-update.txt does not say the release is for Windows and Mac"; exit 1; }
+          # The Mac's download: the same pk3, the guide written for the
+          # Mac, and no NVDA client, which is Windows software.
+          mac="${{ steps.version.outputs.mac_bundle }}"
+          unzip -q "$mac.zip" -d extracted-mac
+          cmp zzz_accessibility.pk3 "extracted-mac/$mac/zzz_accessibility.pk3" \
+            || { echo "::error::the Mac download does not hold the same pk3"; exit 1; }
+          for doc in INSTALL.md CHANGELOG.md autoexec.cfg SHA256SUMS.contents; do
+            test -s "extracted-mac/$mac/$doc" || { echo "::error::the Mac download has no $doc"; exit 1; }
+          done
+          test ! -e "extracted-mac/$mac/nvda" || { echo "::error::the Mac download carries the NVDA client"; exit 1; }
+          # The game module with bots, for hosting: the one built with
+          # this release, which ui_mac knows by its checksum.
+          test -s "extracted-mac/$mac/qagame_mac" || { echo "::error::the Mac download has no qagame_mac"; exit 1; }
+          cmp "extracted-mac/$mac/qagame_mac" "$RUNNER_TEMP/mac/qagame_mac" \
+            || { echo "::error::the Mac download's qagame_mac is not the one built"; exit 1; }
+          # And beside the pk3, where the Mac's menus fetch it from.
+          cmp qagame_mac "$RUNNER_TEMP/mac/qagame_mac" \
+            || { echo "::error::the qagame_mac published beside the pk3 is not the one built"; exit 1; }
+          grep -q "This guide is for the \*\*Mac\*\*" "extracted-mac/$mac/INSTALL.md" \
+            || { echo "::error::the Mac download's guide is not the Mac's"; exit 1; }
+          if grep -q "NVDA\|SAPI" "extracted-mac/$mac/INSTALL.md"; then
+            echo "::error::the Mac download's guide talks about NVDA or SAPI"; exit 1
+          fi
+          grep -q "This guide is for \*\*Windows\*\*" "extracted/${{ steps.version.outputs.bundle }}/INSTALL.md" \
+            || { echo "::error::the Windows download's guide is not the Windows one"; exit 1; }
+          echo "eta-update.txt:"
+          cat eta-update.txt
+          # The config is the only thing that binds the status key, so an
+          # archive without it ships a mod whose status key does nothing.
+          test -f "extracted/${{ steps.version.outputs.bundle }}/autoexec.cfg" \
+            || { echo "::error::the archive does not contain autoexec.cfg"; exit 1; }
+          # The sounds to listen to before playing: one for every sound in
+          # the pk3, so none the guide points at is missing.
+          bundle_dir="extracted/${{ steps.version.outputs.bundle }}"
+          for sound in $(unzip -Z1 "$bundle_dir/zzz_accessibility.pk3" 'sound/accessibility/*.wav'); do
+            test -s "$bundle_dir/sounds/$(basename "$sound")" \
+              || { echo "::error::the archive has no preview of $(basename "$sound") in sounds/"; exit 1; }
+          done
+          # Both documents, separately. A build that rendered only one of
+          # them would ship a player either no instructions or no idea
+          # what changed, and the archive would still look complete.
+          for doc in INSTALL.md CHANGELOG.md; do
+            path="extracted/${{ steps.version.outputs.bundle }}/$doc"
+            test -s "$path" \
+              || { echo "::error::the archive does not contain $doc"; exit 1; }
+          done
+          # The NVDA client, checked out of the archive a player actually
+          # downloads rather than out of the staging directory it was
+          # built from. Everything before this point only proves the
+          # fetch worked; this proves what was fetched survived into the
+          # zip, with the right bytes.
+          #
+          # "Present" is not enough on its own. A player copies this DLL
+          # next to their game and hands it their narration - a
+          # truncated or substituted one is the single worst file this
+          # project could ship - so the checksums come back out of
+          # release/nvda-client.pin and have to match here too.
+          bundle="extracted/${{ steps.version.outputs.bundle }}"
+          pin="$GITHUB_WORKSPACE/accessibility-mode/release/nvda-client.pin"
+
+          for arch in x64 x86; do
+            dll="$bundle/nvda/$arch/nvdaControllerClient.dll"
+            test -s "$dll" \
+              || { echo "::error::the archive does not contain the $arch NVDA client"; exit 1; }
+
+            key="NVDA_DLL_$(echo "$arch" | tr a-z A-Z)_SHA256"
+            want="$(sed -n "s/^$key=//p" "$pin" | head -1)"
+            got="$(sha256sum "$dll" | cut -d' ' -f1)"
+
+            if [ -z "$want" ] || [ "$want" = "UNPINNED" ]; then
+              echo "::error::$key is not pinned, so the shipped $arch DLL is unverifiable"
+              exit 1
+            fi
+
+            if [ "$want" != "$got" ]; then
+              echo "::error::the $arch NVDA client in the archive is not the pinned file"
+              echo "  pinned   $want"
+              echo "  in zip   $got"
+              exit 1
+            fi
+
+            echo "$arch NVDA client matches the pin"
+          done
+
+          # Redistributing an LGPL binary without its licence is not
+          # something this project is entitled to do, and the only
+          # moment anyone would notice is after it was published.
+          test -s "$bundle/nvda/LICENSE.txt" \
+            || { echo "::error::the archive ships the NVDA client with no licence text"; exit 1; }
+          test -s "$bundle/nvda/README.txt" \
+            || { echo "::error::the archive ships the NVDA client with no instructions"; exit 1; }
+
+      - name: Publish the release
+        if: ${{ !inputs.notes_only }}
+        working-directory: ${{ runner.temp }}/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          version="${{ steps.version.outputs.version }}"
+          archive="${{ steps.version.outputs.bundle }}.zip"
+          mac_archive="${{ steps.version.outputs.mac_bundle }}.zip"
+          title="$version for Windows and Mac - accessibility mode for Wolfenstein: Enemy Territory"
+
+          # NOTES.md is rendered by build-release.sh from
+          # release/NOTES.md.in, so the page's wording lives in the
+          # repository as reviewable text rather than in this file, and a
+          # local build produces the same page for proofreading.
+          test -s NOTES.md || { echo "::error::no release notes were built"; exit 1; }
+
+          # --clobber so re-running for the same version replaces the asset
+          # rather than failing, and create-if-missing so a tag pushed
+          # before any release exists still works.
+          #
+          # The pk3 and eta-update.txt go up beside the archive for the
+          # in-game updater, which asks for releases/latest/download/
+          # eta-update.txt. GitHub's "latest" never names a release marked
+          # as a pre-release, so these are published as full releases and
+          # marked latest; the version names still say beta.
+          if gh release view "$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$version" "$archive" "$mac_archive" SHA256SUMS \
+              zzz_accessibility.pk3 eta-update.txt qagame_mac \
+              --repo "$GITHUB_REPOSITORY" --clobber
+
+            # The notes carry the archive's checksum, so replacing the
+            # asset without rewriting them leaves the page quoting a hash
+            # the download no longer has - which makes a good download
+            # look corrupt to anyone who checks.
+            gh release edit "$version" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file NOTES.md \
+              --prerelease=false \
+              --latest
+          else
+            gh release create "$version" "$archive" "$mac_archive" SHA256SUMS \
+              zzz_accessibility.pk3 eta-update.txt qagame_mac \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --notes-file NOTES.md \
+              --latest
+          fi
+
+      # The release above is the one the game reads: this repository is
+      # the public page. Fetched the way the game fetches it, signed out.
+      - name: Check the game's updater is handed this version
+        if: ${{ !inputs.notes_only }}
+        working-directory: ${{ runner.temp }}/release
+        run: |
+          set -e
+          version="${{ steps.version.outputs.version }}"
+          # What the game will be handed, fetched the way the game fetches
+          # it: no sign-in, through releases/latest. A page that answers
+          # anything but this version's manifest is an updater that offers
+          # nothing.
+          url="https://github.com/$PUBLIC_RELEASES/releases/latest/download/eta-update.txt"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$url" -o public-manifest.txt && cmp -s public-manifest.txt eta-update.txt; then
+              echo "the public page serves $version's eta-update.txt without signing in"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$url does not serve $version's eta-update.txt to a visitor who is not signed in"
+          exit 1
+
+      # The Mac test builds go once there is a release: a player looking
+      # for the mode found the test build listed above the real one, and
+      # took that instead. Only prereleases named mac-test-* are touched.
+      - name: Take the Mac test builds down
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          for old in $(gh release list --repo "$PUBLIC_RELEASES" --limit 200 \
+                         --json tagName,isPrerelease \
+                         --jq '.[] | select(.isPrerelease) | .tagName | select(startswith("mac-test-"))'); do
+            gh release delete "$old" --repo "$PUBLIC_RELEASES" --cleanup-tag --yes
+            echo "removed the Mac test build $old"
+          done
+
+      # The downloads page's front page, which a visitor reads first. Its
+      # text lives here, in release/PUBLIC-README.md, so it changes with
+      # the release it describes rather than being edited by hand there.
+      - name: Update the downloads page's front page
+        working-directory: accessibility-mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          readme=release/PUBLIC-README.md
+          test -s "$readme" || { echo "::error::$readme is missing"; exit 1; }
+          sha="$(gh api "repos/$PUBLIC_RELEASES/contents/README.md" --jq .sha 2>/dev/null || true)"
+          current="$(gh api "repos/$PUBLIC_RELEASES/contents/README.md" --jq .content 2>/dev/null | base64 -d 2>/dev/null || true)"
+          if [ "$current" = "$(cat "$readme")" ]; then
+            echo "the front page is already up to date"
+            exit 0
+          fi
+          args=(-X PUT "repos/$PUBLIC_RELEASES/contents/README.md"
+                -f message="Front page for ${{ steps.version.outputs.version }}"
+                -f content="$(base64 < "$readme" | tr -d '\n')")
+          [ -z "$sha" ] || args+=(-f sha="$sha")
+          gh api "${args[@]}" --jq .commit.sha
+          echo "front page updated"

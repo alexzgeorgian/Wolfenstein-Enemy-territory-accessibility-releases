@@ -1,0 +1,75 @@
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 859431f..2bbae56 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -2826,9 +2826,20 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ 		return qfalse;
+ 	case ITEM_TYPE_RADIOBUTTON:
+ 		return qfalse;
+-	case ITEM_TYPE_CHECKBOX:
+ 	case ITEM_TYPE_TRICHECKBOX:
+ 		return Item_CheckBox_HandleKey(item, key);
++	case ITEM_TYPE_CHECKBOX:
++	{
++		qboolean changed = Item_CheckBox_HandleKey(item, key);
++
++#ifdef FEATURE_ACCESSIBILITY
++		if (changed && item->cvar)
++		{
++			ETA_MenuNarrator_OnValueChanged(item->text, (DC->getCVarValue(item->cvar) != 0.f) ? "On" : "Off");
++		}
++#endif
++		return changed;
++	}
+ 	case ITEM_TYPE_EDITFIELD:
+ 	case ITEM_TYPE_NUMERICFIELD:
+ 		//return Item_TextField_HandleKey(item, key);
+@@ -2838,15 +2849,45 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ 	case ITEM_TYPE_LISTBOX:
+ 		return Item_ListBox_HandleKey(item, key, down, qfalse);
+ 	case ITEM_TYPE_YESNO:
+-		return Item_YesNo_HandleKey(item, key);
++	{
++		qboolean changed = Item_YesNo_HandleKey(item, key);
++
++#ifdef FEATURE_ACCESSIBILITY
++		if (changed && item->cvar)
++		{
++			ETA_MenuNarrator_OnValueChanged(item->text, (DC->getCVarValue(item->cvar) != 0.f) ? "Yes" : "No");
++		}
++#endif
++		return changed;
++	}
+ 	case ITEM_TYPE_MULTI:
+-		return Item_Multi_HandleKey(item, key);
++	{
++		qboolean changed = Item_Multi_HandleKey(item, key);
++
++#ifdef FEATURE_ACCESSIBILITY
++		if (changed)
++		{
++			ETA_MenuNarrator_OnValueChanged(item->text, Item_Multi_Setting(item));
++		}
++#endif
++		return changed;
++	}
+ 	case ITEM_TYPE_OWNERDRAW:
+ 		return Item_OwnerDraw_HandleKey(item, key);
+ 	case ITEM_TYPE_BIND:
+ 		return Item_Bind_HandleKey(item, key, down);
+ 	case ITEM_TYPE_SLIDER:
+-		return Item_Slider_HandleKey(item, key, down);
++	{
++		qboolean changed = Item_Slider_HandleKey(item, key, down);
++
++#ifdef FEATURE_ACCESSIBILITY
++		if (changed && item->cvar)
++		{
++			ETA_MenuNarrator_OnValueChanged(item->text, va("%.2f", DC->getCVarValue(item->cvar)));
++		}
++#endif
++		return changed;
++	}
+ 	default:
+ 		break;
+ 	}

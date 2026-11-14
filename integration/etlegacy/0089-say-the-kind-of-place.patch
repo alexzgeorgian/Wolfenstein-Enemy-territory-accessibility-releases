@@ -1,0 +1,311 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 168fdc3..27440ec 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -38,6 +38,7 @@
+ #include "hud/hud_narrator.h"
+ #include "map/map_survey.h"
+ #include "navigation/navigation_system.h"
++#include "navigation/place_classifier.h"
+ #include "speech/speech_manager.h"
+ #endif
+ 
+@@ -3648,6 +3649,150 @@ static void ETA_MarkerTarget(vec3_t out)
+ 	}
+ }
+ 
++/**
++ * @brief What kind of place a point is: street, alley, square, building,
++ * balcony or roof (navigation/place_classifier.c reads the measurements).
++ *
++ * Measured the way the route's probe measures, against the map's own
++ * walls and floors: from where the player stands, in each of the eight
++ * compass directions, how far the floor runs at about the same height
++ * before a wall stops a body or the floor drops away; whether the sky is
++ * straight overhead; and whether there is a storey's worth of space under
++ * the floor. A street is a long run between near walls; a balcony a
++ * narrow run in the open with a drop or rooms under it.
++ */
++#define ETA_PLACE_STEP      48.0f    /* between looks along each direction */
++#define ETA_PLACE_LOOK      800.0f   /* how far each direction is followed, 20 m */
++#define ETA_PLACE_SKY       2048.0f  /* how far up to look for the sky */
++#define ETA_PLACE_LEVEL     40.0f    /* a floor this much higher or lower is another level */
++#define ETA_PLACE_DROP_NEAR 112.0f   /* a drop this close is beside the player */
++#define ETA_PLACE_STOREY    96.0f    /* a room under the floor at least this deep */
++
++static void ETA_PlaceProbeAt(const vec3_t origin, ETA_PlaceProbe *probe)
++{
++	static const vec3_t mins = { -ETA_ROUTE_HALF_WIDTH, -ETA_ROUTE_HALF_WIDTH, -24.0f + 18.0f };
++	static const vec3_t maxs = { ETA_ROUTE_HALF_WIDTH, ETA_ROUTE_HALF_WIDTH, 24.0f };
++	trace_t trace;
++	vec3_t  start, end;
++	float   feet = origin[2] - 24.0f;
++	int     d;
++
++	memset(probe, 0, sizeof(*probe));
++
++	/* Sky straight overhead, from eye height. */
++	VectorSet(start, origin[0], origin[1], origin[2] + 16.0f);
++	VectorSet(end, origin[0], origin[1], origin[2] + ETA_PLACE_SKY);
++	trap_CM_BoxTrace(&trace, start, end, NULL, NULL, 0, MASK_SOLID);
++	probe->skyAbove = (trace.fraction >= 1.0f || (trace.surfaceFlags & SURF_SKY)) ? 1 : 0;
++
++	/* A room under the floor: air through the floor's thickness, and a
++	   floor further down a storey below this one. Below the ground there
++	   is no floor to find, only the outside of the map. */
++	{
++		float z;
++
++		for (z = feet - 8.0f; z >= feet - 72.0f; z -= 8.0f)
++		{
++			vec3_t point;
++
++			VectorSet(point, origin[0], origin[1], z);
++			if (!(CG_PointContents(point, -1) & MASK_SOLID))
++			{
++				qboolean drawn;
++
++				/* The sealed space under a map is lined with surfaces
++				   nobody sees; a room under the floor has a ceiling and a
++				   floor that are drawn. On Oasis every street sits on such
++				   a space. */
++				VectorCopy(point, start);
++				VectorSet(end, point[0], point[1], feet + 4.0f);
++				trap_CM_BoxTrace(&trace, start, end, NULL, NULL, 0, MASK_SOLID);
++				drawn = (qboolean)(trace.fraction < 1.0f && !(trace.surfaceFlags & SURF_NODRAW));
++
++				VectorSet(end, point[0], point[1], point[2] - 1024.0f);
++				trap_CM_BoxTrace(&trace, start, end, NULL, NULL, 0, MASK_PLAYERSOLID);
++				if (drawn && !trace.startsolid && trace.fraction < 1.0f && trace.plane.normal[2] >= 0.7f
++				    && !(trace.surfaceFlags & SURF_NODRAW) && feet - trace.endpos[2] >= ETA_PLACE_STOREY)
++				{
++					probe->airBelow = 1;
++				}
++				break;
++			}
++		}
++	}
++
++	/* Along each direction: as far as the floor runs at this level. */
++	for (d = 0; d < ETA_PLACE_DIRECTIONS; d++)
++	{
++		float  bearing = (float)d * 45.0f * (float)M_PI / 180.0f;
++		vec3_t step, here, next, down;
++		float  floor = feet, run = 0.0f;
++
++		VectorSet(step, sinf(bearing) * ETA_PLACE_STEP, cosf(bearing) * ETA_PLACE_STEP, 0.0f);
++		VectorCopy(origin, here);
++
++		while (run + ETA_PLACE_STEP <= ETA_PLACE_LOOK)
++		{
++			VectorAdd(here, step, next);
++
++			/* A body's width, a step up off the floor: what stops it is
++			   a wall. */
++			trap_CM_BoxTrace(&trace, here, next, mins, maxs, 0, MASK_PLAYERSOLID);
++			if (trace.startsolid || trace.fraction < 1.0f)
++			{
++				/* Up to the wall's face: the part of the step the body
++				   got, and the body's own half-width in front of it. */
++				probe->wall[d] = 1;
++				if (!trace.startsolid)
++				{
++					run += trace.fraction * ETA_PLACE_STEP + ETA_ROUTE_HALF_WIDTH;
++				}
++				break;
++			}
++
++			/* The floor there: at about this level, or a drop. */
++			VectorCopy(next, start);
++			start[2] += 18.0f;
++			VectorSet(down, next[0], next[1], floor - 1024.0f);
++			trap_CM_BoxTrace(&trace, start, down, NULL, NULL, 0, MASK_PLAYERSOLID);
++
++			if (trace.startsolid || trace.fraction >= 1.0f || trace.endpos[2] < floor - ETA_PLACE_LEVEL)
++			{
++				float depth = (trace.startsolid || trace.fraction >= 1.0f) ? 1024.0f : floor - trace.endpos[2];
++
++				if (run + ETA_PLACE_STEP <= ETA_PLACE_DROP_NEAR && depth > probe->dropBeside)
++				{
++					probe->dropBeside = depth;
++				}
++				break;
++			}
++
++			if (trace.endpos[2] > floor + ETA_PLACE_LEVEL)
++			{
++				/* Stairs or a ramp up out of this level. */
++				break;
++			}
++
++			floor = trace.endpos[2];
++			VectorSet(here, next[0], next[1], floor + 24.0f);
++			run += ETA_PLACE_STEP;
++		}
++
++		probe->reach[d] = run;
++	}
++}
++
++/**
++ * @brief What kind of place a point is - the probe above, read.
++ */
++void CG_AccessibilityPlace(const vec3_t origin, ETA_Place *out)
++{
++	ETA_PlaceProbe probe;
++
++	ETA_PlaceProbeAt(origin, &probe);
++	*out = ETA_Place_Classify(&probe);
++}
++
+ /**
+  * @brief The distance to the marker, in metres.
+  *
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 4471b3e..b587018 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -39,6 +39,7 @@
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
++#include "navigation/place_classifier.h"
+ #include "map/bsp_ladders.h"
+ #include "navigation/navigation_system.h"
+ #include "speech/speech_manager.h"
+@@ -3137,6 +3138,53 @@ static void ETA_NarrateLocation(void)
+ 	}
+ }
+ 
++/**
++ * @brief Says what kind of place the player has come into: a street and
++ * which way it runs, an alley, a square, a building, a balcony, a roof,
++ * a ledge (navigation/place_classifier.c).
++ *
++ * The tester asked to follow the streets and alleys and tell the parts
++ * of a building apart. Measured a few times a second while the player is
++ * on the ground; what is said is what the last few seconds agree on, so
++ * a doorway or a cart does not make a new street.
++ */
++#define ETA_PLACE_SAMPLE_MS 250
++
++static void ETA_NarratePlace(void)
++{
++	static int nextSample;
++	ETA_Place  place;
++	char       text[96];
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_placeCallouts.integer)
++	{
++		ETA_Place_Reset();
++		return;
++	}
++
++	/* In the air, or on a ladder, the floor underfoot is not a place. */
++	if (cg.predictedPlayerState.groundEntityNum == ENTITYNUM_NONE || CG_AccessibilityClimbing())
++	{
++		return;
++	}
++
++	if (cg.time < nextSample && nextSample - cg.time <= ETA_PLACE_SAMPLE_MS)
++	{
++		return;
++	}
++	nextSample = cg.time + ETA_PLACE_SAMPLE_MS;
++
++	CG_AccessibilityPlace(cg.predictedPlayerState.origin, &place);
++
++	if (ETA_Place_Update(&place, cg.time) && ETA_Place_Spoken(&place))
++	{
++		ETA_Place_Text(&place, text, sizeof(text));
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(text);
++		ETA_Speech_EndReport();
++	}
++}
++
+ /**
+  * @brief How far the openings probe looks, and how often.
+  *
+@@ -4846,11 +4894,30 @@ void CG_AccessibilitySurroundings(void)
+ 	   where. The map's own name for the place when it has one - "Water
+ 	   Pump", "Allied Command Post" - and the command map square when it
+ 	   does not. */
++	/* And what kind of place: "Outdoors, alley, east to west, Water
++	   Pump", "Indoors, upper floor, Allied Command Post". */
+ 	{
+ 		const char *place = ETA_LocationName();
+ 		const char *cover = ETA_OverheadState() == ETA_OVERHEAD_OPEN_SKY ? "Outdoors" : "Indoors";
++		ETA_Place   kind;
++		char        what[128];
++
++		CG_AccessibilityPlace(cg.predictedPlayerState.origin, &kind);
++		ETA_Place_Text(&kind, what, sizeof(what));
++
++		if (!what[0])
++		{
++			Q_strncpyz(what, cover, sizeof(what));
++		}
++		else if (kind.kind != ETA_PLACE_INDOORS && kind.kind != ETA_PLACE_UPPER_FLOOR)
++		{
++			/* "Outdoors, street, ..." - the kind in the middle of the
++			   sentence, so in lower case. */
++			what[0] = (char)tolower((unsigned char)what[0]);
++			Q_strncpyz(what, va("Outdoors, %s", what), sizeof(what));
++		}
+ 
+-		ETA_Speech_Say(place ? va("%s, %s", cover, place) : cover);
++		ETA_Speech_Say(place ? va("%s, %s", what, place) : what);
+ 	}
+ 
+ 	if (eta_playerCallouts.integer)
+@@ -9654,6 +9721,8 @@ void CG_DrawActive()
+ 
+ 		ETA_NarrateLocation();
+ 
++		ETA_NarratePlace();
++
+ 		/* After the location: arriving somewhere new says where, and the
+ 		   corners follow from there. */
+ 		ETA_NarrateOpenings();
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 7f7c429..c4aa09c 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3521,6 +3521,8 @@ typedef struct
+ qboolean CG_AccessibilityLadderNear(etaLadder_t *out);
+ qboolean CG_AccessibilityClimbing(void);
+ void     CG_AccessibilityLimboOpened(void);
++struct ETA_Place;
++void     CG_AccessibilityPlace(const vec3_t origin, struct ETA_Place *out);
+ void     CG_AccessibilitySpeakPlayState(void);
+ 
+ /**
+@@ -3576,6 +3578,7 @@ void ETA_MusicFadeRequested(float level, qboolean restarted);
+    reloads. */
+ void ETA_UpdateAccessibilitySettings(void);
+ extern vmCvar_t eta_locationCallouts;
++extern vmCvar_t eta_placeCallouts;
+ extern vmCvar_t eta_interactionCallouts;
+ extern vmCvar_t eta_mapCallouts;
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index bf4e6a4..c85f3a2 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2196,6 +2196,7 @@ vmCvar_t eta_speechRate;
+ vmCvar_t eta_speechPitch;
+ vmCvar_t eta_speechVolume;
+ vmCvar_t eta_locationCallouts;
++vmCvar_t eta_placeCallouts;
+ vmCvar_t eta_interactionCallouts;
+ vmCvar_t eta_mapCallouts;
+ vmCvar_t eta_doorCues;
+@@ -2387,6 +2388,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_environmentCallouts, "eta_environmentCallouts", "1" },
+ 	{ &eta_facingCallouts,      "eta_facingCallouts",      "1" },
+ 	{ &eta_locationCallouts,    "eta_locationCallouts",    "1" },
++	{ &eta_placeCallouts,       "eta_placeCallouts",       "1" },
+ 	{ &eta_interactionCallouts, "eta_interactionCallouts", "1" },
+ 	{ &eta_mapCallouts,         "eta_mapCallouts",         "1" },
+ 	{ &eta_doorCues,            "eta_doorCues",            "1" },

@@ -1,0 +1,52 @@
+diff --git a/src/ui/ui_menu.c b/src/ui/ui_menu.c
+index 6d9edfa..d243150 100644
+--- a/src/ui/ui_menu.c
++++ b/src/ui/ui_menu.c
+@@ -329,8 +329,12 @@ qboolean Menus_AnyFullScreenVisible(void)
+  * text item it declares (its title plus any body labels), in declaration
+  * order. This relies on the SUBWINDOW/SUBWINDOWBLACK/LABEL/LABELWHITE .menu
+  * macros always emitting ITEM_TYPE_TEXT decoration items with a literal
+- * text string - true for every popup shipped in etmain/ui, but not
+- * guaranteed for a hand-rolled popup that doesn't use those macros.
++ * text string - true for every popup shipped in etmain/ui. A popup's
++ * message can also come from the CVARLABEL macro instead, which emits an
++ * ITEM_TYPE_TEXT item with no literal text and a bound cvar (e.g.
++ * popup_errormessage.menu's com_errorMessage); Item_Text_Paint already
++ * resolves that case via DC->getCVarString for painting, so this reads it
++ * the same way to narrate what's actually on screen.
+  */
+ static void ETA_NarrateConfirmDialog(menuDef_t *menu)
+ {
+@@ -341,16 +345,29 @@ static void ETA_NarrateConfirmDialog(menuDef_t *menu)
+ 
+ 	for (i = 0; i < menu->itemCount; i++)
+ 	{
+-		itemDef_t *item = menu->items[i];
++		itemDef_t  *item = menu->items[i];
++		const char *itemText = item->text;
++		char       cvarText[1024];
++
++		if (item->type != ITEM_TYPE_TEXT)
++		{
++			continue;
++		}
++
++		if (!itemText && item->cvar)
++		{
++			DC->getCVarString(item->cvar, cvarText, sizeof(cvarText));
++			itemText = cvarText;
++		}
+ 
+-		if (item->type == ITEM_TYPE_TEXT && item->text)
++		if (itemText && itemText[0] != '\0')
+ 		{
+ 			if (text[0] != '\0')
+ 			{
+ 				Q_strcat(text, sizeof(text), " ");
+ 			}
+ 
+-			Q_strcat(text, sizeof(text), item->text);
++			Q_strcat(text, sizeof(text), itemText);
+ 		}
+ 	}
+ 

@@ -1,0 +1,190 @@
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 0541cdd..0ccfbc8 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -135,6 +135,41 @@ static qboolean ETA_CharacterAt(const char *text, int index, char *out, size_t s
+ 	return qtrue;
+ }
+ 
++/* Defined further down this file and declared in no header, so the
++   accessibility block above its definition needs this. */
++const char *Item_Multi_Setting(itemDef_t *item);
++
++/**
++ * @brief Fields whose contents speech must not read out.
++ *
++ * Wider than the engine's own Item_IsPasswordField, and deliberately
++ * separate from it. That one drives the *drawing*, and is not behind the
++ * feature flag: widening it would mask a field on screen for every player
++ * running this mod, feature on or off, which is not this mod's call to
++ * make. Speech gets to be more careful than the screen without changing
++ * what the screen does.
++ *
++ * g_password is the server join password on the host-game screens. ET
++ * draws it in clear, but a password read aloud in a room is a different
++ * exposure from one shown on a monitor its owner is sitting at.
++ * @param[in] item
++ * @return
++ */
++static qboolean ETA_IsSecretField(itemDef_t *item)
++{
++	if (Item_IsPasswordField(item))
++	{
++		return qtrue;
++	}
++
++	if (item && item->cvar && !Q_stricmp(item->cvar, "g_password"))
++	{
++		return qtrue;
++	}
++
++	return qfalse;
++}
++
+ /**
+  * @brief The text a field is holding right now.
+  *
+@@ -172,7 +207,7 @@ static void ETA_TextFieldValue(itemDef_t *item, char *out, size_t size)
+ 	/* A password is spoken as its length and never its content. The panel
+ 	   draws it masked on purpose, and speech that read it out would say
+ 	   aloud, in a room, exactly what the screen is hiding. */
+-	if (Item_IsPasswordField(item))
++	if (ETA_IsSecretField(item))
+ 	{
+ 		int len = (int)Q_UTF8_Strlen(raw);
+ 
+@@ -183,6 +218,40 @@ static void ETA_TextFieldValue(itemDef_t *item, char *out, size_t size)
+ 	Q_strncpyz(out, raw, size);
+ }
+ 
++/**
++ * @brief What one setting currently reads as.
++ *
++ * The single place each type's value is turned into words. Both the
++ * narration on arriving at a row and the narration on changing it call
++ * this, so the two cannot drift apart and start describing the same
++ * setting differently - which is the bug a second copy of these
++ * expressions would eventually produce.
++ * @param[in] item
++ * @return the value as spoken text, or NULL for a type that has none.
++ */
++const char *ETA_MenuItem_SettingText(itemDef_t *item)
++{
++	if (!item || !item->cvar)
++	{
++		return NULL;
++	}
++
++	switch (item->type)
++	{
++	case ITEM_TYPE_MULTI:
++	case ITEM_TYPE_TRICHECKBOX:
++		return Item_Multi_Setting(item);
++	case ITEM_TYPE_CHECKBOX:
++		return (DC->getCVarValue(item->cvar) != 0.f) ? "On" : "Off";
++	case ITEM_TYPE_YESNO:
++		return (DC->getCVarValue(item->cvar) != 0.f) ? "Yes" : "No";
++	case ITEM_TYPE_SLIDER:
++		return va("%.2f", DC->getCVarValue(item->cvar));
++	default:
++		return NULL;
++	}
++}
++
+ /**
+  * @brief What a menu item says when focus lands on it.
+  *
+@@ -212,8 +281,17 @@ const char *ETA_MenuItem_FocusText(itemDef_t *item)
+ 
+ 	if (!TEXTFIELD(item->type))
+ 	{
++		const char *setting = ETA_MenuItem_SettingText(item);
++
+ 		eta_lastFieldText[0] = '\0';
+-		return item->text;
++
++		if (!item->text || !setting || !*setting)
++		{
++			return item->text;
++		}
++
++		Com_sprintf(text, sizeof(text), "%s, %s", item->text, setting);
++		return text;
+ 	}
+ 
+ 	ETA_TextFieldValue(item, value, sizeof(value));
+@@ -265,7 +343,7 @@ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int b
+ 		   answer; a cursor move is read out, because stepping through a
+ 		   field character by character is how it gets checked without
+ 		   sight. */
+-		if (item->cursorPos == beforeCursor || Item_IsPasswordField(item))
++		if (item->cursorPos == beforeCursor || ETA_IsSecretField(item))
+ 		{
+ 			return;
+ 		}
+@@ -288,7 +366,7 @@ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int b
+ 	   out again rather than suppress itself as a repeat. */
+ 	eta_lastFieldText[0] = '\0';
+ 
+-	if (Item_IsPasswordField(item))
++	if (ETA_IsSecretField(item))
+ 	{
+ 		/* Enough to confirm the key registered, and nothing more: a
+ 		   password is masked on screen for a reason that speech does not
+@@ -3141,7 +3219,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, Item_Multi_Setting(item));
++			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3153,7 +3231,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed && item->cvar)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, (DC->getCVarValue(item->cvar) != 0.f) ? "On" : "Off");
++			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3173,7 +3251,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed && item->cvar)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, (DC->getCVarValue(item->cvar) != 0.f) ? "Yes" : "No");
++			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3185,7 +3263,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, Item_Multi_Setting(item));
++			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3201,7 +3279,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed && item->cvar)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, va("%.2f", DC->getCVarValue(item->cvar)));
++			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+diff --git a/src/ui/ui_shared.h b/src/ui/ui_shared.h
+index 217cfec..a29e770 100644
+--- a/src/ui/ui_shared.h
++++ b/src/ui/ui_shared.h
+@@ -672,6 +672,7 @@ void Item_ComboDeSelect(itemDef_t *item);
+ qboolean Item_TextField_HandleKey(itemDef_t *item, int key);
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++const char *ETA_MenuItem_SettingText(itemDef_t *item);
+ const char *ETA_MenuItem_FocusText(itemDef_t *item);
+ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int beforeCursor);
+ void ETA_MenuItem_NarrateTextFieldValue(itemDef_t *item);

@@ -1,0 +1,250 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 40f4cf2..a18fb17 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1768,9 +1768,17 @@ static void ETA_TurnStopStep(qboolean arrived)
+  *     they are, and the crosshair tick says the sights are on them. A turn
+  *     key, a snap, the map or a build being counted out stand it down, and
+  *     a turn by hand keeps it off for ETA_AIM_MANUAL_MS.
++ *   - Things to use, by themselves (eta_autoUse): the tester found the
++ *     key that turns to things worked, and asked for it to work the way
++ *     the enemy lock does - on its own. So stopping beside something that
++ *     can be used, with nothing under the crosshair, turns the view onto
++ *     it, quietly; the game's own use icon is named as it comes up, and F
++ *     uses it. Only within reach, only standing still - a view that swung
++ *     to every door walked past would walk the player into them - and
++ *     once per thing until the player has walked away from it.
+  *   - The use key: pressed with nothing under the crosshair to use, it
+- *     first turns to the nearest thing that can be used, and uses it if it
+- *     is within reach - the snap above, joined to the key that acts.
++ *     turns to the thing within reach and uses it on arrival - the same
++ *     turn, for a player quicker than the standing-still wait.
+  *
+  * Pitch moves too: the keys look up and down as well as turn. The two
+  * key numbers for looking are the turn keys' neighbours, so the player's
+@@ -1786,6 +1794,9 @@ static void ETA_TurnStopStep(qboolean arrived)
+ #define ETA_AIM_AUTO_METERS 40.0f
+ #define ETA_USE_KEY         "994"
+ #define ETA_USE_REACH_METERS 2.5f
++#define ETA_USE_STILL_MS     300
++#define ETA_USE_STILL_SPEED  60.0f
++#define ETA_USE_DONE_MAX     8
+ 
+ typedef enum
+ {
+@@ -1806,7 +1817,7 @@ typedef struct
+ 	qboolean      saidLost;
+ 	int           cycleIndex;
+ 	int           cycleAt;
+-	qboolean      automatic;    /* the lock took this by itself */
++	qboolean      automatic;    /* the lock or the snap took this by itself */
+ 	int           manualUntil;  /* no lock by itself before this */
+ 	int           nextSearch;
+ } eta_aim_t;
+@@ -1820,6 +1831,10 @@ static struct
+ 	qboolean pending;   /* use it on arriving */
+ 	qboolean held;      /* the player's key is still down */
+ 	int      releaseAt;
++	int      stillSince;                    /* standing still since */
++	int      done[ETA_USE_DONE_MAX];        /* turned to already ... */
++	vec3_t   doneAt[ETA_USE_DONE_MAX];      /* ... from here */
++	int      doneCount;
+ } eta_use;
+ 
+ static void ETA_UseKey(qboolean down)
+@@ -1947,7 +1962,8 @@ static qboolean ETA_AimAcquire(float maxMeters)
+ 	return qtrue;
+ }
+ 
+-/* Turns to a thing to use and says what it is. */
++/* Turns to a thing to use and says what it is - or, with no label,
++   quietly, leaving the game's own use icon to name it. */
+ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
+ {
+ 	/* A tap turn still running would fight this for the same keys. */
+@@ -1962,8 +1978,11 @@ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
+ 	eta_aim.started   = cg.time;
+ 	VectorCopy(target->point, eta_aim.point);
+ 
+-	ETA_HudNarrator_HoldPassive(cg.time);
+-	ETA_AimSay(label, target->point);
++	if (label)
++	{
++		ETA_HudNarrator_HoldPassive(cg.time);
++		ETA_AimSay(label, target->point);
++	}
+ }
+ 
+ static void CG_AccessibilityAimUse_f(void)
+@@ -2003,11 +2022,10 @@ static void CG_AccessibilityAimUse_f(void)
+  * crosshair, then use it.
+  *
+  * Something already under the crosshair that the game offers to use - the
+- * use icon is showing - is used at once, as the plain key would. Otherwise
+- * the view turns to the nearest thing that can be used and names it; if it
+- * is within reach, it is used on arrival. Further off, the turn and the
+- * name are the answer, and the walk is the player's. With nothing close at
+- * all, the key does what it always did.
++ * use icon is showing - is used at once, as the plain key would. Otherwise,
++ * with something to use within reach, the view turns to it and it is used
++ * on arrival. With nothing in reach, the key does what it always did:
++ * things further off are the standing-still turn's, and DEL's.
+  */
+ static void CG_AccessibilityActivateDown_f(void)
+ {
+@@ -2025,14 +2043,15 @@ static void CG_AccessibilityActivateDown_f(void)
+ 	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
+ 
+ 	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL || hint
+-	    || CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) <= 0)
++	    || CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) <= 0
++	    || list[0].meters > ETA_USE_REACH_METERS)
+ 	{
+ 		ETA_UseKey(qtrue);
+ 		return;
+ 	}
+ 
+-	ETA_AimStartSnap(&list[0], list[0].name);
+-	eta_use.pending = (qboolean)(list[0].meters <= ETA_USE_REACH_METERS);
++	ETA_AimStartSnap(&list[0], NULL);
++	eta_use.pending = qtrue;
+ }
+ 
+ static void CG_AccessibilityActivateUp_f(void)
+@@ -2134,6 +2153,91 @@ static void ETA_AutoLock(void)
+ 	eta_aim.started   = cg.time;
+ }
+ 
++/**
++ * @brief Things to use, by themselves: standing still beside one with
++ * nothing under the crosshair turns the view onto it.
++ */
++static void ETA_AutoUse(void)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	etaAimTarget_t      list[ETA_AIM_MAX_TARGETS];
++	vec3_t              flat;
++	qboolean            hint;
++	int                 count, i, j;
++
++	VectorSet(flat, ps->velocity[0], ps->velocity[1], 0.0f);
++
++	if (VectorLength(flat) > ETA_USE_STILL_SPEED)
++	{
++		eta_use.stillSince = 0;
++	}
++	else if (!eta_use.stillSince || cg.time < eta_use.stillSince)
++	{
++		eta_use.stillSince = cg.time;
++	}
++
++	/* Walked away from something already turned to: it is news again. */
++	for (i = 0; i < eta_use.doneCount; )
++	{
++		if (Distance(ps->origin, eta_use.doneAt[i]) > (ETA_USE_REACH_METERS + 1.5f) / ETA_QU_TO_METERS)
++		{
++			eta_use.done[i] = eta_use.done[eta_use.doneCount - 1];
++			VectorCopy(eta_use.doneAt[eta_use.doneCount - 1], eta_use.doneAt[i]);
++			eta_use.doneCount--;
++			continue;
++		}
++		i++;
++	}
++
++	if (!eta_autoUse.integer || !eta_use.stillSince || cg.time - eta_use.stillSince < ETA_USE_STILL_MS
++	    || cgs.autoMapExpanded || eta_turn.step || eta_turn.held || CG_AccessibilityBuildBusy())
++	{
++		return;
++	}
++
++	/* A turn by hand is the player looking somewhere on purpose. */
++	if (cg.time < eta_aim.manualUntil && eta_aim.manualUntil - cg.time <= ETA_AIM_MANUAL_MS)
++	{
++		return;
++	}
++
++	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
++	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
++	if (hint)
++	{
++		return;
++	}
++
++	count = CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS);
++
++	for (i = 0; i < count && list[i].meters <= ETA_USE_REACH_METERS; i++)
++	{
++		for (j = 0; j < eta_use.doneCount; j++)
++		{
++			if (eta_use.done[j] == list[i].entityNum)
++			{
++				break;
++			}
++		}
++
++		if (j < eta_use.doneCount)
++		{
++			continue;
++		}
++
++		if (eta_use.doneCount < ETA_USE_DONE_MAX)
++		{
++			eta_use.done[eta_use.doneCount] = list[i].entityNum;
++			VectorCopy(ps->origin, eta_use.doneAt[eta_use.doneCount]);
++			eta_use.doneCount++;
++		}
++
++		ETA_AimStartSnap(&list[i], NULL);
++		eta_aim.automatic = qtrue;
++		return;
++	}
++}
++
+ /**
+  * @brief The keys belong to the map while it is open.
+  *
+@@ -2296,7 +2400,12 @@ void CG_AccessibilityAimFrame(void)
+ 	{
+ 		if (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL)
+ 		{
++			/* An enemy first; a thing to use only with none to fight. */
+ 			ETA_AutoLock();
++			if (eta_aim.mode == ETA_AIM_NONE)
++			{
++				ETA_AutoUse();
++			}
+ 		}
+ 		if (eta_aim.mode == ETA_AIM_NONE)
+ 		{
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 284463e..f18ebb3 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3514,6 +3514,7 @@ extern vmCvar_t eta_mapToggle;
+ extern vmCvar_t eta_playerCallouts;
+ extern vmCvar_t eta_groundCallouts;
+ extern vmCvar_t eta_autoLock;
++extern vmCvar_t eta_autoUse;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 9e144dc..4310b97 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2207,6 +2207,7 @@ vmCvar_t eta_mapToggle;
+ vmCvar_t eta_playerCallouts;
+ vmCvar_t eta_groundCallouts;
+ vmCvar_t eta_autoLock;
++vmCvar_t eta_autoUse;
+ 
+ /**
+  * @brief The four sounds this mod brings with it, and why they are not
+@@ -2390,6 +2391,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_playerCallouts,      "eta_playerCallouts",      "1" },
+ 	{ &eta_groundCallouts,      "eta_groundCallouts",      "1" },
+ 	{ &eta_autoLock,            "eta_autoLock",            "1" },
++	{ &eta_autoUse,             "eta_autoUse",             "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },

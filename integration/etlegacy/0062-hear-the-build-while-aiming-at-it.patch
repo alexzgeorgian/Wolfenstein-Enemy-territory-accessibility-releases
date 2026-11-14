@@ -1,0 +1,168 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 1938c52..eb772b0 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4789,18 +4789,96 @@ static ETA_Interaction ETA_InteractionForHint(int icon)
+  * than naming a new thing to interact with, which is a different
+  * question from whether the work finished.
+  */
++/**
++ * @brief How far from the player a construction they are working on can be.
++ *
++ * The trigger a player stands in to build is often wider than the thing
++ * being built, and the construction is a brush whose middle can be some
++ * way off. Sixteen metres covers the ones on the stock maps and is too
++ * short to reach across to another objective.
++ */
++#define ETA_BUILD_SEARCH_RANGE 640.0f
++
++/**
++ * @brief The progress of the nearest construction of the player's team.
++ *
++ * The cursor hint is one way the game says how a construction is going,
++ * and it goes quiet at exactly the wrong moment: G_CheckForCursorHints
++ * returns early, sending nothing, while the player's crosshair is on a
++ * partly built construction of their own team. A player who aims at the
++ * thing they are building - which the look keys now make the natural
++ * thing to do - heard "Pliers, build here" and then silence, because the
++ * hint stopped the moment the work began.
++ *
++ * The same number travels a second way: it is the construction's own
++ * angles2[0], which the server raises as the work goes on and which is
++ * in every snapshot the construction is in. That does not depend on
++ * where the player is looking.
++ *
++ * @return 0 to 255, or -1 when there is no construction of theirs under
++ *         way nearby
++ */
++static int ETA_NearbyConstructionProgress(int following, int *entityNum)
++{
++	const team_t team     = cgs.clientinfo[cg.clientNum].team;
++	float        nearest  = ETA_BUILD_SEARCH_RANGE;
++	int          progress = -1;
++	int          i;
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		vec3_t              origin;
++		float               distance;
++
++		if (es->eType != ET_CONSTRUCTIBLE || es->teamNum != team)
++		{
++			continue;
++		}
++
++		/* One under way, or the one already being followed - whose
++		   figure dropping to nothing is how it is heard to finish. A
++		   finished construction next door must not hide the one the
++		   player is working on. */
++		if (es->angles2[0] <= 0.f && es->number != following)
++		{
++			continue;
++		}
++
++		VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++		if (es->modelindex > 0 && es->modelindex < MAX_MODELS)
++		{
++			VectorAdd(origin, cgs.inlineModelMidpoints[es->modelindex], origin);
++		}
++
++		distance = Distance(cg.predictedPlayerState.origin, origin);
++
++		if (distance < nearest)
++		{
++			nearest   = distance;
++			progress  = (int)es->angles2[0];
++			*entityNum = es->number;
++		}
++	}
++
++	return progress;
++}
++
+ static void ETA_NarrateBuildProgress(void)
+ {
+-	static qboolean building  = qfalse;
+-	static qboolean announced = qfalse;
++	static qboolean building    = qfalse;
++	static qboolean announced   = qfalse;
++	static int      following   = -1;   /* the construction being read directly */
++	static int      lastValue;
+ 	qboolean        shown;
+ 	qboolean        active;
+-	int             percent;
++	int             value = 0, percent, entityNum = -1;
+ 
+ 	if (!cg.snap || !eta_interactionCallouts.integer)
+ 	{
+ 		building  = qfalse;
+ 		announced = qfalse;
++		following = -1;
+ 		ETA_HudNarrator_ResetBuildProgress();
+ 		return;
+ 	}
+@@ -4823,6 +4901,7 @@ static void ETA_NarrateBuildProgress(void)
+ 			ETA_HudNarrator_ResetBuildProgress();
+ 		}
+ 
++		following = -1;
+ 		return;
+ 	}
+ 
+@@ -4831,6 +4910,46 @@ static void ETA_NarrateBuildProgress(void)
+ 	                        || cg.cursorHintIcon == HINT_CONSTRUCTIBLE)
+ 	                    && cg.cursorHintValue > 0);
+ 
++	if (active)
++	{
++		value     = (int)cg.cursorHintValue;
++		following = -1;
++	}
++	else if (cg.predictedPlayerState.weapon == WP_PLIERS
++	         && ETA_NearbyConstructionProgress(following, &entityNum) >= 0)
++	{
++		/* No hint - the crosshair is on the construction, see above -
++		   but the pliers are out beside one: read the construction
++		   itself. */
++		value = (int)cg_entities[entityNum].currentState.angles2[0];
++
++		if (following == entityNum && building && !announced
++		    && value <= 0 && lastValue >= 230)
++		{
++			/* The server puts the figure back to zero in the frame the
++			   work crosses its finish line, and a construction left
++			   alone runs down gradually, never in one step. So from
++			   ninety percent to nothing, with the player still beside
++			   it, is the construction finishing - the one case the
++			   completion hint above cannot report, because it is
++			   withheld from a player looking at their own
++			   construction. */
++			announced = qtrue;
++			following = -1;
++			ETA_HudNarrator_SpeakBuildComplete();
++			ETA_HudNarrator_ResetBuildProgress();
++			return;
++		}
++
++		following = entityNum;
++		lastValue = value;
++		active    = (qboolean)(value > 0);
++	}
++	else
++	{
++		following = -1;
++	}
++
+ 	if (!active)
+ 	{
+ 		/* Looking away from the construction starts the climb afresh, so
+@@ -4850,7 +4969,7 @@ static void ETA_NarrateBuildProgress(void)
+ 
+ 	/* The same figure the status bar under the icon draws, from the same
+ 	   value, so the words and the bar cannot disagree. */
+-	percent = (int)MIN(((float)cg.cursorHintValue / 255.0f) * 100.0f, 100.0f);
++	percent = (int)MIN(((float)value / 255.0f) * 100.0f, 100.0f);
+ 
+ 	ETA_HudNarrator_UpdateBuildProgress(percent);
+ }

@@ -1,0 +1,47 @@
+// The Tesla gun, from Return to Castle Wolfenstein, added by the
+// accessibility mode. It looks like the Venom until the RTCW pack
+// (release/make-rtcw-sounds.py) is installed; that pack carries a copy of
+// this file with RTCW's own Tesla models, and its sounds.
+weaponDef
+{
+	both {
+		name					"Tesla Gun"
+		statname				"Tesla"
+		damage					8
+		spread					0
+		selfKillMessage			"found a way to shoot himself!"
+		KillMessage				"was electrocuted by"
+		KillMessage2			"'s Tesla gun."
+		movementSpeedScale		0.6
+		maxHeat					3000
+		nextShotTime			50
+	}
+
+	client {
+		standModel				"models/weapons2/venom/venom_stand.mdc"
+		pickupModel				"models/weapons2/venom/pu_venom.mdc"
+		bounceSound				"sound/weapons/weaponbounce.wav"
+		clipBounceSound			"sound/weapons/clipbounce.wav"
+
+		weaponConfig			"models/weapons2/venom/weapon.cfg"
+		handsModel				"models/weapons2/venom/v_venom_hand.md3"
+
+		flashDlightColor		0.5 0.6 1.0
+		firingSound				"sound/weapons/tesla/tesla_fire.wav"
+
+		overheatSound			"sound/weapons/venom/venom_overheat.wav"
+		reloadSound				"sound/weapons/venom/venom_reload.wav"
+		reloadFastSound			"sound/weapons/venom/venom_reload_fast.wav"
+
+		weaponIcon				"icons/iconw_venom"
+		weaponSelectedIcon		"icons/iconw_venom_1_select"
+
+		firstPerson {
+			model				"models/weapons2/venom/v_venom.md3"
+		}
+
+		thirdPerson {
+			model				"models/weapons2/venom/venom.mdc"
+		}
+	}
+}

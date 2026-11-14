@@ -1,0 +1,52 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 1f397f0..1a00889 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -2342,8 +2342,16 @@ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
+  * steps through the things to use from nearest to furthest, and [ back,
+  * each said - name, direction, distance, "2 of 4" - without turning the
+  * view. F then turns to the one chosen, and uses it in reach, whatever is
+- * under the crosshair. The choice is kept for half a minute, and is let
+- * go once F has turned to it or it is no longer on the list.
++ * under the crosshair.
++ *
++ * The choice stays until it is used. It was let go as soon as F turned
++ * to it, and the tester, turned to a gun out of reach, walked up to it,
++ * pressed F again - and was turned to whatever was nearest. Now it is
++ * kept while the player walks there, each F turning to it again, and let
++ * go once use is pressed on it, once it is no longer on the list, or
++ * half a minute after the last F or bracket. A ladder or stairs, which
++ * F climbs or walks rather than uses, and a thing that is never pressed
++ * at, are let go once turned to, as before.
+  */
+ #define ETA_CHOOSE_HOLD_MS 30000
+ 
+@@ -2540,6 +2548,15 @@ static void CG_AccessibilityActivateDown_f(void)
+ 				eta_use.pending = (qboolean)(!list[index].ladder && !list[index].locked
+ 				                             && list[index].meters <= ETA_USE_REACH_METERS);
+ 				eta_use.uniform = list[index].uniform;
++
++				/* Kept until it is used: walked up to, F turns to it
++				   again, not to whatever is nearest by then. */
++				if (!list[index].ladder && !list[index].locked)
++				{
++					eta_choose.held   = qtrue;
++					eta_choose.at     = cg.time;
++					eta_choose.target = list[index];
++				}
+ 			}
+ 			eta_aim.cycleIndex = index;
+ 			eta_aim.cycleAt    = cg.time;
+@@ -3092,6 +3109,12 @@ void CG_AccessibilityAimFrame(void)
+ 
+ 			ETA_AimStop();
+ 
++			/* Used: what was chosen has done its job. */
++			if (use && eta_choose.held && eta_choose.target.entityNum >= 0 && eta_choose.target.entityNum == body)
++			{
++				eta_choose.held = qfalse;
++			}
++
+ 			if (use && eta_use.uniform)
+ 			{
+ 				ETA_UniformStart(body);

@@ -1,0 +1,518 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index cb6b079..41b3586 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -7,6 +7,10 @@
+  *
+  */
+ #include "cg_local.h"
++
++#ifdef FEATURE_ACCESSIBILITY
++#include "speech/speech_manager.h"
++#endif
+ #include "nq_server_help.h"	// core: NQ-help, documentation on settings, howto use, explaining bitflag values, etc..
+ #include "nq_client_help.h"	// core: NQ-help, documentation on settings, howto use, explaining bitflag values, etc..
+ 
+@@ -1196,6 +1200,49 @@ typedef struct {
+ 	void	(*function)(void);
+ } consoleCommand_t;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * [Accessibility]: repeat and stop, answered by whichever module is in
++ * front of the player. The cgame and the ui each have their own copy of
++ * the speech library and cannot see each other's. Once a match is
++ * running the engine offers every command to the cgame first, so with a
++ * menu open mid-match the request is handed to the ui under a name only
++ * the ui answers.
++ */
++static qboolean CG_AccessibilityForwardToUI( const char *uiCommand ) {
++	if( !(trap_Key_GetCatcher() & KEYCATCH_UI) ) {
++		return qfalse;
++	}
++
++	trap_SendConsoleCommand( va( "%s\n", uiCommand ) );
++	return qtrue;
++}
++
++static void CG_AccessibilityRepeat_f( void ) {
++	if( CG_AccessibilityForwardToUI( "accessibilityRepeatMenuItem" ) ) {
++		return;
++	}
++	ETA_Speech_RepeatLast();
++}
++
++static void CG_AccessibilityStopSpeech_f( void ) {
++	if( CG_AccessibilityForwardToUI( "accessibilityStopSpeechMenu" ) ) {
++		return;
++	}
++	ETA_Speech_Stop();
++}
++
++/* Checked by name ahead of the hashed table below, so no hash has to be
++   worked out and kept in step with the name. */
++static const struct {
++	const char	*cmd;
++	void		(*function)( void );
++} etaCommands[] = {
++	{ "accessibilityRepeat",		CG_AccessibilityRepeat_f },
++	{ "accessibilityStopSpeech",	CG_AccessibilityStopSpeech_f },
++};
++#endif
++
+ // CG_Printf("My convertThis hash value: %lu\n", BG_StringHashValue( "convertThis" ));
+ static consoleCommand_t	commands[] =
+ {
+@@ -1328,6 +1375,15 @@ qboolean CG_ConsoleCommand( void ) {
+ 
+ 	cmd = CG_Argv(0);
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	for ( i = 0; i < (int)(sizeof(etaCommands) / sizeof(etaCommands[0])); i++ ) {
++		if ( !Q_stricmp( cmd, etaCommands[i].cmd ) ) {
++			etaCommands[i].function();
++			return qtrue;
++		}
++	}
++#endif
++
+ 	// core: create a hash-value for faster "string"-comparing..
+ 	cmdHash = BG_StringHashValue(cmd);
+ 
+@@ -1357,6 +1413,12 @@ void CG_InitConsoleCommands( void ) {
+ 		trap_AddCommand( commands[i].cmd );
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	for ( i = 0; i < (int)(sizeof(etaCommands) / sizeof(etaCommands[0])); i++ ) {
++		trap_AddCommand( etaCommands[i].cmd );
++	}
++#endif
++
+ 	// the game server will interpret these commands, which will be automatically
+ 	// forwarded to the server after they are not recognized locally
+ 	trap_AddCommand ("kill");
+diff --git a/src/cgame/cg_limbopanel.c b/src/cgame/cg_limbopanel.c
+index 1b6c83c..8ffc194 100644
+--- a/src/cgame/cg_limbopanel.c
++++ b/src/cgame/cg_limbopanel.c
+@@ -9,6 +9,10 @@
+  
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "speech/speech_manager.h"
++#endif
++
+ #define SOUNDEVENT( sound ) trap_S_StartLocalSound( sound, CHAN_LOCAL_SOUND )
+ #define SOUND_SELECT	SOUNDEVENT( cgs.media.sndLimboSelect )
+ // #define SOUND_FOCUS		SOUNDEVENT( cgs.media.sndLimboFocus ) // IRATA: we don't use it
+@@ -2455,6 +2459,323 @@ qboolean CG_LimboPanel_Draw( void ) {
+ 	return qtrue;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * [Accessibility]: keyboard control of the limbo panel, which never had
++ * any, ported from the mod's ET: Legacy limbo panel.
++ *
++ * The panel is mouse-driven: every control is hit-tested against the
++ * cursor, and the panel only hands keys to a button a click already
++ * focused. A player who cannot aim a cursor cannot choose a team or a
++ * class - the one screen between them and a match.
++ *
++ * So the arrow keys walk the controls that matter, moving the real
++ * cursor onto each, and Enter calls that control's own click handler -
++ * the path a mouse click takes. Nothing here second-guesses the panel;
++ * it only drives it from the keyboard. Each stop says what it is and
++ * whether it is chosen, which a sighted player reads from its colour.
++ */
++#define ETA_LIMBO_TEAM		0
++#define ETA_LIMBO_CLASS		1
++#define ETA_LIMBO_WEAPON	2
++#define ETA_LIMBO_CONFIRM	3
++
++/* The weapon slots as the panel numbers them: 1 primary, 0 secondary. */
++#define ETA_LIMBO_PRIMARY	1
++#define ETA_LIMBO_SECONDARY	0
++
++typedef struct {
++	panel_button_t	*button;
++	int				kind;
++	int				slot;
++} eta_limboStop_t;
++
++/* The weapon stops carry no button: the panel has a dropdown, not a
++   control per weapon. They are driven through the slot lights and the
++   same setter the dropdown uses. */
++static eta_limboStop_t eta_limboStops[] = {
++	{ &teamButton0,		ETA_LIMBO_TEAM,		0 },
++	{ &teamButton1,		ETA_LIMBO_TEAM,		0 },
++	{ &teamButton2,		ETA_LIMBO_TEAM,		0 },
++	{ &classButton0,	ETA_LIMBO_CLASS,	0 },
++	{ &classButton1,	ETA_LIMBO_CLASS,	0 },
++	{ &classButton2,	ETA_LIMBO_CLASS,	0 },
++	{ &classButton3,	ETA_LIMBO_CLASS,	0 },
++	{ &classButton4,	ETA_LIMBO_CLASS,	0 },
++	{ NULL,				ETA_LIMBO_WEAPON,	ETA_LIMBO_PRIMARY },
++	{ NULL,				ETA_LIMBO_WEAPON,	ETA_LIMBO_SECONDARY },
++	{ &okButton,		ETA_LIMBO_CONFIRM,	0 },
++};
++
++#define ETA_LIMBO_STOP_COUNT ((int)(sizeof(eta_limboStops) / sizeof(eta_limboStops[0])))
++
++static int eta_limboIndex = -1;
++
++/*
++ * The weapons a slot offers, as the panel's numbers for them, in the
++ * order its dropdown lists them. No Quarter's secondaries depend on rank
++ * - akimbo pistols at Light Weapons 4, and for a soldier at Heavy
++ * Weapons 4 a submachine gun and, where the server allows, the shotgun -
++ * so the list is read fresh each time rather than kept. A primary the
++ * server has ruled out (all its panzers taken) cannot be chosen, so it
++ * is left out.
++ */
++static int ETA_LimboPanel_WeaponNumbers(int slot, int *out, int max) {
++	bg_playerclass_t *classInfo = CG_LimboPanel_GetPlayerClass();
++	int i, cnt = 0;
++
++	if (!classInfo || CG_LimboPanel_GetTeam() == TEAM_SPECTATOR) {
++		return 0;
++	}
++
++	if (slot == ETA_LIMBO_PRIMARY) {
++		for (i = 0; i < MAX_WEAPS_PER_CLASS && cnt < max; i++) {
++			if (!classInfo->classWeapons[i]) {
++				break;
++			}
++			if (CG_LimboPanel_WeaponIsDisabled(i)) {
++				continue;
++			}
++			out[cnt++] = i;
++		}
++		return cnt;
++	}
++
++	for (i = 0; i < CG_LimboPanel_WeaponCount_ForSlot(ETA_LIMBO_SECONDARY) && cnt < max; i++) {
++		out[cnt++] = i;
++	}
++	return cnt;
++}
++
++/* The number the panel has chosen for a slot. */
++static int ETA_LimboPanel_SelectedNumber(int slot) {
++	return slot == ETA_LIMBO_PRIMARY ? cgs.ccSelectedWeapon : cgs.ccSelectedWeapon2;
++}
++
++/* A stop worth stopping on: a slot with only one weapon has nothing to
++   choose, and a spectator has no weapons. */
++static qboolean ETA_LimboPanel_StopIsAvailable(int index) {
++	int numbers[MAX_WEAPS_PER_CLASS];
++
++	if (index < 0 || index >= ETA_LIMBO_STOP_COUNT) {
++		return qfalse;
++	}
++
++	if (eta_limboStops[index].kind != ETA_LIMBO_WEAPON) {
++		return qtrue;
++	}
++
++	return ETA_LimboPanel_WeaponNumbers(eta_limboStops[index].slot, numbers, MAX_WEAPS_PER_CLASS) > 1 ? qtrue : qfalse;
++}
++
++static const char *ETA_LimboStopText(const eta_limboStop_t *stop) {
++	static char text[128];
++	const char *name = NULL;
++	const char *state = "";
++
++	if (stop->kind == ETA_LIMBO_WEAPON) {
++		int numbers[MAX_WEAPS_PER_CLASS];
++		int count = ETA_LimboPanel_WeaponNumbers(stop->slot, numbers, MAX_WEAPS_PER_CLASS);
++		int chosen = ETA_LimboPanel_SelectedNumber(stop->slot);
++		weapon_t weap = CG_LimboPanel_GetWeaponForNumber(chosen, stop->slot, qfalse);
++		int i, at = 0;
++
++		for (i = 0; i < count; i++) {
++			if (numbers[i] == chosen) {
++				at = i + 1;
++				break;
++			}
++		}
++
++		Com_sprintf(text, sizeof(text), "%s weapon, %s, %i of %i",
++					stop->slot == ETA_LIMBO_PRIMARY ? "Primary" : "Secondary",
++					(weap > WP_NONE && weap < WP_NUM_WEAPONS && BG_Weapons[weap].name) ? BG_Weapons[weap].name : "none",
++					at, count);
++		return text;
++	}
++
++	switch (stop->kind) {
++		case ETA_LIMBO_TEAM:
++		{
++			team_t team = teamOrder[stop->button->data[0]];
++
++			name = team == TEAM_AXIS ? "Axis" : (team == TEAM_ALLIES ? "Allies" : "Spectator");
++			if (CG_LimboPanel_GetTeam() == team) {
++				state = ", selected";
++			}
++			break;
++		}
++		case ETA_LIMBO_CLASS:
++			name = BG_ClassnameForNumber(stop->button->data[1]);
++			if (CG_LimboPanel_GetTeam() == TEAM_SPECTATOR) {
++				state = ", choose a team first";
++			} else if (CG_LimboPanel_GetClass() == stop->button->data[1]) {
++				state = ", selected";
++			} else if (CG_LimboPanel_ClassIsDisabled(stop->button->data[1])) {
++				state = ", full";
++			}
++			break;
++		default:
++			name = CG_LimboPanel_GetTeam() == TEAM_SPECTATOR ? "Confirm and spectate" : "Confirm and spawn";
++			break;
++	}
++
++	Com_sprintf(text, sizeof(text), "%s%s", name ? name : "Unknown", state);
++	return text;
++}
++
++/* Puts the cursor on the current stop, so the panel's own hit testing
++   agrees with where the keyboard is. The panel draws in wide-screen
++   coordinates and keeps the pointer in 4:3 ones, so both are set. */
++static void ETA_LimboPanel_MoveCursor(void) {
++	rectDef_t *rect;
++	float x, y;
++
++	if (eta_limboIndex < 0 || eta_limboIndex >= ETA_LIMBO_STOP_COUNT) {
++		return;
++	}
++
++	if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_WEAPON) {
++		/* Landing on a weapon stop picks that slot through its own light,
++		   so the dropdown on screen shows the slot being spoken. */
++		panel_button_t *light = eta_limboStops[eta_limboIndex].slot == ETA_LIMBO_PRIMARY ? &weaponLight2 : &weaponLight1;
++
++		if (cgs.ccSelectedWeaponNumber != eta_limboStops[eta_limboIndex].slot) {
++			CG_LimboPanel_WeaponLights_KeyDown(light, K_MOUSE1);
++		}
++		rect = &light->rect;
++	} else {
++		rect = &eta_limboStops[eta_limboIndex].button->rect;
++	}
++
++	x = rect->x + rect->w / 2.f;
++	y = rect->y + rect->h / 2.f;
++
++	cgDC.cursorx = x;
++	cgDC.cursory = y;
++	cgs.cursorX = (!Ccg_Is43Screen() && cgs.adr43) ? (int)(x / cgs.adr43) : (int)x;
++	cgs.cursorY = (int)y;
++}
++
++/* Where the player is, as the panel comes up. The first stop is said
++   when the arrow keys move to it. */
++void CG_AccessibilityLimboOpened(void) {
++	ETA_Speech_Say("Limbo menu. Arrow keys to choose team, class and weapons, Enter to select");
++}
++
++static void ETA_LimboPanel_SpeakCurrent(void) {
++	if (eta_limboIndex < 0 || eta_limboIndex >= ETA_LIMBO_STOP_COUNT) {
++		return;
++	}
++
++	ETA_Speech_Say(ETA_LimboStopText(&eta_limboStops[eta_limboIndex]));
++}
++
++/* Up and down walk the stops, Tab swaps weapon slot, Enter presses. */
++static qboolean ETA_LimboPanel_HandleKey(int key) {
++	int steps;
++
++	switch (key) {
++		case K_DOWNARROW:
++		case K_KP_DOWNARROW:
++		case K_UPARROW:
++		case K_KP_UPARROW:
++		{
++			qboolean down = (key == K_DOWNARROW || key == K_KP_DOWNARROW) ? qtrue : qfalse;
++
++			/* Step over stops that leave nothing to choose. The walk is
++			   bounded and cannot spin: team, class and confirm are always
++			   there. */
++			for (steps = 0; steps < ETA_LIMBO_STOP_COUNT; steps++) {
++				if (down) {
++					eta_limboIndex = (eta_limboIndex + 1) % ETA_LIMBO_STOP_COUNT;
++				} else {
++					eta_limboIndex = (eta_limboIndex <= 0 ? ETA_LIMBO_STOP_COUNT : eta_limboIndex) - 1;
++				}
++
++				if (ETA_LimboPanel_StopIsAvailable(eta_limboIndex)) {
++					break;
++				}
++			}
++
++			ETA_LimboPanel_MoveCursor();
++			ETA_LimboPanel_SpeakCurrent();
++			return qtrue;
++		}
++		case K_TAB:
++		{
++			/* Tab swaps the weapon slot shown, as in the stock panel, and
++			   now says which. */
++			int other = cgs.ccSelectedWeaponNumber == ETA_LIMBO_PRIMARY ? ETA_LIMBO_SECONDARY : ETA_LIMBO_PRIMARY;
++			int i;
++
++			if (CG_LimboPanel_GetTeam() == TEAM_SPECTATOR) {
++				return qfalse;
++			}
++
++			for (i = 0; i < ETA_LIMBO_STOP_COUNT; i++) {
++				if (eta_limboStops[i].kind == ETA_LIMBO_WEAPON && eta_limboStops[i].slot == other) {
++					eta_limboIndex = i;
++					ETA_LimboPanel_MoveCursor();
++					ETA_LimboPanel_SpeakCurrent();
++					return qtrue;
++				}
++			}
++			return qfalse;
++		}
++		case K_ENTER:
++		case K_KP_ENTER:
++			if (eta_limboIndex < 0) {
++				return qfalse;
++			}
++
++			ETA_LimboPanel_MoveCursor();
++
++			if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_WEAPON) {
++				/* No per-weapon control to click, only a dropdown that needs
++				   a cursor: Enter moves the slot on to its next weapon,
++				   through the setter the dropdown calls. */
++				int numbers[MAX_WEAPS_PER_CLASS];
++				int slot = eta_limboStops[eta_limboIndex].slot;
++				int count = ETA_LimboPanel_WeaponNumbers(slot, numbers, MAX_WEAPS_PER_CLASS);
++				int chosen = ETA_LimboPanel_SelectedNumber(slot);
++				int i, at = -1;
++
++				for (i = 0; i < count; i++) {
++					if (numbers[i] == chosen) {
++						at = i;
++						break;
++					}
++				}
++
++				if (count > 0) {
++					CG_LimboPanel_SetSelectedWeaponNum(numbers[(at + 1) % count]);
++					if (slot == ETA_LIMBO_SECONDARY) {
++						/* Remembered as the dropdown remembers it. */
++						trap_Cvar_Set("cg_limbo_secondary", va("%i", cgs.ccSelectedWeapon2));
++					}
++					CG_LimboPanel_SendSetupMsg(qfalse);
++					SOUND_SELECT;
++				}
++			} else if (eta_limboStops[eta_limboIndex].button->onKeyDown) {
++				eta_limboStops[eta_limboIndex].button->onKeyDown(eta_limboStops[eta_limboIndex].button, K_MOUSE1);
++
++				/* Confirm closes the panel; there is nothing left to say. */
++				if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_CONFIRM) {
++					eta_limboIndex = -1;
++					return qtrue;
++				}
++			}
++
++			/* Read the stop again: choosing changes what it says. */
++			ETA_LimboPanel_SpeakCurrent();
++			return qtrue;
++		default:
++			return qfalse;
++	}
++}
++#endif
++
+ void CG_LimboPanel_KeyHandling( int key, qboolean down ) {
+ 
+ 	if( BG_PanelButtonsKeyEvent( key, down, limboPanelButtons ) ) {
+@@ -2471,6 +2792,14 @@ void CG_LimboPanel_KeyHandling( int key, qboolean down ) {
+ 		}
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* After the close key, so it is never swallowed, and after the
++	   panel's own buttons, so only keys nobody else wanted come here. */
++	if( down && ETA_LimboPanel_HandleKey( key ) ) {
++		return;
++	}
++#endif
++
+ 	if( down && key ) {
+ 		if( CG_CommandCentreSpawnPointClick() ) {
+ 			return;
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1d8b490..197b01c 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3509,6 +3509,9 @@ void CG_LimboPanelRenderText_SkillsText( panel_button_t* button );
+ void CG_LimboPanel_NameEditFinish( panel_button_t* button );
+ 
+ void CG_LimboPanel_Setup( void );
++#ifdef FEATURE_ACCESSIBILITY
++void CG_AccessibilityLimboOpened( void );
++#endif
+ void CG_LimboPanel_Init( void );
+ 
+ void				CG_LimboPanel_GetWeaponCardIconData	( weapon_t weap, qhandle_t* shader, float* w, float* h, float* s0, float* t0, float* s1, float* t1 );
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 7d038d5..a4af48d 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -9,6 +9,10 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/accessibility_runtime.h"
++#endif
++
+ #ifdef __linux__
+   extern char* __progname;
+ #elif defined  __MACOS__
+@@ -2922,6 +2926,13 @@ void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum, qb
+ 	DEBUG_INITPROFILE_INIT
+ #endif // _DEBUG
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* The cgame links its own copy of the speech library, so it starts
++	   its own speech, first: the limbo panel can open before the rest
++	   of this is done, and anything said before this goes nowhere. */
++	ETA_AccessibilityRuntime_Init();
++#endif
++
+ #ifdef SYSTEM_CHECK
+ 	checkExecutable();
+ #else
+@@ -3247,6 +3258,10 @@ void CG_Shutdown( void ) {
+ 	}
+ 
+ 	CG_RestoreProfile();
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_AccessibilityRuntime_Shutdown();
++#endif
+ }
+ 
+ qboolean CG_CheckExecKey( int key ) {
+diff --git a/src/cgame/cg_newDraw.c b/src/cgame/cg_newDraw.c
+index a5a3e1b..7ab3fcd 100644
+--- a/src/cgame/cg_newDraw.c
++++ b/src/cgame/cg_newDraw.c
+@@ -765,6 +765,11 @@ void CG_EventHandling( int type, qboolean fForced )
+ 		case CGAME_EVENT_GAMEVIEW:
+ 			cg.showGameView = qtrue;
+ 			CG_LimboPanel_Setup();
++#ifdef FEATURE_ACCESSIBILITY
++			/* Here rather than in CG_LimboPanel_Setup, which also runs on
++			   every promotion while the panel is shut. */
++			CG_AccessibilityLimboOpened();
++#endif
+ 			trap_Key_SetCatcher(KEYCATCH_CGAME);
+ 			break;
+ 		case CGAME_EVENT_FIRETEAMMSG:

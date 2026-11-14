@@ -1,0 +1,219 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index ad08b2b..97de06b 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3203,8 +3203,27 @@ static void ETA_BeaconDoors(void)
+ 		centity_t     *cent;
+ 		sfxHandle_t   sfx;
+ 		vec3_t        origin;
++		qboolean      locked;
++		qboolean      opens;
+ 
+-		if (es->eType != ET_MOVER || !ETA_HintIsDoor(es->dmgFlags))
++		if (es->eType != ET_MOVER)
++		{
++			continue;
++		}
++
++		if (ETA_HintIsDoor(es->dmgFlags))
++		{
++			locked = ETA_HintIsLockedDoor(es->dmgFlags);
++		}
++		else if (es->solid == SOLID_BMODEL
++		         && CG_AccessibilityDoorModel(es->modelindex, &opens))
++		{
++			/* A team door: the server leaves these unstamped, so they
++			   come from the map's own list, and "locked" means what it
++			   means in play - this player's team cannot open it. */
++			locked = (qboolean)!opens;
++		}
++		else
+ 		{
+ 			continue;
+ 		}
+@@ -3229,8 +3248,7 @@ static void ETA_BeaconDoors(void)
+ 			continue;
+ 		}
+ 
+-		sfx = CG_AccessibilityLoopSound(ETA_HintIsLockedDoor(es->dmgFlags)
+-		                                ? ETA_LOOP_DOOR_LOCKED : ETA_LOOP_DOOR);
++		sfx = CG_AccessibilityLoopSound(locked ? ETA_LOOP_DOOR_LOCKED : ETA_LOOP_DOOR);
+ 
+ 		if (sfx)
+ 		{
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index f9f0ebc..9d14885 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3448,6 +3448,9 @@ void CG_AccessibilityMarkerApproach(void);
+  * cg_consolecmds.c.
+  */
+ void CG_AccessibilityTurnFrame(void);
++
++/* The map's doors, read from its entity list. See cg_spawn.c. */
++qboolean CG_AccessibilityDoorModel(int modelindex, qboolean *opens);
+ qboolean CG_AccessibilityTurnBusy(void);
+ void CG_AccessibilityTurnShutdown(void);
+ 
+diff --git a/src/cgame/cg_spawn.c b/src/cgame/cg_spawn.c
+index d72f95c..773b890 100644
+--- a/src/cgame/cg_spawn.c
++++ b/src/cgame/cg_spawn.c
+@@ -397,6 +397,136 @@ void SP_team_WOLF_objective(void)
+ 	cgs.majorSpawnpointEnt[cg.numMajorSpawnpointEnts++] = *spawnpoint;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Which brush models are doors, read from the map itself.
++ *
++ * The door creak used to find doors by the cursor hint the server
++ * stamps on them, and the server stamps it only on doors every team may
++ * use: G_Spawn's func_door and func_door_rotating set s.dmgFlags only
++ * when allowteams is empty. So every team door - most of the doors on an
++ * objective map - was silent, and a tester reported the creak as not
++ * playing at all.
++ *
++ * The map's own entity list says which brush models are doors and which
++ * teams may open each, and the cgame reads that list anyway. A door's
++ * modelindex is the number after the '*' in its "model" key, the same
++ * way SV_SetBrushModel assigns it, so the list and the snapshot agree
++ * without anything being sent.
++ *
++ * -1 means not a door; otherwise the allowteams bits, 0 for any team.
++ */
++static int eta_doorAllowTeams[MAX_MODELS];
++
++static void ETA_DoorsReset(void)
++{
++	int i;
++
++	for (i = 0; i < MAX_MODELS; i++)
++	{
++		eta_doorAllowTeams[i] = -1;
++	}
++}
++
++/**
++ * @brief func_door and func_door_rotating, noted by their brush model.
++ *
++ * allowteams is read with the server's own rules (G_Spawn): lower-cased,
++ * then searched for "axis", "allies" and "cvops".
++ */
++static void SP_ETA_door(void)
++{
++	char *model;
++	char *teams;
++	char lower[MAX_QPATH];
++	int  index;
++	int  allow = 0;
++
++	CG_SpawnString("model", "", &model);
++
++	if (model[0] != '*')
++	{
++		return;
++	}
++
++	index = Q_atoi(model + 1);
++
++	if (index <= 0 || index >= MAX_MODELS)
++	{
++		return;
++	}
++
++	CG_SpawnString("allowteams", "", &teams);
++	Q_strncpyz(lower, teams, sizeof(lower));
++	Q_strlwr(lower);
++
++	if (strstr(lower, "axis"))
++	{
++		allow |= 1;     /* ALLOW_AXIS_TEAM */
++	}
++	if (strstr(lower, "allies"))
++	{
++		allow |= 2;     /* ALLOW_ALLIED_TEAM */
++	}
++	if (strstr(lower, "cvops"))
++	{
++		allow |= 4;     /* ALLOW_DISGUISED_CVOPS */
++	}
++
++	eta_doorAllowTeams[index] = allow;
++}
++
++/**
++ * @brief Whether a brush model is a door, and whether this player can open it.
++ *
++ * The opening rule is G_AllowTeamsAllowed's, line for line: a door with
++ * no team list opens for anybody; otherwise the player's team must be on
++ * it, or, for a disguised covert operative on a door that lets them
++ * through, the team they are disguised as. A spectator is never refused.
++ *
++ * @param[in]  modelindex
++ * @param[out] opens qtrue when the player could open it
++ * @return qtrue when the model is a door
++ */
++qboolean CG_AccessibilityDoorModel(int modelindex, qboolean *opens)
++{
++	int allow;
++	int checkTeam;
++
++	if (modelindex <= 0 || modelindex >= MAX_MODELS || eta_doorAllowTeams[modelindex] < 0)
++	{
++		return qfalse;
++	}
++
++	allow  = eta_doorAllowTeams[modelindex];
++	*opens = qtrue;
++
++	checkTeam = cgs.clientinfo[cg.clientNum].team;
++
++	if (allow && checkTeam != TEAM_SPECTATOR && !(allow & checkTeam))
++	{
++		if ((allow & 4) && cg.predictedPlayerState.powerups[PW_OPS_DISGUISED])
++		{
++			if (checkTeam == TEAM_AXIS)
++			{
++				checkTeam = TEAM_ALLIES;
++			}
++			else if (checkTeam == TEAM_ALLIES)
++			{
++				checkTeam = TEAM_AXIS;
++			}
++		}
++
++		if (!(allow & checkTeam))
++		{
++			*opens = qfalse;
++		}
++	}
++
++	return qtrue;
++}
++#endif
++
+ typedef struct
+ {
+ 	const char *name;
+@@ -416,6 +546,10 @@ spawn_t spawns[] =
+ 	{ "team_CTF_redspawn",         CG_Spawnpoint             },
+ 	{ "team_CTF_bluespawn",        CG_Spawnpoint             },
+ 	{ "team_WOLF_objective",       SP_team_WOLF_objective    },
++#ifdef FEATURE_ACCESSIBILITY
++	{ "func_door",                 SP_ETA_door               },
++	{ "func_door_rotating",        SP_ETA_door               },
++#endif
+ };
+ 
+ #define NUMSPAWNS (int)(sizeof(spawns) / sizeof(spawn_t))
+@@ -740,6 +874,9 @@ void CG_ParseEntitiesFromString(void)
+ 	cg.numSpawnpointEnts      = 0;
+ 	cg.numMajorSpawnpointEnts = 0;
+ 	cg.hasMinorSpawnPoints    = qfalse;
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_DoorsReset();
++#endif
+ 
+ 	// the worldspawn is not an actual entity, but it still
+ 	// has a "spawn" function to perform any global setup

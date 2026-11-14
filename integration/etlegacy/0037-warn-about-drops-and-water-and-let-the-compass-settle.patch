@@ -1,0 +1,360 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index ae4c76b..b81c00d 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2641,6 +2641,331 @@ static void ETA_NarrateLean(void)
+ 	ETA_HudNarrator_SpeakLean(lean);
+ }
+ 
++/**
++ * @brief The engine's waterlevel for the local player, worked out client side.
++ *
++ * PM_SetWaterLevel computes this every movement frame, but it lives in
++ * pmove_t and never reaches the playerstate, so the cgame cannot simply
++ * read it. What it can do is ask the same question the same way: three
++ * sample points up the player's own bounding box, each tested against
++ * the engine's own MASK_WATER.
++ *
++ * Deliberately a transcription rather than an approximation. The sample
++ * heights below are PM_SetWaterLevel's, not heights that looked about
++ * right, because every word this feature speaks - "deep water" meaning a
++ * jump will swim, "swimming" meaning falling damage is cancelled - is
++ * true only at the levels the movement code itself switches on. A copy
++ * that drifted would still sound authoritative.
++ *
++ * @return 0 dry, 1 feet, 2 waist, 3 submerged
++ */
++static int ETA_WaterLevel(void)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	vec3_t              point;
++	int                 sample1, sample2;
++
++	point[0] = ps->origin[0];
++	point[1] = ps->origin[1];
++	point[2] = ps->origin[2] + ps->mins[2] + 1;
++
++	if (!(CG_PointContents(point, ps->clientNum) & MASK_WATER))
++	{
++		return 0;
++	}
++
++	sample2 = ps->viewheight - (int)ps->mins[2];
++	sample1 = sample2 / 2;
++
++	point[2] = ps->origin[2] + ps->mins[2] + sample1;
++
++	if (!(CG_PointContents(point, ps->clientNum) & MASK_WATER))
++	{
++		return 1;
++	}
++
++	point[2] = ps->origin[2] + ps->mins[2] + sample2;
++
++	if (!(CG_PointContents(point, ps->clientNum) & MASK_WATER))
++	{
++		return 2;
++	}
++
++	return 3;
++}
++
++/**
++ * @brief How far ahead the ground is probed for a drop, in Quake units.
++ *
++ * About one stride. Far enough that the report arrives before the step
++ * that takes the player over the edge, close enough that it describes
++ * where they are actually about to be rather than the far side of the
++ * room.
++ */
++#define ETA_DROP_PROBE_DISTANCE 56.0f
++
++/**
++ * @brief The engine's own maximum step-up, from STEPSIZE in bg_local.h.
++ *
++ * Anything the player can simply walk down is not a ledge, and a stair
++ * that announced itself as one would make stairs unusable.
++ */
++#define ETA_DROP_STEP_UNITS 18.0f
++
++/**
++ * @brief The shallowest drop worth speaking, in Quake units.
++ *
++ * Comfortably more than a step, so ordinary uneven ground stays quiet.
++ */
++#define ETA_DROP_MIN_UNITS 64.0f
++
++/**
++ * @brief The engine's own falling-damage ladder, from PM_CrashLand.
++ *
++ * PM_CrashLand works out delta from the speed the player lands at and
++ * compares it against a ladder of thresholds: nothing below 38.75, and
++ * EV_FALL_NDIE - death outright - above 77. Those two numbers are the
++ * only judgement in this whole feature that is not ours, which is the
++ * point. ETA_HudNarrator_FallHeightForDelta turns each back into the
++ * height a fall has to start from, using the gravity actually in play,
++ * so a server that changes gravity changes where the warning starts.
++ */
++#define ETA_FALL_DELTA_INJURE 38.75f
++#define ETA_FALL_DELTA_DEADLY 77.0f
++
++/**
++ * @brief How long the same drop stays announced before it is news again.
++ */
++#define ETA_DROP_MIN_INTERVAL 4000
++
++/**
++ * @brief Says when the ground ahead falls away.
++ *
++ * The mod described the wall in front and the ground underfoot and had
++ * nothing to say about the one piece of terrain that kills a player who
++ * is walking in a straight line minding their own business. A sighted
++ * player never walks off a roof by accident; without this, someone
++ * playing by ear has no way not to.
++ *
++ * It probes where the player is *going* when they are moving and where
++ * they are looking when they are standing still. A hazard you are about
++ * to walk into matters more than one you happen to be looking at, and
++ * standing still is when "what is over there" is the question being
++ * asked.
++ *
++ * The bands come from the engine (see ETA_FALL_DELTA_INJURE above), not
++ * from a guess about what looks high.
++ *
++ * Water at the bottom is only ever reported for a drop that was not
++ * dangerous anyway. The engine does cancel falling damage for a player
++ * who lands submerged - but this probe cannot tell deep water from a
++ * puddle on the floor of a deep shaft, and "you can jump, there is water
++ * down there" is the one thing here that must never be said on a guess.
++ */
++static void ETA_NarrateDropAhead(void)
++{
++	static char lastDescription[64];
++	static int  lastTime;
++	char        description[64];
++
++	const playerState_t *ps;
++	trace_t             trace;
++	vec3_t              angles, forward, start, end;
++	float               footZ, drop, injure, deadly, reach, speedSq;
++	ETA_Drop            kind;
++	int                 meters;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer)
++	{
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	ps = &cg.predictedPlayerState;
++
++	/* Only from solid ground. In the air there is nothing to warn about
++	   that has not already happened, and the drop would be measured from
++	   wherever the player had fallen to by now. */
++	if (ps->groundEntityNum == ENTITYNUM_NONE)
++	{
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	/* Already in water: how deep it is is the waterlevel narration's
++	   question, and a probe off the edge of a riverbed is noise. */
++	if (ETA_WaterLevel() > 0)
++	{
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	speedSq = ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1];
++
++	if (speedSq > 40.0f * 40.0f)
++	{
++		forward[0] = ps->velocity[0];
++		forward[1] = ps->velocity[1];
++		forward[2] = 0.0f;
++		VectorNormalize(forward);
++	}
++	else
++	{
++		/* Flattened: looking down at your boots must not aim the probe
++		   into the floor, and looking up must not aim it at the sky. */
++		angles[PITCH] = 0.0f;
++		angles[YAW]   = cg.refdefViewAngles[YAW];
++		angles[ROLL]  = 0.0f;
++		AngleVectors(angles, forward, NULL, NULL);
++	}
++
++	footZ = ps->origin[2] + ps->mins[2];
++
++	/* Out from the feet, lifted by one step so a kerb does not read as a
++	   wall. */
++	VectorCopy(ps->origin, start);
++	start[2] = footZ + ETA_DROP_STEP_UNITS;
++	VectorMA(start, ETA_DROP_PROBE_DISTANCE, forward, end);
++
++	CG_Trace(&trace, start, NULL, NULL, end, ps->clientNum, MASK_PLAYERSOLID);
++
++	if (trace.fraction < 1.0f)
++	{
++		/* Something solid in the way, so there is nowhere to fall from.
++		   Whatever it is, the obstacle narration has it. */
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	injure = ETA_HudNarrator_FallHeightForDelta(ETA_FALL_DELTA_INJURE, (float)ps->gravity);
++	deadly = ETA_HudNarrator_FallHeightForDelta(ETA_FALL_DELTA_DEADLY, (float)ps->gravity);
++
++	/* Past the fatal height by a clear margin, so "deadly" and "no
++	   bottom at all" can be told apart rather than merged. */
++	reach = deadly * 2.0f + 128.0f;
++
++	VectorCopy(end, start);
++	end[2] -= reach;
++
++	CG_Trace(&trace, start, NULL, NULL, end, ps->clientNum, MASK_PLAYERSOLID);
++
++	if (trace.fraction == 1.0f)
++	{
++		kind   = ETA_DROP_DEADLY;
++		meters = -1;
++	}
++	else
++	{
++		drop = footZ - trace.endpos[2];
++
++		if (drop < ETA_DROP_MIN_UNITS)
++		{
++			lastDescription[0] = '\0';
++			return;
++		}
++
++		meters = (int)(drop * ETA_QU_TO_METERS);
++
++		if (drop >= deadly)
++		{
++			kind = ETA_DROP_DEADLY;
++		}
++		else if (drop >= injure)
++		{
++			kind = ETA_DROP_INJURING;
++		}
++		else
++		{
++			vec3_t sample;
++
++			kind = ETA_DROP_LEDGE;
++
++			/* Only for a drop that could not have hurt anyway: see the
++			   note above on why this never softens a dangerous one. */
++			VectorCopy(trace.endpos, sample);
++			sample[2] += 1.0f;
++
++			if (CG_PointContents(sample, -1) & MASK_WATER)
++			{
++				kind = ETA_DROP_WATER;
++			}
++		}
++	}
++
++	/* The classification and the rounded depth together, so stepping
++	   along an edge does not repeat itself but arriving at a different
++	   edge is announced at once. */
++	Com_sprintf(description, sizeof(description), "%d:%d", (int)kind, meters);
++
++	if (!Q_stricmp(description, lastDescription)
++	    && cg.time - lastTime < ETA_DROP_MIN_INTERVAL)
++	{
++		return;
++	}
++
++	Q_strncpyz(lastDescription, description, sizeof(lastDescription));
++	lastTime = cg.time;
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakDrop(kind, meters);
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief Says how deep in water the player is, when it changes.
++ *
++ * Read straight off the engine's own waterlevel, which is what the
++ * movement code itself switches on: at 2 a jump becomes a swim, and at 3
++ * PM_WaterMove is entered and falling damage is cancelled outright. So
++ * "deep water" and "swimming" are not descriptions of how it looks, they
++ * are the levels at which the player's own movement changes under them.
++ *
++ * Predicted rather than the snapshot's, for the same reason the stance
++ * and the facing are: wading in is a local action and a round trip of
++ * lag is long enough to be felt.
++ */
++static void ETA_NarrateWater(void)
++{
++	static int spoken = -1;
++	int        level;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer)
++	{
++		spoken = -1;
++		return;
++	}
++
++	level = ETA_WaterLevel();
++
++	if (level < ETA_WATER_DRY || level > ETA_WATER_SWIMMING)
++	{
++		return;
++	}
++
++	if (level == spoken)
++	{
++		return;
++	}
++
++	/* Nothing to announce about being dry until the player has been wet:
++	   otherwise every spawn opens with "out of the water". */
++	if (spoken < 0)
++	{
++		spoken = level;
++
++		if (level == ETA_WATER_DRY)
++		{
++			return;
++		}
++	}
++
++	spoken = level;
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakWater((ETA_Water)level);
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Says which way the player is facing when it changes.
+  *
+@@ -2671,7 +2996,7 @@ static void ETA_NarrateFacing(void)
+ 	/* Predicted rather than the snapshot's, for the same reason the
+ 	   stance is: turning is a local action and the snapshot lags it by a
+ 	   round trip, which on a direction is long enough to be felt. */
+-	if (ETA_HudNarrator_UpdateFacing(cg.predictedPlayerState.viewangles[YAW], &facing))
++	if (ETA_HudNarrator_UpdateFacing(cg.predictedPlayerState.viewangles[YAW], cg.time, &facing))
+ 	{
+ 		ETA_Speech_BeginReport();
+ 		ETA_HudNarrator_SpeakFacing(facing);
+@@ -5608,6 +5933,14 @@ void CG_DrawActive()
+ 
+ 	ETA_NarrateFacing();
+ 
++	/* Last of the environment reports, most urgent last: on a backend
++	   that delivers a new report by cutting off the one in progress, a
++	   frame that produces several leaves the hazard spoken rather than
++	   the heading. */
++	ETA_NarrateWater();
++
++	ETA_NarrateDropAhead();
++
+ 	/* Alongside the stance, and for the same reason: both are things the
+ 	   engine can refuse without saying so. */
+ 	ETA_NarrateLean();

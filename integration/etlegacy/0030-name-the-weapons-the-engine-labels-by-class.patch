@@ -1,0 +1,81 @@
+diff --git a/src/cgame/cg_weapons.c b/src/cgame/cg_weapons.c
+index 664799b..4eb887c 100644
+--- a/src/cgame/cg_weapons.c
++++ b/src/cgame/cg_weapons.c
+@@ -42,6 +42,42 @@
+  * @brief The new loadout for WolfXP
+  */
+ #ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Weapons whose `desc` names something other than the weapon.
++ *
++ * The weapon table's `desc` is what the HUD prints, and for fifty-four of
++ * the fifty-five weapons it is the weapon's own name. For one it is not:
++ * WP_MEDIC_SYRINGE's `desc` is "MEDIC", which is the player's class -
++ * the engine names it that itself, in BG_ClassnameForNumber.
++ *
++ * On screen that reads fine beside an icon of a syringe. Spoken on its
++ * own it is wrong, and wrong in a way that matters: a medic holding the
++ * syringe heard "MEDIC" and an ammo count, while the health pack - a
++ * different item, on a different key, and the one that can be dropped -
++ * was named properly. There was no way to tell the two apart by ear.
++ *
++ * Skipping `desc` here falls through to the item's own `pickup_name`,
++ * which the engine already gets right: "Syringe". So this does not
++ * invent a name, it picks the other name the engine already has, and it
++ * is a list of weapons rather than of replacement strings because there
++ * is nothing for the mod to word.
++ *
++ * The bar for adding to this list is exactly that: `desc` has to name
++ * something the engine itself calls something else - a class, here. It
++ * is deliberately not "the pickup name is longer", which would rename
++ * the Sten to "Sten gun", the FG 42 to "FG 42 Paratroop Rifle Scope"
++ * and, worst of all, dynamite to "Dynamite Weapon". A CI check derives
++ * this list from the engine's own class names and fails if the two
++ * disagree.
++ *
++ * @param[in] weap
++ * @return qfalse when `desc` must not be spoken for this weapon
++ */
++static qboolean CG_AccessibilityDescriptionNamesTheWeapon(weapon_t weap)
++{
++	return weap != WP_MEDIC_SYRINGE;
++}
++
+ /**
+  * @brief Names the mod supplies where the engine has none worth speaking.
+  *
+@@ -75,8 +111,9 @@ static const struct
+  *
+  * In order: the weapon table's own description, the small table above
+  * where that is empty, then the item's pickup name, then a last-resort
+- * label. The order matters - the engine's own name always wins, so this
+- * can only ever fill a gap, never shadow or rename anything upstream.
++ * label. The order matters - the engine's own description wins wherever
++ * it names the weapon, so this can only ever fill a gap or pick between
++ * two strings the engine already has, never invent or rename.
+  *
+  * Never returns NULL or an empty string. Silence here is indistinguishable
+  * from the mod being broken, which is the failure this project keeps
+@@ -98,11 +135,17 @@ const char *CG_AccessibilityWeaponName(weapon_t weap)
+ 		return "Weapon";
+ 	}
+ 
+-	name = GetWeaponTableData(weap)->desc;
+-
+-	if (name && name[0])
++	/* The engine's own name wins wherever it is a name. Where it is not -
++	   the two weapons above - this falls through to the pickup name, which
++	   is still the engine's word for the thing and not the mod's. */
++	if (CG_AccessibilityDescriptionNamesTheWeapon(weap))
+ 	{
+-		return name;
++		name = GetWeaponTableData(weap)->desc;
++
++		if (name && name[0])
++		{
++			return name;
++		}
+ 	}
+ 
+ 	for (i = 0; i < sizeof(eta_weaponNameFallbacks) / sizeof(eta_weaponNameFallbacks[0]); i++)

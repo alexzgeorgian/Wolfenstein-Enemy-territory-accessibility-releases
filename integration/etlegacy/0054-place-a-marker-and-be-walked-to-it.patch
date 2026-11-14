@@ -1,0 +1,603 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 2cab4c0..16be104 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -37,6 +37,7 @@
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "hud/hud_narrator.h"
+ #include "map/map_survey.h"
++#include "navigation/navigation_system.h"
+ #include "speech/speech_manager.h"
+ #endif
+ 
+@@ -2522,6 +2523,405 @@ void CG_AccessibilityMapClosed(void)
+ {
+ 	ETA_MapSurvey_Close(&eta_mapCursor);
+ }
++
++/**
++ * @brief A place the player chose to go, and the way there.
++ *
++ * The game has nothing like it. A sighted player does not need one: they
++ * look at the far side of the bridge, decide to go there, and go. What
++ * they are using is not the map, it is the ability to pick a destination
++ * of their own and keep it in view. The objective guidance cannot stand
++ * in for that - it only ever points where the map's script says - so
++ * this lets the player put down a destination and then hears them to it.
++ *
++ * Two kinds, from one key. With the command map up and the survey cursor
++ * moved onto a square, the marker goes on that square: anywhere on the
++ * map, in the grid the rest of the team already speaks. With the map
++ * down, it goes where the player is standing, which is how they get back
++ * to a spot - a doorway they found, the corner they were holding - after
++ * a death or a detour.
++ */
++typedef struct
++{
++	qboolean active;
++	qboolean square;   /* a map square rather than a spot */
++	qboolean leftIt;   /* has been far enough away for arriving to mean something */
++	vec3_t origin;     /* the spot, or the square's middle */
++	int column, row, layer;
++	char name[16];     /* the square's name, "C,3" */
++} eta_marker_t;
++
++static eta_marker_t eta_marker;
++
++/**
++ * @brief How close to a spot counts as having reached it.
++ *
++ * A spot marker is where the player stood, so three metres is "back on
++ * it" without asking them to find the exact footprint. A square is
++ * reached by walking into it, which the grid decides rather than this.
++ */
++#define ETA_MARKER_ARRIVE_METERS 3.0f
++
++/**
++ * @brief How far toward the marker its sound is placed.
++ *
++ * The sound has to point, not to be where the marker is: a marker on the
++ * far side of the map would be far outside the engine's hearing range
++ * and play as silence. So it sits a few metres off in the marker's
++ * direction, where the engine gives it a clear left and right, and only
++ * closes to the marker itself once the player is nearer than this. That
++ * last part is what lets them walk onto it by ear.
++ */
++#define ETA_MARKER_BEACON_DISTANCE 256.0f
++
++/**
++ * @brief Where the player's ears are.
++ */
++static void ETA_MarkerEye(vec3_t eye)
++{
++	VectorCopy(cg.predictedPlayerState.origin, eye);
++	eye[2] += cg.predictedPlayerState.viewheight;
++}
++
++/**
++ * @brief The distance to the marker, in metres.
++ *
++ * Flat for a square, which has no height of its own; straight-line for a
++ * spot, which does - a spot on the floor above is not where you are.
++ */
++static int ETA_MarkerDistance(void)
++{
++	vec3_t delta;
++
++	VectorSubtract(eta_marker.origin, cg.predictedPlayerState.origin, delta);
++
++	if (eta_marker.square)
++	{
++		delta[2] = 0.0f;
++	}
++
++	return (int)(VectorLength(delta) * ETA_QU_TO_METERS);
++}
++
++/**
++ * @brief Whether the player is in the marked square right now.
++ */
++static qboolean ETA_MarkerSquareUnderfoot(void)
++{
++	int column, row;
++
++	ETA_MapCellFor(cg.predictedPlayerState.origin[0],
++	               cg.predictedPlayerState.origin[1], &column, &row);
++
++	if (column != eta_marker.column || row != eta_marker.row)
++	{
++		return qfalse;
++	}
++
++	if (cgs.ccLayers
++	    && CG_CurLayerForZ((int)cg.predictedPlayerState.origin[2]) != eta_marker.layer)
++	{
++		return qfalse;
++	}
++
++	return qtrue;
++}
++
++/**
++ * @brief Which way to turn for the marker, in the words the objective uses.
++ *
++ * The same two parts as the objective's: a turn, and then the two compass
++ * points together, because "turn left" alone never says how far round.
++ */
++static void ETA_MarkerSpeakWay(void)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	vec3_t              delta, angles;
++	float               relativeYaw;
++	char                compass[96];
++
++	VectorSubtract(eta_marker.origin, ps->origin, delta);
++	delta[2] = 0.0f;
++	vectoangles(delta, angles);
++
++	/* Written the way the objective's is, through the same call, so that
++	   tests/bearing_regression_test.py lifts this chain too and checks it
++	   against the engine's own maths. Both integrations once shipped the
++	   objective's turn mirrored; a new copy is a new chance to. */
++	relativeYaw = AngleSubtract(angles[YAW], ps->viewangles[YAW]);
++
++	if (fabsf(relativeYaw) <= 15.0f)
++	{
++		ETA_NavigationSystem_AnnounceRouteCorrection("Marker is ahead");
++	}
++	else if (relativeYaw > 0.0f)
++	{
++		ETA_NavigationSystem_AnnounceRouteCorrection("Turn left toward the marker");
++	}
++	else
++	{
++		ETA_NavigationSystem_AnnounceRouteCorrection("Turn right toward the marker");
++	}
++
++	Com_sprintf(compass, sizeof(compass), "Marker lies %s, you are facing %s",
++	            ETA_HudNarrator_FacingName(ETA_HudNarrator_FacingFromYaw(angles[YAW])),
++	            ETA_HudNarrator_FacingName(ETA_HudNarrator_FacingFromYaw(ps->viewangles[YAW])));
++	ETA_NavigationSystem_AnnounceRouteCorrection(compass);
++}
++
++/**
++ * @brief The square's name, and its floor on a map that has floors.
++ */
++static void ETA_MarkerSquareName(char *out, size_t outSize)
++{
++	if (cgs.ccLayers > 1)
++	{
++		Com_sprintf(out, outSize, "%s, floor %d", eta_marker.name, eta_marker.layer + 1);
++	}
++	else
++	{
++		Q_strncpyz(out, eta_marker.name, outSize);
++	}
++}
++
++/**
++ * @brief Puts the marker down.
++ */
++void CG_AccessibilityMarkerPlace(void)
++{
++	char text[64];
++	int  distance;
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	if (cgs.autoMapExpanded && ETA_MapSurvey_IsOpen(&eta_mapCursor))
++	{
++		vec2_t centre;
++		int    column, row;
++
++		/* The cursor is still on the player's own square: they opened
++		   the map and pressed the key without walking anywhere. A marker
++		   there would be reached before it was heard. */
++		ETA_MapCellFor(cg.predictedPlayerState.origin[0],
++		               cg.predictedPlayerState.origin[1], &column, &row);
++
++		if (column == eta_mapCursor.column && row == eta_mapCursor.row
++		    && (!cgs.ccLayers
++		        || CG_CurLayerForZ((int)cg.predictedPlayerState.origin[2]) == eta_mapCursor.layer))
++		{
++			ETA_Speech_BeginReport();
++			ETA_Speech_Say(va("You are already in %s. Move the cursor to another square first",
++			                  ETA_MapSurvey_CellName(&eta_mapCursor)));
++			ETA_Speech_EndReport();
++			return;
++		}
++
++		ETA_MapCellCentre(eta_mapCursor.column, eta_mapCursor.row, centre);
++
++		eta_marker.square    = qtrue;
++		eta_marker.leftIt    = qtrue;
++		eta_marker.origin[0] = centre[0];
++		eta_marker.origin[1] = centre[1];
++		eta_marker.origin[2] = cg.predictedPlayerState.origin[2];
++		eta_marker.column    = eta_mapCursor.column;
++		eta_marker.row       = eta_mapCursor.row;
++		eta_marker.layer     = eta_mapCursor.layer;
++		Q_strncpyz(eta_marker.name, ETA_MapSurvey_CellName(&eta_mapCursor), sizeof(eta_marker.name));
++	}
++	else
++	{
++		/* Where a dead or spectating player's view happens to be is not a
++		   place they can walk back to. */
++		if (cg.predictedPlayerState.pm_type != PM_NORMAL)
++		{
++			ETA_Speech_BeginReport();
++			ETA_Speech_Say("Hold the map key and move to a square to place a marker");
++			ETA_Speech_EndReport();
++			return;
++		}
++
++		eta_marker.square = qfalse;
++		eta_marker.leftIt = qfalse;
++		VectorCopy(cg.predictedPlayerState.origin, eta_marker.origin);
++		eta_marker.name[0] = '\0';
++	}
++
++	eta_marker.active = qtrue;
++	distance          = ETA_MarkerDistance();
++	ETA_NavigationSystem_StartMarkerApproach(distance);
++
++	ETA_Speech_BeginReport();
++
++	if (eta_marker.square)
++	{
++		char name[32];
++
++		ETA_MarkerSquareName(name, sizeof(name));
++		Com_sprintf(text, sizeof(text), "Marker on %s", name);
++		ETA_Speech_Say(text);
++		ETA_NavigationSystem_AnnounceMarkerDistance(distance);
++		ETA_MarkerSpeakWay();
++	}
++	else
++	{
++		ETA_Speech_Say("Marker set where you are standing");
++	}
++
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief Says where the marker is from here.
++ */
++void CG_AccessibilityMarkerWhere(void)
++{
++	ETA_Speech_BeginReport();
++
++	if (!eta_marker.active)
++	{
++		ETA_Speech_Say("No marker set");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	if (eta_marker.square)
++	{
++		char name[32];
++
++		ETA_MarkerSquareName(name, sizeof(name));
++		ETA_Speech_Say(va("Marker on %s", name));
++	}
++
++	ETA_NavigationSystem_AnnounceMarkerDistance(ETA_MarkerDistance());
++	ETA_MarkerSpeakWay();
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief Takes the marker away.
++ */
++void CG_AccessibilityMarkerClear(void)
++{
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(eta_marker.active ? "Marker removed" : "No marker set");
++	ETA_Speech_EndReport();
++
++	eta_marker.active = qfalse;
++}
++
++/**
++ * @brief Forgets the marker, for a new map.
++ *
++ * A square on one map is somewhere else entirely on the next, and a spot
++ * is nowhere at all.
++ */
++void CG_AccessibilityMarkerReset(void)
++{
++	memset(&eta_marker, 0, sizeof(eta_marker));
++}
++
++/**
++ * @brief Every frame: the marker's sound, and arriving at it.
++ *
++ * Neither waits behind a report the player asked for. The sound is not
++ * speech, so it takes nothing from the voice. Arriving is the end of the
++ * walk the marker exists for, and it happens once.
++ */
++void CG_AccessibilityMarkerFrame(void)
++{
++	qboolean arrived;
++	int      distance;
++
++	if (!eta_marker.active || !cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		return;
++	}
++
++	distance = ETA_MarkerDistance();
++
++	/* A spot is put down where the player stands, so they start on it.
++	   Arriving only means something once they have been away. */
++	if (!eta_marker.leftIt && distance > 2.0f * ETA_MARKER_ARRIVE_METERS)
++	{
++		eta_marker.leftIt = qtrue;
++	}
++
++	if (eta_marker.square)
++	{
++		arrived = ETA_MarkerSquareUnderfoot();
++	}
++	else
++	{
++		arrived = (qboolean)(eta_marker.leftIt && distance <= ETA_MARKER_ARRIVE_METERS);
++	}
++
++	if (arrived)
++	{
++		char name[32];
++
++		ETA_Speech_BeginReport();
++
++		if (eta_marker.square)
++		{
++			ETA_MarkerSquareName(name, sizeof(name));
++			ETA_Speech_Say(va("Marker reached, %s", name));
++		}
++		else
++		{
++			ETA_Speech_Say("Marker reached");
++		}
++
++		ETA_Speech_EndReport();
++
++		eta_marker.active = qfalse;
++		return;
++	}
++
++	if (eta_markerCues.integer)
++	{
++		sfxHandle_t sfx = CG_AccessibilityLoopSound(ETA_LOOP_MARKER);
++
++		if (sfx)
++		{
++			vec3_t eye, direction, origin;
++			float  length;
++
++			ETA_MarkerEye(eye);
++			VectorSubtract(eta_marker.origin, eye, direction);
++
++			/* A square has no height to point at; the sound stays level
++			   with the player's ears so it only ever says left or right. */
++			if (eta_marker.square)
++			{
++				direction[2] = 0.0f;
++			}
++
++			length = VectorNormalize(direction);
++			VectorMA(eye, MIN(length, ETA_MARKER_BEACON_DISTANCE), direction, origin);
++
++			trap_S_AddLoopingSound(origin, vec3_origin, sfx, 255, 0);
++		}
++	}
++}
++
++/**
++ * @brief "30 meters to marker" as the player closes on it.
++ *
++ * Scenery rather than an answer, so it waits behind anything the player
++ * asked for, as the objective's own callouts do.
++ */
++void CG_AccessibilityMarkerApproach(void)
++{
++	if (!eta_marker.active || !cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		return;
++	}
++
++	ETA_NavigationSystem_UpdateMarkerApproach(ETA_MarkerDistance());
++}
+ #endif
+ 
+ /**
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 9c98966..7d65575 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1510,6 +1510,28 @@ static void CG_AccessibilityMapNext_f(void)
+ 	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapNext();
+ }
++
++/**
++ * @brief The player's own marker: put it down, ask where it is, take it
++ * away. Placing works with the map up or down - see cg_commandmap.c.
++ */
++static void CG_AccessibilityMarkerPlace_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	CG_AccessibilityMarkerPlace();
++}
++
++static void CG_AccessibilityMarkerWhere_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	CG_AccessibilityMarkerWhere();
++}
++
++static void CG_AccessibilityMarkerClear_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	CG_AccessibilityMarkerClear();
++}
+ #endif
+ 
+ /**
+@@ -4188,6 +4210,9 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMapDown",   CG_AccessibilityMapDown_f    },
+ 	{ "accessibilityMapHere",   CG_AccessibilityMapHere_f    },
+ 	{ "accessibilityMapNext",   CG_AccessibilityMapNext_f    },
++	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
++	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
++	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
+ 	{ "accessibilityHealth",    CG_AccessibilityHealth_f     },
+ 	{ "accessibilityAmmo",      CG_AccessibilityAmmo_f       },
+ 	{ "accessibilityRepeat",    CG_AccessibilityRepeat_f     },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 5525714..d3d8b46 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -7150,6 +7150,10 @@ void CG_DrawActive()
+ 
+ 	ETA_NarrateCrosshair();
+ 
++	/* The marker's sound, and arriving at it. The sound is not speech,
++	   and arriving is the one thing the marker exists to say. */
++	CG_AccessibilityMarkerFrame();
++
+ 	/* The scenery stands down while an answer the player asked for is
+ 	   still being spoken.
+ 
+@@ -7174,6 +7178,8 @@ void CG_DrawActive()
+ 
+ 		ETA_NarrateObjectiveApproach();
+ 
++		CG_AccessibilityMarkerApproach();
++
+ 		/* After the zoom narration, which stands down for it rather than
+ 		   the other way round: while the binoculars are up they are the
+ 		   answer to this question. */
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1d3ef85..ff2a21f 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3433,6 +3433,16 @@ void CG_AccessibilityMapHome(void);
+ void CG_AccessibilityMapNext(void);
+ void CG_AccessibilityMapClosed(void);
+ 
++/*
++ * The player's own marker. See cg_commandmap.c.
++ */
++void CG_AccessibilityMarkerPlace(void);
++void CG_AccessibilityMarkerWhere(void);
++void CG_AccessibilityMarkerClear(void);
++void CG_AccessibilityMarkerReset(void);
++void CG_AccessibilityMarkerFrame(void);
++void CG_AccessibilityMarkerApproach(void);
++
+ /**
+  * @brief The mod's own looping sounds, shipped inside the pk3.
+  */
+@@ -3441,13 +3451,15 @@ typedef enum
+ 	ETA_LOOP_DOOR = 0,
+ 	ETA_LOOP_DOOR_LOCKED,
+ 	ETA_LOOP_CROSSHAIR_ENEMY,
+-	ETA_LOOP_CROSSHAIR_TEAMMATE
++	ETA_LOOP_CROSSHAIR_TEAMMATE,
++	ETA_LOOP_MARKER
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+ 
+ extern vmCvar_t eta_doorCues;
+ extern vmCvar_t eta_crosshairCues;
++extern vmCvar_t eta_markerCues;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index bc1568f..59dbe8b 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2200,6 +2200,7 @@ vmCvar_t eta_interactionCallouts;
+ vmCvar_t eta_mapCallouts;
+ vmCvar_t eta_doorCues;
+ vmCvar_t eta_crosshairCues;
++vmCvar_t eta_markerCues;
+ 
+ /**
+  * @brief The four sounds this mod brings with it, and why they are not
+@@ -2221,7 +2222,8 @@ static eta_cueSound_t eta_loopSounds[] =
+ 	{ "eta_cueDoor",              "sound/accessibility/door_creak.wav",         { 0 }, 0, { 0 } },
+ 	{ "eta_cueDoorLocked",        "sound/accessibility/door_creak_locked.wav",  { 0 }, 0, { 0 } },
+ 	{ "eta_cueCrosshairEnemy",    "sound/accessibility/crosshair_enemy.wav",    { 0 }, 0, { 0 } },
+-	{ "eta_cueCrosshairTeammate", "sound/accessibility/crosshair_teammate.wav", { 0 }, 0, { 0 } }
++	{ "eta_cueCrosshairTeammate", "sound/accessibility/crosshair_teammate.wav", { 0 }, 0, { 0 } },
++	{ "eta_cueMarker",            "sound/accessibility/marker_beacon.wav",      { 0 }, 0, { 0 } }
+ };
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+@@ -2375,6 +2377,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_mapCallouts,         "eta_mapCallouts",         "1" },
+ 	{ &eta_doorCues,            "eta_doorCues",            "1" },
+ 	{ &eta_crosshairCues,       "eta_crosshairCues",       "1" },
++	{ &eta_markerCues,          "eta_markerCues",          "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },
+@@ -2439,6 +2442,9 @@ static void ETA_InitAccessibility(void)
+ 	}
+ 
+ 	ETA_AudioCueSystem_SetBackend(ETA_PlayCueSound, NULL);
++
++	/* A new map: the marker belonged to the last one. */
++	CG_AccessibilityMarkerReset();
+ }
+ 
+ /**
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index bad1bb9..c4c356a 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8891,7 +8891,20 @@ void UI_AccessibilityInstallBinds(void)
+ 		   points at. HOME above keeps it too; this is the one the
+ 		   left-handed layout can actually have, since that config
+ 		   already uses HOME. */
+-		{ K_KP_5,         "accessibilityMapHere",  "selectbuddy 4", 5 }
++		{ K_KP_5,         "accessibilityMapHere",  "selectbuddy 4", 5 },
++		/* The marker, beside the survey that places it. Keypad 0 is
++		   under the thumb of a hand already on the arrow cluster, so a
++		   square found with the map up is marked without letting go -
++		   and the same key with the map down marks where the player
++		   stands. Keypad dot beside it asks where the marker is, and
++		   star, out of the way at the top, takes it away.
++
++		   None of the three is bound by the stock right-handed config.
++		   The left-handed one jumps on keypad 0, and that is left alone
++		   by the rule every row here follows. */
++		{ K_KP_INS,       "accessibilityMarkerPlace", NULL,          6 },
++		{ K_KP_DEL,       "accessibilityMarkerWhere", NULL,          6 },
++		{ K_KP_STAR,      "accessibilityMarkerClear", NULL,          6 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index a2246da..50d98bb 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -868,6 +868,9 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymapdown",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymaphere",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymapnext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymarkerplace",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymarkerwhere",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ #endif
+ };
+ 

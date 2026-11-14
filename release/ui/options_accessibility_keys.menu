@@ -1,0 +1,109 @@
+#include "ui/menudef.h"
+#include "ui/menumacros.h"
+
+// Accessibility - Key Binds //
+//
+// Every key the mod answers, and the game's own look and turn keys, which
+// its controls list offers nowhere. Each row says which key it is on;
+// Enter starts a capture, Escape cancels it and Backspace clears the row.
+
+#define WINDOW_X      16
+#define WINDOW_Y      16
+#define WINDOW_WIDTH  608
+#define WINDOW_HEIGHT 448
+#define GROUP_NAME    "grpOptionsAccessibilityKeys"
+
+menuDef {
+	name        "options_accessibility_keys"
+	visible     0
+	fullscreen  0
+	rect WINDOW_X WINDOW_Y WINDOW_WIDTH WINDOW_HEIGHT
+	style WINDOW_STYLE_FILLED
+
+	onESC {
+		close options_accessibility_keys ;
+		open  options_accessibility
+	}
+
+// Window //
+	WINDOW(_("KEY BINDS"), 150)
+
+// Look and turn //
+//
+// Turn Left and Turn Right are the mod's: a tap steps to the next of the
+// eight compass points and says it as it arrives, the way a flick of the
+// mouse turns, and a hold turns smoothly. The four under them are the
+// game's own commands, not the mod's, and the game's own controls list
+// does not offer them anywhere - there is no row for
+// turning or looking in it, because stock ET aims with the mouse and
+// assumes everybody can. They are listed here because a player without a
+// mouse has no other way to point.
+#define LOOK_Y SUBWINDOW_OPTION_Y_START
+#define LOOK_H SUBWINDOW_OPTION_COMPUTE_H(7)
+	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X1_START, LOOK_Y, SUBWINDOW_OPTION_HEADER_WIDTH_L, LOOK_H, _("LOOK AND TURN"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(LOOK_Y, 1), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Turn Left:"), .2, 8, "+accessibilityTurnLeft", _("Tap for the next compass point, said as it arrives. Hold to turn smoothly"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(LOOK_Y, 2), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Turn Right:"), .2, 8, "+accessibilityTurnRight", _("Tap for the next compass point, said as it arrives. Hold to turn smoothly"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(LOOK_Y, 3), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Look Up:"), .2, 8, "+lookup", _("Tips the view up. Says what you end up pointing at"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(LOOK_Y, 4), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Look Down:"), .2, 8, "+lookdown", _("Tips the view down. Says what you end up pointing at"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(LOOK_Y, 5), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Smooth Turn Left:"), .2, 8, "+left", _("Always turns smoothly, however briefly pressed. Not on a key unless you put it on one"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(LOOK_Y, 6), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Smooth Turn Right:"), .2, 8, "+right", _("Always turns smoothly, however briefly pressed. Not on a key unless you put it on one"))
+	YESNO(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(LOOK_Y, 7), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Tap turns to next point:"), .2, 8, "eta_turnSteps", _("No makes Turn Left and Turn Right turn smoothly however they are pressed"))
+
+// Reports //
+#define REPORTS_Y (LOOK_Y + LOOK_H + SUBWINDOW_OPTION_Y_PADDING)
+#define REPORTS_H SUBWINDOW_OPTION_COMPUTE_H(6)
+	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X1_START, REPORTS_Y, SUBWINDOW_OPTION_HEADER_WIDTH_L, REPORTS_H, _("SPOKEN REPORTS"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(REPORTS_Y, 1), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Status Report:"), .2, 8, "accessibilityStatus", _("Health, weapon, ammo, the objective and which way to turn"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(REPORTS_Y, 2), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Health:"), .2, 8, "accessibilityHealth", _("Your health on its own, for when the full report is too slow"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(REPORTS_Y, 3), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Ammo:"), .2, 8, "accessibilityAmmo", _("Loaded rounds and what is left in reserve"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(REPORTS_Y, 4), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Say That Again:"), .2, 8, "accessibilityRepeat", _("Repeats the last thing spoken, for the word a gunshot landed on"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(REPORTS_Y, 5), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("Stop Speaking:"), .2, 8, "accessibilityStopSpeech", _("Cuts speech off rather than waiting out a long report"))
+	BIND(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(REPORTS_Y, 6), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, _("What's Around Me:"), .2, 8, "accessibilitySurroundings", _("Indoors or out, the open ways and walls by compass point, windows, and the named things close by"))
+
+// The command map survey //
+#define MAP_Y SUBWINDOW_OPTION_Y_START
+#define MAP_H SUBWINDOW_OPTION_COMPUTE_H(8)
+	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X2_START, MAP_Y, SUBWINDOW_OPTION_HEADER_WIDTH_R, MAP_H, _("COMMAND MAP SURVEY"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 1), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("North:"), .2, 8, "accessibilityMapNorth", _("Only while the map is open. Otherwise the key keeps its usual job"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 2), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("South:"), .2, 8, "accessibilityMapSouth", _("Only while the map is open. Otherwise the key keeps its usual job"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 3), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("East:"), .2, 8, "accessibilityMapEast", _("Only while the map is open. Otherwise the key keeps its usual job"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 4), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("West:"), .2, 8, "accessibilityMapWest", _("Only while the map is open. Otherwise the key keeps its usual job"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 5), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Floor Up:"), .2, 8, "accessibilityMapUp", _("Changes floor on a multi-storey map"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 6), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Floor Down:"), .2, 8, "accessibilityMapDown", _("Changes floor on a multi-storey map"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 7), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Back To Me:"), .2, 8, "accessibilityMapHere", _("Puts the map cursor back on where you are standing"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MAP_Y, 8), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Next Square:"), .2, 8, "accessibilityMapNext", _("Jumps to the next map square with something in it"))
+
+// Your own marker //
+//
+// Placed with the map up, on the square under the survey cursor, or with
+// it down, where you stand. Then the ping and the distance callouts walk
+// you there.
+#define MARKER_Y (MAP_Y + MAP_H + SUBWINDOW_OPTION_Y_PADDING)
+#define MARKER_H SUBWINDOW_OPTION_COMPUTE_H(8)
+	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X2_START, MARKER_Y, SUBWINDOW_OPTION_HEADER_WIDTH_R, MARKER_H, _("YOUR MARKER"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 1), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Place Marker:"), .2, 8, "accessibilityMarkerPlace", _("With the map open, on the square under the cursor. Otherwise, where you stand"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 2), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Where Is Marker:"), .2, 8, "accessibilityMarkerWhere", _("How far it is and which way to turn"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 3), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Face The Way:"), .2, 8, "accessibilityMarkerFace", _("Turns you toward the way to the marker, round the walls, and says how far it is"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 4), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Clear Marker:"), .2, 8, "accessibilityMarkerClear", _("Takes the marker away. It also goes by itself when you reach it"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 5), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Objective:"), .2, 8, "accessibilityMarkerObjective", _("Puts the marker on the objective, and its sound leads the way there - up stairs, ladders and ledges. Press again within five seconds for the next objective"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 6), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Sniper Spot:"), .2, 8, "accessibilitySniperSpot", _("Puts the marker on the nearest high place that looks out a long way, and says what it sees. Press again within five seconds for the next"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 7), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Room:"), .2, 8, "accessibilityRoom", _("Puts the marker on the nearest room, with its name, floor and size, and leads you inside. Press again within five seconds for the next"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 8), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Way Out Or In:"), .2, 8, "accessibilityWayOut", _("Inside a building, puts the marker on the nearest way out and leads you there. Outside, on the nearest way into a building. Press again within five seconds for another"))
+
+// Aiming //
+//
+// Turning onto something with one key: the use key turns to things to
+// use, and the lock, held, to an enemy in sight - the lock only where aim
+// help is fair. With several things to use close together, the choose
+// keys step through them and F turns to the one chosen.
+#define AIM_Y (MARKER_Y + MARKER_H + SUBWINDOW_OPTION_Y_PADDING)
+#define AIM_H SUBWINDOW_OPTION_COMPUTE_H(4)
+	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X2_START, AIM_Y, SUBWINDOW_OPTION_HEADER_WIDTH_R, AIM_H, _("AIMING"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(AIM_Y, 1), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Lock On To Enemy:"), .2, 8, "+accessibilityAimLock", _("Hold: keeps your sights on the nearest enemy in sight. In games you host, or where the server allows it"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(AIM_Y, 2), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Use, Or Turn To Things:"), .2, 8, "+accessibilityActivate", _("Uses what is under the crosshair. With nothing there, turns to the nearest thing to use - and uses it in reach. Again for the next one"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(AIM_Y, 3), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Choose Next Thing To Use:"), .2, 8, "accessibilityUseNext", _("Says the next thing to use close by, nearest first, without turning. F then turns to the one chosen and uses it"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(AIM_Y, 4), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Choose Previous Thing To Use:"), .2, 8, "accessibilityUsePrev", _("Says the one before, without turning"))
+
+// Buttons //
+	BUTTON(SUBWINDOW_OPTION_HEADER_X1_START, WINDOW_HEIGHT - 22, .33 * (WINDOW_WIDTH - 24), 18, _("MSGID_MENU_BACK"), .3, 14, close options_accessibility_keys ; open options_accessibility)
+}

@@ -1,0 +1,555 @@
+diff --git a/src/cgame/cgame.vcproj b/src/cgame/cgame.vcproj
+index b8f8aff..e726c25 100644
+--- a/src/cgame/cgame.vcproj
++++ b/src/cgame/cgame.vcproj
+@@ -206,6 +206,200 @@
+ 				CommandLine=""
+ 			/>
+ 		</Configuration>
++		<Configuration
++			Name="Release Accessibility|Win32"
++			OutputDirectory=".\ReleaseAccessibility"
++			IntermediateDirectory=".\ReleaseAccessibility"
++			ConfigurationType="2"
++			InheritedPropertySheets="$(VCInstallDir)VCProjectDefaults\UpgradeFromVC71.vsprops"
++			UseOfMFC="0"
++			ATLMinimizesCRunTimeLibraryUsage="false"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				PreprocessorDefinitions="NDEBUG"
++				MkTypLibCompatible="true"
++				SuppressStartupBanner="true"
++				TargetEnvironment="1"
++				TypeLibraryName=".\ReleaseAccessibility/cgame.tlb"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				InlineFunctionExpansion="1"
++				PreprocessorDefinitions="WIN32;NDEBUG;_WINDOWS;CGAMEDLL;_CRT_SECURE_NO_WARNINGS;FEATURE_ACCESSIBILITY"
++				AdditionalIncludeDirectories="$(ProjectDir)..\..\accessibility-mode\src\accessibility"
++				StringPooling="true"
++				RuntimeLibrary="0"
++				BufferSecurityCheck="false"
++				EnableFunctionLevelLinking="true"
++				UsePrecompiledHeader="0"
++				PrecompiledHeaderFile=".\ReleaseAccessibility/cgame.pch"
++				AssemblerListingLocation=".\ReleaseAccessibility/"
++				ObjectFile=".\ReleaseAccessibility/"
++				ProgramDataBaseFileName=".\ReleaseAccessibility/"
++				WarningLevel="4"
++				SuppressStartupBanner="true"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++				PreprocessorDefinitions="NDEBUG"
++				Culture="1033"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalOptions="/MACHINE:I386"
++				AdditionalDependencies="odbc32.lib odbccp32.lib ole32.lib oleaut32.lib winmm.lib"
++				OutputFile="../ReleaseAccessibility/cgame_mp_x86.dll"
++				LinkIncremental="1"
++				SuppressStartupBanner="true"
++				ModuleDefinitionFile=".\cgame.def"
++				ProgramDatabaseFile=".\ReleaseAccessibility/cgame_mp_x86.pdb"
++				GenerateMapFile="true"
++				MapFileName=".\ReleaseAccessibility/cgame_mp_x86.map"
++				SubSystem="2"
++				BaseAddress="0x30000000"
++				RandomizedBaseAddress="1"
++				DataExecutionPrevention="0"
++				ImportLibrary=".\ReleaseAccessibility/cgame_mp_x86.lib"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++				CommandLine=""
++			/>
++		</Configuration>
++		<Configuration
++			Name="Debug Accessibility|Win32"
++			OutputDirectory=".\DebugAccessibility"
++			IntermediateDirectory=".\DebugAccessibility"
++			ConfigurationType="2"
++			InheritedPropertySheets="$(VCInstallDir)VCProjectDefaults\UpgradeFromVC71.vsprops"
++			UseOfMFC="0"
++			ATLMinimizesCRunTimeLibraryUsage="false"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				PreprocessorDefinitions="_DEBUG"
++				MkTypLibCompatible="true"
++				SuppressStartupBanner="true"
++				TargetEnvironment="1"
++				TypeLibraryName=".\DebugAccessibility/cgame.tlb"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				PreprocessorDefinitions="WIN32;_DEBUG;_WINDOWS;CGAMEDLL;_CRT_SECURE_NO_WARNINGS;FEATURE_ACCESSIBILITY"
++				AdditionalIncludeDirectories="$(ProjectDir)..\..\accessibility-mode\src\accessibility"
++				RuntimeLibrary="1"
++				UsePrecompiledHeader="0"
++				PrecompiledHeaderFile=".\DebugAccessibility/cgame.pch"
++				AssemblerListingLocation=".\DebugAccessibility/"
++				ObjectFile=".\DebugAccessibility/"
++				ProgramDataBaseFileName=".\DebugAccessibility/"
++				BrowseInformation="1"
++				WarningLevel="3"
++				SuppressStartupBanner="true"
++				DebugInformationFormat="4"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++				PreprocessorDefinitions="_DEBUG"
++				Culture="1033"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalOptions="/MACHINE:I386"
++				AdditionalDependencies="odbc32.lib odbccp32.lib ole32.lib oleaut32.lib winmm.lib"
++				OutputFile="..\DebugAccessibility/cgame_mp_x86.dll"
++				LinkIncremental="2"
++				SuppressStartupBanner="true"
++				ModuleDefinitionFile=".\cgame.def"
++				GenerateDebugInformation="true"
++				ProgramDatabaseFile=".\DebugAccessibility/cgame_mp_x86.pdb"
++				GenerateMapFile="true"
++				MapFileName=".\DebugAccessibility/cgame_mp_x86.map"
++				SubSystem="2"
++				BaseAddress="0x30000000"
++				RandomizedBaseAddress="1"
++				DataExecutionPrevention="0"
++				ImportLibrary=".\DebugAccessibility/cgame_mp_x86.lib"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++				CommandLine=""
++			/>
++		</Configuration>
+ 	</Configurations>
+ 	<References>
+ 	</References>
+@@ -250,6 +444,22 @@
+ 					ExcludedFromBuild="true"
+ 					>
+ 					<Tool
++						Name="VCCLCompilerTool"
++					/>
++				</FileConfiguration>
++				<FileConfiguration
++					Name="Release Accessibility|Win32"
++					ExcludedFromBuild="true"
++					>
++					<Tool
++						Name="VCCLCompilerTool"
++					/>
++				</FileConfiguration>
++				<FileConfiguration
++					Name="Debug Accessibility|Win32"
++					ExcludedFromBuild="true"
++					>
++					<Tool
+ 						Name="VCCLCompilerTool"
+ 					/>
+ 				</FileConfiguration>
+diff --git a/src/ui/ui.vcproj b/src/ui/ui.vcproj
+index 87a95ae..a207268 100644
+--- a/src/ui/ui.vcproj
++++ b/src/ui/ui.vcproj
+@@ -207,6 +207,201 @@
+ 				CommandLine=""
+ 			/>
+ 		</Configuration>
++		<Configuration
++			Name="Release Accessibility|Win32"
++			OutputDirectory=".\ReleaseAccessibility"
++			IntermediateDirectory=".\ReleaseAccessibility"
++			ConfigurationType="2"
++			InheritedPropertySheets="$(VCInstallDir)VCProjectDefaults\UpgradeFromVC71.vsprops"
++			UseOfMFC="0"
++			ATLMinimizesCRunTimeLibraryUsage="false"
++			CharacterSet="2"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				PreprocessorDefinitions="NDEBUG"
++				MkTypLibCompatible="true"
++				SuppressStartupBanner="true"
++				TargetEnvironment="1"
++				TypeLibraryName=".\ReleaseAccessibility/ui.tlb"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				InlineFunctionExpansion="1"
++				PreprocessorDefinitions="WIN32;NDEBUG;_WINDOWS;_USRDLL;UI_EXPORTS;_CRT_SECURE_NO_WARNINGS;FEATURE_ACCESSIBILITY"
++				AdditionalIncludeDirectories="$(ProjectDir)..\..\accessibility-mode\src\accessibility"
++				StringPooling="true"
++				RuntimeLibrary="0"
++				BufferSecurityCheck="false"
++				EnableFunctionLevelLinking="true"
++				UsePrecompiledHeader="0"
++				PrecompiledHeaderFile=".\ReleaseAccessibility/ui.pch"
++				AssemblerListingLocation=".\ReleaseAccessibility/"
++				ObjectFile=".\ReleaseAccessibility/"
++				ProgramDataBaseFileName=".\ReleaseAccessibility/"
++				WarningLevel="3"
++				SuppressStartupBanner="true"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++				PreprocessorDefinitions="NDEBUG"
++				Culture="1033"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalOptions="/MACHINE:I386"
++				AdditionalDependencies="odbc32.lib odbccp32.lib ole32.lib oleaut32.lib winmm.lib"
++				OutputFile="../ReleaseAccessibility/ui_mp_x86.dll"
++				LinkIncremental="1"
++				SuppressStartupBanner="true"
++				ModuleDefinitionFile=".\ui.def"
++				ProgramDatabaseFile=".\ReleaseAccessibility/ui_mp_x86.pdb"
++				GenerateMapFile="true"
++				MapFileName=".\ReleaseAccessibility/ui_mp_x86.map"
++				BaseAddress="0x40000000"
++				RandomizedBaseAddress="1"
++				DataExecutionPrevention="0"
++				ImportLibrary=".\ReleaseAccessibility/ui_mp_x86.lib"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++				CommandLine=""
++			/>
++		</Configuration>
++		<Configuration
++			Name="Debug Accessibility|Win32"
++			OutputDirectory=".\DebugAccessibility"
++			IntermediateDirectory=".\DebugAccessibility"
++			ConfigurationType="2"
++			InheritedPropertySheets="$(VCInstallDir)VCProjectDefaults\UpgradeFromVC71.vsprops"
++			UseOfMFC="0"
++			ATLMinimizesCRunTimeLibraryUsage="false"
++			CharacterSet="2"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				PreprocessorDefinitions="_DEBUG"
++				MkTypLibCompatible="true"
++				SuppressStartupBanner="true"
++				TargetEnvironment="1"
++				TypeLibraryName=".\DebugAccessibility/ui.tlb"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				PreprocessorDefinitions="WIN32;_DEBUG;_WINDOWS;_USRDLL;UI_EXPORTS;_CRT_SECURE_NO_WARNINGS;FEATURE_ACCESSIBILITY"
++				AdditionalIncludeDirectories="$(ProjectDir)..\..\accessibility-mode\src\accessibility"
++				BasicRuntimeChecks="3"
++				RuntimeLibrary="1"
++				UsePrecompiledHeader="0"
++				PrecompiledHeaderFile=".\DebugAccessibility/ui.pch"
++				AssemblerListingLocation=".\DebugAccessibility/"
++				ObjectFile=".\DebugAccessibility/"
++				ProgramDataBaseFileName=".\DebugAccessibility/"
++				BrowseInformation="1"
++				WarningLevel="3"
++				SuppressStartupBanner="true"
++				DebugInformationFormat="4"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++				PreprocessorDefinitions="_DEBUG"
++				Culture="1033"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalOptions="/MACHINE:I386"
++				AdditionalDependencies="odbc32.lib odbccp32.lib ole32.lib oleaut32.lib winmm.lib"
++				OutputFile="../DebugAccessibility/ui_mp_x86.dll"
++				LinkIncremental="2"
++				SuppressStartupBanner="true"
++				ModuleDefinitionFile=".\ui.def"
++				GenerateDebugInformation="true"
++				ProgramDatabaseFile="../DebugAccessibility/ui.pdb"
++				GenerateMapFile="true"
++				MapFileName=".\DebugAccessibility/ui_mp_x86.map"
++				BaseAddress="0x40000000"
++				RandomizedBaseAddress="1"
++				DataExecutionPrevention="0"
++				ImportLibrary=".\DebugAccessibility/ui_mp_x86.lib"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++				CommandLine=""
++			/>
++		</Configuration>
+ 	</Configurations>
+ 	<References>
+ 	</References>
+@@ -239,6 +434,22 @@
+ 					ExcludedFromBuild="true"
+ 					>
+ 					<Tool
++						Name="VCCLCompilerTool"
++					/>
++				</FileConfiguration>
++				<FileConfiguration
++					Name="Release Accessibility|Win32"
++					ExcludedFromBuild="true"
++					>
++					<Tool
++						Name="VCCLCompilerTool"
++					/>
++				</FileConfiguration>
++				<FileConfiguration
++					Name="Debug Accessibility|Win32"
++					ExcludedFromBuild="true"
++					>
++					<Tool
+ 						Name="VCCLCompilerTool"
+ 					/>
+ 				</FileConfiguration>
+diff --git a/src/wolf.sln b/src/wolf.sln
+index 0763fb1..77b645d 100644
+--- a/src/wolf.sln
++++ b/src/wolf.sln
+@@ -23,62 +23,93 @@
+ EndProject
+ Global
+ 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
++		Debug Accessibility|Win32 = Debug Accessibility|Win32
+ 		Debug Dedicated|Win32 = Debug Dedicated|Win32
+ 		Debug|Win32 = Debug|Win32
++		Release Accessibility|Win32 = Release Accessibility|Win32
+ 		Release Dedicated|Win32 = Release Dedicated|Win32
+ 		Release|Win32 = Release|Win32
+ 	EndGlobalSection
+ 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
++		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Debug Accessibility|Win32.ActiveCfg = Debug|Win32
++		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Debug Accessibility|Win32.Build.0 = Debug|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Debug Dedicated|Win32.ActiveCfg = Debug|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Debug Dedicated|Win32.Build.0 = Debug|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Debug|Win32.ActiveCfg = Debug|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Debug|Win32.Build.0 = Debug|Win32
++		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Release Accessibility|Win32.ActiveCfg = Release|Win32
++		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Release Accessibility|Win32.Build.0 = Release|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Release Dedicated|Win32.ActiveCfg = Release|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Release Dedicated|Win32.Build.0 = Release|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Release|Win32.ActiveCfg = Release|Win32
+ 		{0C24E6E9-2B9F-43AE-ADB7-B7693966F41E}.Release|Win32.Build.0 = Release|Win32
++		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Debug Accessibility|Win32.ActiveCfg = Debug|Win32
++		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Debug Accessibility|Win32.Build.0 = Debug|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Debug Dedicated|Win32.ActiveCfg = Debug|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Debug Dedicated|Win32.Build.0 = Debug|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Debug|Win32.ActiveCfg = Debug|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Debug|Win32.Build.0 = Debug|Win32
++		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Release Accessibility|Win32.ActiveCfg = Release|Win32
++		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Release Accessibility|Win32.Build.0 = Release|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Release Dedicated|Win32.ActiveCfg = Release|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Release Dedicated|Win32.Build.0 = Release|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Release|Win32.ActiveCfg = Release|Win32
+ 		{EFA65954-05A8-43C4-B4FE-FAFE8E678AB7}.Release|Win32.Build.0 = Release|Win32
++		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Debug Accessibility|Win32.ActiveCfg = Debug Accessibility|Win32
++		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Debug Accessibility|Win32.Build.0 = Debug Accessibility|Win32
+ 		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Debug Dedicated|Win32.ActiveCfg = Debug|Win32
+ 		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Debug Dedicated|Win32.Build.0 = Debug|Win32
+ 		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Debug|Win32.ActiveCfg = Debug|Win32
++		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Release Accessibility|Win32.ActiveCfg = Release Accessibility|Win32
++		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Release Accessibility|Win32.Build.0 = Release Accessibility|Win32
+ 		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Release Dedicated|Win32.ActiveCfg = Release|Win32
+ 		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Release|Win32.ActiveCfg = Release|Win32
+ 		{68A804FC-00C3-44E2-A479-3DB3D20F943D}.Release|Win32.Build.0 = Release|Win32
++		{D8A3C382-BCD1-46AE-B5AD-C8538DDD0D3D}.Debug Accessibility|Win32.ActiveCfg = Debug|Win32
+ 		{D8A3C382-BCD1-46AE-B5AD-C8538DDD0D3D}.Debug Dedicated|Win32.ActiveCfg = Debug|Win32
+ 		{D8A3C382-BCD1-46AE-B5AD-C8538DDD0D3D}.Debug|Win32.ActiveCfg = Debug|Win32
++		{D8A3C382-BCD1-46AE-B5AD-C8538DDD0D3D}.Release Accessibility|Win32.ActiveCfg = Release|Win32
+ 		{D8A3C382-BCD1-46AE-B5AD-C8538DDD0D3D}.Release Dedicated|Win32.ActiveCfg = Release|Win32
+ 		{D8A3C382-BCD1-46AE-B5AD-C8538DDD0D3D}.Release|Win32.ActiveCfg = Release|Win32
++		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Debug Accessibility|Win32.ActiveCfg = Debug|Win32
+ 		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Debug Dedicated|Win32.ActiveCfg = Debug|Win32
+ 		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Debug Dedicated|Win32.Build.0 = Debug|Win32
+ 		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Debug|Win32.ActiveCfg = Debug|Win32
++		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Release Accessibility|Win32.ActiveCfg = Release|Win32
++		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Release Accessibility|Win32.Build.0 = Release|Win32
+ 		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Release Dedicated|Win32.ActiveCfg = Release|Win32
+ 		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Release|Win32.ActiveCfg = Release|Win32
+ 		{4F8332D7-5687-4875-813A-A1B7AA479C2D}.Release|Win32.Build.0 = Release|Win32
++		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Debug Accessibility|Win32.ActiveCfg = Debug|Win32
++		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Debug Accessibility|Win32.Build.0 = Debug|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Debug Dedicated|Win32.ActiveCfg = Debug|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Debug Dedicated|Win32.Build.0 = Debug|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Debug|Win32.ActiveCfg = Debug|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Debug|Win32.Build.0 = Debug|Win32
++		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Release Accessibility|Win32.ActiveCfg = Release|Win32
++		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Release Accessibility|Win32.Build.0 = Release|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Release Dedicated|Win32.ActiveCfg = Release|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Release Dedicated|Win32.Build.0 = Release|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Release|Win32.ActiveCfg = Release|Win32
+ 		{7906CC4F-E230-4049-A3EF-EA7F64E73DDE}.Release|Win32.Build.0 = Release|Win32
++		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Debug Accessibility|Win32.ActiveCfg = Debug Accessibility|Win32
++		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Debug Accessibility|Win32.Build.0 = Debug Accessibility|Win32
+ 		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Debug Dedicated|Win32.ActiveCfg = Debug|Win32
+ 		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Debug Dedicated|Win32.Build.0 = Debug|Win32
+ 		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Debug|Win32.ActiveCfg = Debug|Win32
++		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Release Accessibility|Win32.ActiveCfg = Release Accessibility|Win32
++		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Release Accessibility|Win32.Build.0 = Release Accessibility|Win32
+ 		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Release Dedicated|Win32.ActiveCfg = Release|Win32
+ 		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Release|Win32.ActiveCfg = Release|Win32
+ 		{4C02EEB1-33AA-41C5-9A96-609161DF1635}.Release|Win32.Build.0 = Release|Win32
++		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Debug Accessibility|Win32.ActiveCfg = Debug|Win32
++		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Debug Accessibility|Win32.Build.0 = Debug|Win32
+ 		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Debug Dedicated|Win32.ActiveCfg = Debug Dedicated|Win32
+ 		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Debug Dedicated|Win32.Build.0 = Debug Dedicated|Win32
+ 		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Debug|Win32.ActiveCfg = Debug|Win32
+ 		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Debug|Win32.Build.0 = Debug|Win32
++		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Release Accessibility|Win32.ActiveCfg = Release|Win32
++		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Release Accessibility|Win32.Build.0 = Release|Win32
+ 		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Release Dedicated|Win32.ActiveCfg = Release Dedicated|Win32
+ 		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Release Dedicated|Win32.Build.0 = Release Dedicated|Win32
+ 		{B604B554-38D6-4BC8-9F7F-D6BC8719A653}.Release|Win32.ActiveCfg = Release|Win32

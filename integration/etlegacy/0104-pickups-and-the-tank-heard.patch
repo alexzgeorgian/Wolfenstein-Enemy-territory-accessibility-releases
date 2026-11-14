@@ -1,0 +1,245 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 60b0826..eb8e44e 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3587,6 +3587,12 @@ static void ETA_WatchFlags(void)
+  *   server broadcasts: it is heard while it is in view of where the
+  *   player is, which for a flag in the open is most of the way there.
+  *
++ * - A tank to escort - the Jagdpanther on Goldrush - rumbles like an
++ *   engine wherever it is, for either side: one side walks beside it to
++ *   move it, the other stops it. Damaged, it is the escorting side's to
++ *   repair, and taps like a construction site for them; for the other
++ *   side it has stopped, and is silent.
++ *
+  * The player's own team's targets and flags are left silent: they are
+  * there to be defended, and a beacon on every one would fill the base
+  * with sound. The game's own ticking already marks armed dynamite for
+@@ -3646,6 +3652,16 @@ static void ETA_BeaconSites(void)
+ 
+ 			which = ETA_LOOP_FLAG;
+ 		}
++		/* A tank's indicator is the escorting side's: the hud's own
++		   escort icon for that side, the destroy icon for the other. */
++		else if (es->eType == ET_TANK_INDICATOR)
++		{
++			which = ETA_LOOP_TANK;
++		}
++		else if (es->eType == ET_TANK_INDICATOR_DEAD && es->teamNum == team)
++		{
++			which = ETA_LOOP_BUILD_SITE;
++		}
+ 		else
+ 		{
+ 			continue;
+@@ -4523,6 +4539,123 @@ static int ETA_GatherAwareness(ETA_AwareThing *list, int max, qboolean players,
+ 	return count;
+ }
+ 
++/**
++ * @brief A sound on each health pack, ammo pack and weapon lying close
++ * by, from where it lies.
++ *
++ * The tester asked for these to be heard, to find them and pick them
++ * up: the callout says one is there as the player comes up to it, but
++ * not where to walk to get it. Each kind has its own sound, so which is
++ * which is heard before it is said. Only what a sighted player would
++ * see - in sight, nothing solid in the way - and only the nearest few,
++ * so a floor strewn after a fight does not become a din. A dropped
++ * objective - the gold, the documents - rings the flag's bell: it is
++ * there to be taken, or taken back.
++ */
++#define ETA_PICKUP_CUE_RANGE 400.0f   /* about ten metres */
++#define ETA_PICKUP_CUES      3        /* the nearest this many */
++
++static void ETA_BeaconPickups(void)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	struct
++	{
++		vec3_t              origin;
++		float               distance;
++		eta_loopSoundType_t which;
++	} near[ETA_PICKUP_CUES];
++	vec3_t eye;
++	int    count = 0, i;
++
++	if (!cg.snap || ps->pm_type != PM_NORMAL || !eta_pickupCues.integer)
++	{
++		return;
++	}
++
++	VectorCopy(ps->origin, eye);
++	eye[2] += ps->viewheight;
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		const gitem_t       *item;
++		eta_loopSoundType_t which;
++		vec3_t              origin;
++		float               distance;
++		int                 at;
++
++		if (es->eType != ET_ITEM || (es->eFlags & EF_NODRAW))
++		{
++			continue;
++		}
++
++		item = BG_GetItem(es->modelindex);
++		if (!item)
++		{
++			continue;
++		}
++
++		if (item->giType == IT_HEALTH)
++		{
++			which = ETA_LOOP_HEALTH;
++		}
++		else if (item->giType == IT_AMMO || (item->giType == IT_WEAPON && item->giWeapon == WP_AMMO))
++		{
++			which = ETA_LOOP_AMMO;
++		}
++		else if (item->giType == IT_WEAPON)
++		{
++			which = ETA_LOOP_WEAPON;
++		}
++		else if (item->giType == IT_TEAM)
++		{
++			which = ETA_LOOP_FLAG;
++		}
++		else
++		{
++			continue;
++		}
++
++		VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++		origin[2] += 8.0f;
++		distance = Distance(ps->origin, origin);
++
++		if (distance > ETA_PICKUP_CUE_RANGE || !ETA_ClearLine(eye, origin))
++		{
++			continue;
++		}
++
++		/* Nearest first; the furthest drops off the end. */
++		for (at = count; at > 0 && near[at - 1].distance > distance; at--)
++		{
++			if (at < ETA_PICKUP_CUES)
++			{
++				near[at] = near[at - 1];
++			}
++		}
++		if (at < ETA_PICKUP_CUES)
++		{
++			VectorCopy(origin, near[at].origin);
++			near[at].distance = distance;
++			near[at].which    = which;
++			if (count < ETA_PICKUP_CUES)
++			{
++				count++;
++			}
++		}
++	}
++
++	for (i = 0; i < count; i++)
++	{
++		sfxHandle_t sfx = CG_AccessibilityLoopSound(near[i].which);
++
++		if (sfx)
++		{
++			trap_S_AddLoopingSound(near[i].origin, vec3_origin, sfx, CG_AccessibilityLoopVolume(near[i].which), 0);
++		}
++	}
++}
++
+ /**
+  * @brief How far a point lies from where the player faces, positive to
+  * the left - the engine's yaw sense, which is what the words for a
+@@ -10168,6 +10301,7 @@ void CG_DrawActive()
+ 	ETA_WatchFlags();
+ 	ETA_BeaconSites();
+ 	ETA_BeaconLadders();
++	ETA_BeaconPickups();
+ 
+ 	ETA_NarrateCrosshair();
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 563cb77..bf50dc7 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3547,7 +3547,11 @@ typedef enum
+ 	ETA_LOOP_FLAG,
+ 	ETA_LOOP_LADDER,
+ 	ETA_LOOP_MARKER_SIDE,     /* the marker, off to one side */
+-	ETA_LOOP_MARKER_BEHIND    /* the marker, behind */
++	ETA_LOOP_MARKER_BEHIND,   /* the marker, behind */
++	ETA_LOOP_HEALTH,          /* a health pack on the ground */
++	ETA_LOOP_AMMO,            /* an ammo pack */
++	ETA_LOOP_WEAPON,          /* a weapon */
++	ETA_LOOP_TANK             /* the tank to escort */
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+@@ -3582,6 +3586,8 @@ extern vmCvar_t eta_doorVolume;
+ extern vmCvar_t eta_ladderVolume;
+ extern vmCvar_t eta_crosshairVolume;
+ extern vmCvar_t eta_cueVolume;
++extern vmCvar_t eta_pickupVolume;
++extern vmCvar_t eta_pickupCues;
+ int CG_AccessibilityAnnouncerVolume(void);
+ 
+ /* Called where the game itself moves the music, so the accessibility
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 956b5d4..ad0e9ae 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2207,6 +2207,9 @@ vmCvar_t eta_doorVolume;
+ vmCvar_t eta_ladderVolume;
+ vmCvar_t eta_crosshairVolume;
+ vmCvar_t eta_cueVolume;
++vmCvar_t eta_pickupVolume;
++/* A sound on each health pack, ammo pack and weapon lying close by. */
++vmCvar_t eta_pickupCues;
+ vmCvar_t eta_locationCallouts;
+ vmCvar_t eta_placeCallouts;
+ vmCvar_t eta_interactionCallouts;
+@@ -2252,7 +2255,11 @@ static eta_cueSound_t eta_loopSounds[] =
+ 	{ "eta_cueFlag",              "sound/accessibility/flag_capture.wav",       { 0 }, 0, { 0 } },
+ 	{ "eta_cueLadder",            "sound/accessibility/ladder.wav",             { 0 }, 0, { 0 } },
+ 	{ "eta_cueMarkerSide",        "sound/accessibility/marker_side.wav",        { 0 }, 0, { 0 } },
+-	{ "eta_cueMarkerBehind",      "sound/accessibility/marker_behind.wav",      { 0 }, 0, { 0 } }
++	{ "eta_cueMarkerBehind",      "sound/accessibility/marker_behind.wav",      { 0 }, 0, { 0 } },
++	{ "eta_cueHealthPack",        "sound/accessibility/health_pack.wav",        { 0 }, 0, { 0 } },
++	{ "eta_cueAmmoPack",          "sound/accessibility/ammo_pack.wav",          { 0 }, 0, { 0 } },
++	{ "eta_cueWeapon",            "sound/accessibility/weapon_ground.wav",      { 0 }, 0, { 0 } },
++	{ "eta_cueTank",              "sound/accessibility/tank.wav",               { 0 }, 0, { 0 } }
+ };
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+@@ -2451,7 +2458,9 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_doorVolume,          "eta_doorVolume",          "100" },
+ 	{ &eta_ladderVolume,        "eta_ladderVolume",        "100" },
+ 	{ &eta_crosshairVolume,     "eta_crosshairVolume",     "100" },
+-	{ &eta_cueVolume,           "eta_cueVolume",           "100" }
++	{ &eta_cueVolume,           "eta_cueVolume",           "100" },
++	{ &eta_pickupVolume,        "eta_pickupVolume",        "100" },
++	{ &eta_pickupCues,          "eta_pickupCues",          "1" }
+ };
+ 
+ /**
+@@ -2475,8 +2484,14 @@ int CG_AccessibilityLoopVolume(eta_loopSoundType_t which)
+ 	case ETA_LOOP_BUILD_SITE:
+ 	case ETA_LOOP_DEMOLITION_TARGET:
+ 	case ETA_LOOP_FLAG:
++	case ETA_LOOP_TANK:
+ 		cvar = &eta_siteVolume;
+ 		break;
++	case ETA_LOOP_HEALTH:
++	case ETA_LOOP_AMMO:
++	case ETA_LOOP_WEAPON:
++		cvar = &eta_pickupVolume;
++		break;
+ 	case ETA_LOOP_LADDER:
+ 		cvar = &eta_ladderVolume;
+ 		break;

@@ -1,0 +1,89 @@
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 0ccfbc8..80936ba 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -1870,6 +1870,57 @@ qboolean Item_ListBox_HandleKey(itemDef_t *item, int key, qboolean down, qboolea
+ 	return qfalse;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Can this key act on this item?
++ *
++ * The settings controls all asked two questions before doing anything:
++ * does this item have focus, and is the mouse cursor inside it. With a
++ * hand on the mouse those are the same question - focus follows the
++ * pointer. From the keyboard they come apart, and the second can never
++ * be satisfied: arrowing onto an item sets its focus flag, but nothing
++ * moves the cursor, which sits wherever it was last pushed.
++ *
++ * So Enter on a highlighted "Game Type:" did nothing at all, and the
++ * narration that announces a change could not fire because no change
++ * happened. A tester found it trying to host a game. The same line
++ * guards the checkboxes and the yes/no fields, which between them are
++ * most of the settings in this game.
++ *
++ * A mouse button keeps the cursor test exactly as it was: a click is an
++ * act performed at a place, and clicking one control must never operate
++ * another. Every other key is the keyboard, and the keyboard's place is
++ * wherever the focus is.
++ *
++ * @param[in] item
++ * @param[in] key
++ * @return qtrue when this item should act on this key
++ */
++static qboolean ETA_ItemTakesKey(itemDef_t *item, int key)
++{
++	if (!(item->window.flags & WINDOW_HASFOCUS))
++	{
++		return qfalse;
++	}
++
++	if (key == K_MOUSE1 || key == K_MOUSE2 || key == K_MOUSE3
++	    || key == K_MOUSE4 || key == K_MOUSE5)
++	{
++		return Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory);
++	}
++
++	return qtrue;
++}
++
++/* Reads as the line it replaces, so each call site stays one condition
++   and the feature-off build is the engine's own text. */
++#define ETA_ITEM_REACHED(item, key) ETA_ItemTakesKey(item, key)
++#else
++#define ETA_ITEM_REACHED(item, key) \
++	(Rect_ContainsPoint(&(item)->window.rect, DC->cursorx, DC->cursory) \
++	 && ((item)->window.flags & WINDOW_HASFOCUS))
++#endif
++
+ /**
+  * @brief Item_CheckBox_HandleKey
+  * @param[in] item
+@@ -1878,7 +1929,7 @@ qboolean Item_ListBox_HandleKey(itemDef_t *item, int key, qboolean down, qboolea
+  */
+ qboolean Item_CheckBox_HandleKey(itemDef_t *item, int key)
+ {
+-	if (Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory) && (item->window.flags & WINDOW_HASFOCUS) && item->cvar)
++	if (ETA_ITEM_REACHED(item, key) && item->cvar)
+ 	{
+ 		if (key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3)
+ 		{
+@@ -1930,7 +1981,7 @@ qboolean Item_CheckBox_HandleKey(itemDef_t *item, int key)
+  */
+ qboolean Item_YesNo_HandleKey(itemDef_t *item, int key)
+ {
+-	if (Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory) && (item->window.flags & WINDOW_HASFOCUS) && item->cvar)
++	if (ETA_ITEM_REACHED(item, key) && item->cvar)
+ 	{
+ 		if (key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3)
+ 		{
+@@ -2076,7 +2127,7 @@ qboolean Item_Multi_HandleKey(itemDef_t *item, int key)
+ 
+ 	if (multiPtr)
+ 	{
+-		if (Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory) && (item->window.flags & WINDOW_HASFOCUS) && item->cvar)
++		if (ETA_ITEM_REACHED(item, key) && item->cvar)
+ 		{
+ 			if (key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3)
+ 			{

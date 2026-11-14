@@ -1,0 +1,284 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 73d16e1..b21a555 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -41,6 +41,7 @@ If you have questions concerning this license or the applicable additional terms
+ #include "core/runtime_guard.h"
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ void CG_TargetCommand_f( void ) {
+@@ -946,6 +947,79 @@ static void CG_CPM_f( void ) {
+ }
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++/*
++=================
++CG_AccessibilityForwardToUI
++
++Which module should answer a repeat or stop request.
++
++Both modules link their own copy of the accessibility library and
++neither can see the other's state: the menu narrator's "current item"
++lives in ui, the last HUD announcement lives here. So the request has to
++be answered by whichever module is in front of the player.
++
++The engine decides that in the wrong order. Cmd_ExecuteString
++(qcommon/cmd.c) tries CL_GameCommand before UI_GameCommand, so once a
++snapshot exists cgame is offered every command first, and answering it
++here is final - CG_ConsoleCommand returns qtrue for any name in its
++table and the ui module never sees it. Opening the options menu
++mid-match would then repeat the last health report instead of the
++focused menu item.
++
++The key catcher distinguishes the two. When KEYCATCH_UI is set a menu
++owns the keyboard and the request belongs to ui, so it is pushed back
++through the command buffer under a name only ui answers. Before a
++snapshot exists CG_ConsoleCommand declines everything outright, so the
++main menu never reaches here and ui is offered the bound name directly.
++
++Returns qtrue when the request was handed to the ui module.
++=================
++*/
++static qboolean CG_AccessibilityForwardToUI( const char *uiCommand ) {
++	if ( !( trap_Key_GetCatcher() & KEYCATCH_UI ) ) {
++		return qfalse;
++	}
++
++	/* Queued, not executed here, so this cannot re-enter itself: the
++	   name below is answered by ui and by nothing in this module. */
++	trap_SendConsoleCommand( va( "%s\n", uiCommand ) );
++	return qtrue;
++}
++
++/*
++=================
++CG_AccessibilityRepeat_f
++
++Says the last thing that was spoken again, for the word that was missed
++because a gunshot landed on top of it.
++=================
++*/
++static void CG_AccessibilityRepeat_f( void ) {
++	if ( CG_AccessibilityForwardToUI( "accessibilityRepeatMenuItem" ) ) {
++		return;
++	}
++
++	ETA_Speech_RepeatLast();
++}
++
++/*
++=================
++CG_AccessibilityStopSpeech_f
++
++Cuts off whatever is being spoken. Worth a key of its own: an objective
++report is several seconds of speech that cannot otherwise be
++interrupted, and a player who needs to hear the match instead should not
++have to wait it out.
++=================
++*/
++static void CG_AccessibilityStopSpeech_f( void ) {
++	if ( CG_AccessibilityForwardToUI( "accessibilityStopSpeechMenu" ) ) {
++		return;
++	}
++
++	ETA_Speech_Stop();
++}
++
+ /**
+  * On-demand "query basic match state" command for the accessibility HUD
+  * narrator (Milestone 4's exit condition). Bindable to a key; narrates
+@@ -1112,6 +1186,8 @@ static consoleCommand_t commands[] =
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	{ "accessibilityStatus", CG_AccessibilityStatus_f },
++	{ "accessibilityRepeat", CG_AccessibilityRepeat_f },
++	{ "accessibilityStopSpeech", CG_AccessibilityStopSpeech_f },
+ #endif
+ 
+ 	{ "+stats",          CG_StatsDown_f },
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 6839323..db9ec5d 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -36,6 +36,13 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/accessibility_runtime.h"
++#include "audio/audio_cue_system.h"
++#include "hud/hud_narrator.h"
++#include "navigation/navigation_system.h"
++#endif
++
+ displayContextDef_t cgDC;
+ 
+ void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum, qboolean demoPlayback );
+@@ -2645,6 +2652,42 @@ Will perform callbacks to make the loading info screen update.
+ #define DEBUG_INITPROFILE_INIT int elapsed, dbgTime = trap_Milliseconds();
+ #define DEBUG_INITPROFILE_EXEC( f ) if ( developer.integer ) { CG_Printf( "^5%s passed in %i msec\n", f, elapsed = trap_Milliseconds() - dbgTime );  dbgTime += elapsed; }
+ #endif // _DEBUG
++#ifdef FEATURE_ACCESSIBILITY
++/*
++=================
++ETA_InitAccessibility
++
++Nothing in this integration speaks until this has run. Both speech
++backends check a handle that only their Init creates - the NVDA
++controller client's speakText entry point, and the SAPI voice - and
++return immediately while it is NULL. So every narration call in every
++patch before this one was reaching a backend that silently discarded it.
++
++The cgame module links its own copy of the accessibility library and
++cannot see the ui module's, so it needs its own Init rather than
++relying on the one in _UI_Init.
++=================
++*/
++static void ETA_InitAccessibility( void ) {
++	ETA_AccessibilityRuntime_Init();
++	ETA_AudioCueSystem_Init();
++	ETA_HudNarrator_Init();
++	ETA_NavigationSystem_Init();
++}
++
++/*
++=================
++ETA_ShutdownAccessibility
++=================
++*/
++static void ETA_ShutdownAccessibility( void ) {
++	ETA_NavigationSystem_Shutdown();
++	ETA_HudNarrator_Shutdown();
++	ETA_AudioCueSystem_Shutdown();
++	ETA_AccessibilityRuntime_Shutdown();
++}
++#endif
++
+ void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum, qboolean demoPlayback ) {
+ 	const char  *s;
+ 	int i;
+@@ -2855,6 +2898,10 @@ void CG_Init( int serverMessageNum, int serverCommandSequence, int clientNum, qb
+ 	cgs.dumpStatsFile = 0;
+ 	cgs.dumpStatsTime = 0;
+ //	CG_Printf("Time taken: %i\n", trap_Milliseconds() - startat);
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_InitAccessibility();
++#endif
+ }
+ 
+ /*
+@@ -2872,6 +2919,10 @@ void CG_Shutdown( void ) {
+ 	if ( cg.demoPlayback ) {
+ 		trap_Cvar_Set( "timescale", "1" );
+ 	}
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_ShutdownAccessibility();
++#endif
+ }
+ 
+ // returns true if game is single player (or coop)
+diff --git a/src/ui/ui_atoms.c b/src/ui/ui_atoms.c
+index 2235352..3f9efdf 100644
+--- a/src/ui/ui_atoms.c
++++ b/src/ui/ui_atoms.c
+@@ -33,6 +33,10 @@ If you have questions concerning this license or the applicable additional terms
+ **********************************************************************/
+ #include "ui_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "menu/menu_narrator.h"
++#endif
++
+ uiStatic_t uis;
+ qboolean m_entersound;              // after a frame, so caching won't disrupt the sound
+ 
+@@ -183,6 +187,29 @@ qboolean UI_ConsoleCommand( int realTime ) {
+ 		UI_ShowPostGame( qtrue );
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Reached two ways. In the main menu no snapshot exists, so
++	   CG_ConsoleCommand declines every command and the engine offers ui
++	   the name the player bound. In a menu opened mid-match cgame is
++	   offered it first and pushes it back under the "...MenuItem" /
++	   "...Menu" name, which only this module answers. */
++	if ( Q_stricmp( cmd, "accessibilityRepeat" ) == 0 ||
++		 Q_stricmp( cmd, "accessibilityRepeatMenuItem" ) == 0 ) {
++		/* A menu item is spoken once, when focus lands on it. Without
++		   this, a name lost under another sound is only recoverable by
++		   moving focus away and back - and on a menu with a single
++		   item, not at all. */
++		ETA_MenuNarrator_RepeatCurrentItem();
++		return qtrue;
++	}
++
++	if ( Q_stricmp( cmd, "accessibilityStopSpeech" ) == 0 ||
++		 Q_stricmp( cmd, "accessibilityStopSpeechMenu" ) == 0 ) {
++		ETA_MenuNarrator_Stop();
++		return qtrue;
++	}
++#endif
++
+ 	if ( Q_stricmp( cmd, "ui_report" ) == 0 ) {
+ 		UI_Report();
+ 		return qtrue;
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index a1121b5..d2fec81 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -40,6 +40,12 @@ USER INTERFACE MAIN
+ 
+ #include "ui_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/accessibility_runtime.h"
++#include "menu/menu_narrator.h"
++#include "speech/speech_manager.h"
++#endif
++
+ // NERVE - SMF
+ #define AXIS_TEAM       0
+ #define ALLIES_TEAM     1
+@@ -1052,6 +1058,11 @@ _UI_Shutdown
+ */
+ void _UI_Shutdown( void ) {
+ 	trap_LAN_SaveCachedServers();
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_MenuNarrator_Shutdown();
++	ETA_AccessibilityRuntime_Shutdown();
++#endif
+ }
+ 
+ char *defaultMenu = NULL;
+@@ -7553,6 +7564,25 @@ void _UI_Init( qboolean inGameLoad ) {
+ 
+ 	trap_AddCommand( "campaign" );
+ 	trap_AddCommand( "listcampaigns" );
++
++#ifdef FEATURE_ACCESSIBILITY
++	/* Without this the menus narrate into a void: both speech backends
++	   return immediately until their Init has resolved NVDA's controller
++	   client or created the SAPI voice. The ui module links its own copy
++	   of the accessibility library, so it needs its own Init rather than
++	   relying on cgame's. */
++	ETA_AccessibilityRuntime_Init();
++	ETA_MenuNarrator_Init();
++
++	/* The first name of each pair is what a player binds. The second is
++	   how cgame hands the request over when a menu is open mid-match; it
++	   is deliberately not a name cgame also answers, because a command
++	   cgame answers would come straight back to cgame and loop. */
++	trap_AddCommand( "accessibilityRepeat" );
++	trap_AddCommand( "accessibilityRepeatMenuItem" );
++	trap_AddCommand( "accessibilityStopSpeech" );
++	trap_AddCommand( "accessibilityStopSpeechMenu" );
++#endif
+ }
+ 
+ 

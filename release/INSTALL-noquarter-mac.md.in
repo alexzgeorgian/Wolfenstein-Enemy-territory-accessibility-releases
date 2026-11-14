@@ -1,0 +1,317 @@
+# No Quarter with the accessibility mode, @VERSION@ - Mac install guide
+
+This is **No Quarter** with the accessibility mode, for
+ET: Legacy on the **Mac**, Apple Silicon or Intel. With VoiceOver on,
+the game speaks through VoiceOver; with it off, through the Mac's own
+voice.
+
+It covers the menus, the limbo menu, and the match:
+
+- Every menu is spoken, from the main menu through the No Quarter
+  options to the server list, as in the accessibility mode for
+  ET: Legacy.
+- In the limbo menu you choose your team, class and weapons from the
+  keyboard, including No Quarter's extra weapons.
+- In a match: your health and ammo on keys, the objectives, who you
+  killed and what killed you, what you pick up, your weapon, posture
+  and scope, the respawn countdown, the scoreboard, chat, and the
+  loading screen. Sounds tell you when you are hit and from which
+  side, when your health is low, and when the objective changes.
+
+Getting around is here too, as in the accessibility mode for
+ET: Legacy: turning by compass points, the F key that turns you to what
+you can use, the command map walked by keyboard, the marker and the way
+to it, rooms, sniper spots, and the sounds that mark doors, ladders and
+objectives where they are.
+
+No Quarter itself has no Mac version. This download brings the Mac's
+parts of it, all in one file, `@PACKAGE@`. That includes No Quarter's
+game module built for the Mac, which runs a game you host: the game
+writes it into No Quarter's folder by itself, as `qagame_mac`, when it
+starts.
+
+
+## 1. What you need first
+
+1. **ET: Legacy 2.86.2 for macOS**, with the original Enemy Territory
+   files, as for the accessibility mode itself.
+2. **NoQuarter EoTS @NQ_TAG@**, for No Quarter's maps, models and
+   menus. Its download is `NoQuarter_EoTS_v1.0.7b.zip`, from:
+
+       https://github.com/DL-LAM/NoQuarter-EoTS/releases
+
+   Open it: the Mac unzips it into a folder.
+
+
+## 2. Make No Quarter's folder
+
+ET: Legacy keeps its mods in your Library. No Quarter's folder is `nq`
+there:
+
+1. In Finder, choose **Go**, then **Go to Folder** (Command Shift G),
+   type `~/Library/Application Support/etlegacy` and press Return.
+2. Make a new folder there (Command Shift N) and call it `nq`.
+
+The name matters: No Quarter will not start a game in a folder with any
+other name, such as `NoQuarter`, and says so. If you already made one
+with another name, rename it to `nq` - and the same for a No Quarter
+folder beside the ET: Legacy app, in `/Applications/ETLegacy`, if you
+put one there.
+
+
+## 3. Copy the files in
+
+Into that `nq` folder, copy:
+
+- From the NoQuarter EoTS download: `nqeots_v1.0.7b.pk3` and
+  `nqeots_b_v1.0.7b.pk3`.
+- From this download: `@PACKAGE@`.
+
+That is all. If you copied a `qagame_mac` in yourself from an earlier
+build, leave it: the game replaces it with its own. A copied one
+came from the web, and the Mac refuses to load such a file; the game
+then said the file was missing although it was in the folder. One the
+game writes itself is not refused.
+
+**Not into `legacy`.** The accessibility mode for ET: Legacy stays where
+it is, in `legacy`, and keeps working as before.
+
+
+## 4. Bots (optional)
+
+No Quarter's bots are Omni-bot, and the NoQuarter EoTS download carries
+the Mac's Omni-bot in its `omni-bot` folder.
+
+1. Copy that `omni-bot` folder into your home folder: in Finder, choose
+   **Go**, then **Home** (Command Shift H), and paste it there.
+2. The Mac refuses files downloaded from the web that no developer
+   signed, and gives no reason. In Terminal, run this once, as one line:
+
+       xattr -cr ~/omni-bot
+
+Then, before hosting, open the game's console and type these two lines.
+In the second, `yourname` is the name of your home folder:
+
+    /set omnibot_enable 1
+    /set omnibot_path "/Users/yourname/omni-bot"
+
+Host a game from the menus, or type `/map oasis` in the console. When
+the map has loaded, add bots with:
+
+    /bot maxbots 12
+
+The game keeps that many players on the server, filling with bots.
+
+If something stops the bots, the game says so after the briefing: that
+Omni-bot was not found, or that the Mac is blocking it. While the Mac
+blocks it, it may also put up a window of its own over the game, saying
+the file cannot be opened. Close that window, run the Terminal line
+above, and host again.
+
+When hosting from the menus, leave **Dedicated Server** on **No**. A
+dedicated server runs with no player: the game window closes and the
+server carries on with nobody in it. If that happens, ET: Legacy is
+still running. Press Command Option Escape, choose ET: Legacy, and
+choose Force Quit. Then start the game again; the setting is in the
+console as `/set ui_dedicated 0`.
+
+
+## 5. Start No Quarter
+
+In ET: Legacy's main menu, choose **Mods**, pick `nq` in the list, and
+choose **Launch**. When No Quarter's menus are up, the game says **"No
+Quarter. Main menu"**.
+
+On the Mac the loading screen is said when the load is over: "Loaded",
+the map and its type, then the briefing, then how to open the limbo
+menu.
+
+
+## 6. Keys
+
+On a Mac keyboard you may need to hold **fn** with the F keys.
+
+In the menus:
+
+- **Up and down arrows, or Tab**, move between controls. Each says its
+  name and setting.
+- **Return** presses a button, or changes a setting.
+- **Left and right arrows** move a slider.
+- In a list, **up and down** move through it, and each row is read.
+- **F6** says the last thing again. **F8** stops speech.
+
+In the limbo menu:
+
+- **Up and down arrows** move between the teams, the classes, your
+  primary and secondary weapon, and **Confirm**.
+- **Return** chooses. On a weapon, Return moves to the next weapon you
+  can have; your rank decides which those are.
+- **Tab** swaps between your primary and secondary weapon.
+- **Return on Confirm** spawns you, or makes you a spectator.
+
+In a match:
+
+- **F5** says the whole picture: whether you are playing or watching,
+  your health, your weapon and its ammo, the next objective in the
+  map's list, and how far away the nearest objective is and which way
+  to turn.
+- **9** says your health, and **0** your ammo.
+- **O** says the objectives: what the map asks of your side, the next
+  one in its list, and the way to the nearest.
+- **Tab**, held, shows the scoreboard, and the game reads it.
+- **F6** says the last thing again, and **F8** stops speech.
+
+The rest is said as it happens: a change of weapon with its ammo,
+crouching and going prone, the scope and binoculars, leaning out,
+what you pick up, a kill of yours, and how you died. Spectating, the
+game says who you are watching. While you wait to respawn it counts
+down, every five seconds and the last three. Building with pliers, it
+says how far the construction has got and when it is done.
+
+The scope, a set mortar and the satchel detonator are on the right
+mouse button, and on keypad slash for a keyboard with a number pad.
+Without one, bind a key of your own in the console. F10 is free in the
+stock controls:
+
+    /bind F10 weapalt
+
+These keys are only set up if nothing else is on them already. 9 and
+0 are the exception: the stock controls put weapon banks there that
+have no weapons in them, so those are replaced.
+
+### Getting around
+
+The same keys as the accessibility mode for ET: Legacy:
+
+- **Left and right arrows** turn. A tap steps to the next compass point
+  and says it; held, they turn smoothly. **Up and down arrows** look up
+  and down.
+- **F** uses what is in front of you. With nothing there, it first turns
+  you to the nearest thing to use - a door, a ladder, an objective, a
+  wounded teammate - and says it; press again to use it. At a ladder it
+  climbs. **[** and **]** choose which thing F turns to.
+- **F9** says what is around you: the ways out, and who and what is near.
+- **The map key** (G in the stock controls) opens the command map and
+  keeps it open; press it again to close it. While it is open, the
+  keypad arrows walk it square by square, keypad 5 or Home says where
+  you are, Page Up and Page Down change floor, and End moves to the next
+  thing on the map.
+- **The marker.** Keypad 0 places it, on the map's square or where you
+  stand; keypad dot says where it is and which way; keypad star clears
+  it. Keypad plus puts it on the objective, **'** on a room, **/** on a
+  sniper spot, and **;** on the way out of a building. A sound plays
+  where the marker is, and the way to it is said as you go.
+- **Insert**, held, locks on to an enemy - only in a game you host.
+
+Most Mac keyboards have no number pad and no Insert key. Bind those
+commands to keys you have, in the console, for example:
+
+    /bind ' accessibilityMarkerPlace
+
+The commands are `accessibilityMarkerPlace`, `accessibilityMarkerWhere`,
+`accessibilityMarkerClear`, `accessibilityMarkerObjective`, the map's
+`accessibilityMapNorth`, `accessibilityMapSouth`, `accessibilityMapEast`
+and `accessibilityMapWest`, and `+accessibilityAimLock`.
+
+As you move, the game says what is ahead and underfoot, drops, water and
+stairs, the place you are in and the openings you pass. Doors creak,
+ladders hum, and objectives, flags, pickups and mines sound where they
+are. You hear a bump when you walk into something.
+
+### Settings
+
+The same settings are on the Options menu: **Options, Accessibility**,
+with pages for what the mode tells you about the world, the speech, the
+sounds (the announcer's volume among them), the keys, and hosting.
+
+**Hosting** sets what happens when you start a server from Host Game:
+
+- **Bots**: how many Omni-bot bots play, and **Bot skill**. The mode
+  turns Omni-bot on for you. Changed during a game you host, bots join
+  or leave at once.
+- **Map voting**: at the end of each match everyone votes for the next
+  map, on the debriefing's Map Vote page.
+- **Friends join with the plain game**: on by default, so friends
+  without the mode can join.
+
+From the console, with `/set`:
+
+- `eta_chatCallouts 0` stops chat being read out.
+- `eta_objectiveCallouts 0` stops finished objectives being said.
+- `eta_interactionCallouts 0` stops the building count.
+- `eta_musicDuck` turns the music down while the game speaks: `0.3`
+  takes it to a third. `1`, the default, leaves it alone.
+- `eta_cueVolume` sets how loud the sounds are, 0 to 100, and
+  `eta_markerVolume`, `eta_doorVolume`, `eta_ladderVolume`,
+  `eta_siteVolume` and `eta_pickupVolume` each kind of marking sound.
+- `eta_voiceVolume` sets how loud players' and bots' voice chats are,
+  0 to 100 (*Voice chat volume* on the Sound page). Their words are
+  still read in the chat.
+- `eta_mapToggle 0` makes the map key one to hold again.
+- `eta_turnSteps 0` makes a tap on an arrow an ordinary turn.
+
+
+### At the end of the match
+
+The scoreboard, your stats and the top shots speak when you press their
+keys (Tab for the scoreboard; the stats and top shots keys are on the
+Controls page). Each says what its window shows.
+
+When the match ends, the debriefing says who won and reads its pages.
+
+- **Page Up** and **Page Down** change the page: the map vote (when the
+  server votes on the next map), the scoreboard, the awards, and every
+  player's stats.
+- **Up** and **Down** move through the maps, the awards or the players.
+  On a player, the mode says their rank, XP, kills and deaths, accuracy,
+  time played, and each weapon they used.
+- **Enter** votes for the map you are on. Where the server takes three
+  choices, each Enter is your next choice.
+- **Home** says the page again. **End** says you are ready for the next
+  map.
+- Typing still chats; Enter sends the chat while there is any.
+
+### The Tesla gun and the Snooper
+
+Two weapons from Return to Castle Wolfenstein:
+
+- **The Tesla gun**, for soldiers on both teams: the last weapon in the
+  soldier's list, after the Venom. Hold fire and it throws lightning at
+  up to three enemies in front of you, within about 15 metres, and
+  crackles while it fires. It heats up like the Venom.
+- **The Snooper**: the Allied covert ops' rifle, in place of their
+  M1 Garand, zoomed in or not. With the RTCW pack it has the Snooper's
+  look and sound too.
+
+The Tesla is on games you host. It looks like the Venom unless you add
+the RTCW pack.
+
+### RTCW's sounds (optional)
+
+If you own Return to Castle Wolfenstein, a pack made from your own copy
+gives No Quarter RTCW's weapon sounds, voice chats, explosions and
+footsteps, and the Tesla its own look and zap. It is called
+`zzzz_rtcw.pk3` and goes in the `nq` folder. It is made from the
+`pak0.pk3` and `mp_pak0.pk3` in RTCW's `main` folder by
+`release/make-rtcw-sounds.py`; it is never shared, because the sounds
+are id Software's.
+
+### If the game shuts down
+
+The game keeps a log of what it does, `etconsole.log`
+in the `nq` folder. If the game shuts down, start it again: once the
+main menu is up, it says what it wrote last before it stopped. F6 says
+that again. The log from that time is kept as `etconsole-last.log`, in
+the same folder, if someone asks you for it.
+
+
+## 7. Playing online
+
+Public No Quarter servers check that every player has the same files as
+the server. This file is not on them, so on those servers the game
+leaves it out, and No Quarter runs without speech.
+
+
+## 8. Uninstalling
+
+Delete `@PACKAGE@` and `qagame_mac` from the `nq` folder.

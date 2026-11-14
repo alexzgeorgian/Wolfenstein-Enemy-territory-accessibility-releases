@@ -1,0 +1,91 @@
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1b944ef..a7a2170 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3586,6 +3586,7 @@ extern vmCvar_t eta_speechRate;
+ extern vmCvar_t eta_speechPitch;
+ extern vmCvar_t eta_speechVolume;
+ extern vmCvar_t eta_announcerVolume;
++extern vmCvar_t eta_voiceVolume;
+ extern vmCvar_t eta_markerVolume;
+ extern vmCvar_t eta_siteVolume;
+ extern vmCvar_t eta_doorVolume;
+@@ -3598,6 +3599,7 @@ extern vmCvar_t eta_mineCues;
+ extern vmCvar_t eta_bumpCues;
+ int CG_AccessibilityBumpVolume(void);
+ int CG_AccessibilityAnnouncerVolume(void);
++int CG_AccessibilityVoiceVolume(void);
+ 
+ /* Called where the game itself moves the music, so the accessibility
+    duck can be applied on top of what the map asked for rather than
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 3ad3985..320be11 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2198,6 +2198,7 @@ vmCvar_t eta_speechVolume;
+    been destroyed". The tester found it louder than the marker; 100 is
+    the game's own level. */
+ vmCvar_t eta_announcerVolume;
++vmCvar_t eta_voiceVolume;
+ /* How loud each kind of the mod's own sounds is, 0 to 100, on the Sound
+    page: the tester asked for the sounds to have a page of their own,
+    apart from the speech settings, which belong to the screen reader. */
+@@ -2461,6 +2462,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },
+ 	{ &eta_speechVolume,        "eta_speechVolume",        "100" },
+ 	{ &eta_announcerVolume,     "eta_announcerVolume",     "100" },
++	{ &eta_voiceVolume,         "eta_voiceVolume",         "100" },
+ 	{ &eta_markerVolume,        "eta_markerVolume",        "100" },
+ 	{ &eta_siteVolume,          "eta_siteVolume",          "100" },
+ 	{ &eta_doorVolume,          "eta_doorVolume",          "100" },
+@@ -2550,6 +2552,27 @@ int CG_AccessibilityAnnouncerVolume(void)
+ 	return percent <= 0 ? 0 : percent;
+ }
+ 
++/**
++ * @brief Players' voice chats at eta_voiceVolume, 0 to 127 - or -1 at 100,
++ * for the game's own way of playing them.
++ *
++ * Asked for by the tester: bots calling for medics and ammo all match
++ * long drowned the marker's beacon while he was walking to it. Turned
++ * down, a voice chat is still said in the chat speech; only the voice
++ * is quieter.
++ */
++int CG_AccessibilityVoiceVolume(void)
++{
++	int percent = eta_voiceVolume.integer;
++
++	if (percent >= 100)
++	{
++		return -1;
++	}
++
++	return percent <= 0 ? 0 : (127 * percent) / 100;
++}
++
+ /**
+  * @brief Re-reads the mod's settings, so changing one takes effect now.
+  *
+diff --git a/src/cgame/cg_servercmds.c b/src/cgame/cg_servercmds.c
+index 2205158..bf85ca5 100644
+--- a/src/cgame/cg_servercmds.c
++++ b/src/cgame/cg_servercmds.c
+@@ -2042,6 +2042,18 @@ void CG_PlayVoiceChat(bufferedVoiceChat_t *vchat)
+ {
+ 	if (cg_voiceChats.integer)
+ 	{
++#ifdef FEATURE_ACCESSIBILITY
++		int volume = CG_AccessibilityVoiceVolume();
++
++		if (volume >= 0)
++		{
++			if (volume > 0 && cg.snap)
++			{
++				trap_S_StartSoundVControl(NULL, cg.snap->ps.clientNum, CHAN_VOICE, vchat->snd, volume);
++			}
++		}
++		else
++#endif
+ 		trap_S_StartLocalSound(vchat->snd, CHAN_VOICE);
+ 	}
+ 

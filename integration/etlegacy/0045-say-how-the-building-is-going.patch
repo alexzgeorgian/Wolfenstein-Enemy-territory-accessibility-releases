@@ -1,0 +1,86 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 2d163db..442bdf0 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4048,6 +4048,70 @@ static ETA_Interaction ETA_InteractionForHint(int icon)
+  */
+ #define ETA_HINT_SETTLE_MS 250
+ 
++/**
++ * @brief Says how a construction is coming along while it is being built.
++ *
++ * The tester finished a construction and said afterwards that they had
++ * known to keep holding the key only because they remembered the bar
++ * filling on screen. The bar was already arriving - the game sends a
++ * constructible's progress as the value beside the cursor icon, which
++ * is the same number the HUD draws - and nothing said it out loud once
++ * the work had started. The interaction report speaks the figure once,
++ * when the icon first settles, and then goes quiet for the whole climb.
++ *
++ * Milestones rather than a running count, for the reason the objective
++ * distance uses them: a number that changes every frame is a voice that
++ * never stops.
++ *
++ * There is deliberately no "complete". G_ConstructiblePlayerBuild sets
++ * the progress back to zero the instant a construction finishes, so a
++ * value that has dropped is indistinguishable from a player who let go
++ * of the key - and announcing "built" over something still half
++ * standing is the kind of confident wrongness this mod exists to avoid.
++ * A construction that is an objective has its finish announced by the
++ * objective narration, from the map script's own record.
++ */
++static void ETA_NarrateBuildProgress(void)
++{
++	static qboolean building = qfalse;
++	qboolean        active;
++	int             percent;
++
++	if (!cg.snap || !eta_interactionCallouts.integer)
++	{
++		building = qfalse;
++		ETA_HudNarrator_ResetBuildProgress();
++		return;
++	}
++
++	active = (qboolean)(cg.cursorHintTime != 0 && cg.cursorHintFade > 0
++	                    && (cg.time - cg.cursorHintTime) < cg.cursorHintFade
++	                    && (cg.cursorHintIcon == HINT_BUILD
++	                        || cg.cursorHintIcon == HINT_CONSTRUCTIBLE)
++	                    && cg.cursorHintValue > 0);
++
++	if (!active)
++	{
++		/* Looking away from the construction starts the climb afresh, so
++		   coming back to it is announced rather than met with silence. */
++		if (building)
++		{
++			building = qfalse;
++			ETA_HudNarrator_ResetBuildProgress();
++		}
++
++		return;
++	}
++
++	building = qtrue;
++
++	/* The same figure the status bar under the icon draws, from the same
++	   value, so the words and the bar cannot disagree. */
++	percent = (int)MIN(((float)cg.cursorHintValue / 255.0f) * 100.0f, 100.0f);
++
++	ETA_HudNarrator_UpdateBuildProgress(percent);
++}
++
+ static void ETA_NarrateInteractionHint(void)
+ {
+ 	static qboolean wasActive = qfalse;
+@@ -6341,6 +6405,10 @@ static void CG_Draw2D(void)
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 			ETA_NarrateInteractionHint();
++
++			/* Every frame while the pliers are on something: the hint
++			   report above speaks once and the climb takes seconds. */
++			ETA_NarrateBuildProgress();
+ #endif
+ 
+ 			// force drawing binoc & scope mask even if crosshair is invisible

@@ -1,0 +1,325 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 9028893..a0051ea 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -2339,6 +2339,30 @@ static void CG_AccessibilityUsePrev_f(void)
+ 	ETA_ChooseStep(-1);
+ }
+ 
++/**
++ * @brief Turns to a flight of stairs: to its foot from further off, and
++ * standing at the foot, straight up or down the flight - so walking
++ * forward climbs it. Nothing is pressed: stairs are walked.
++ */
++#define ETA_STAIRS_AT_FOOT_METERS 1.5f
++
++static void ETA_StairsTurn(const etaAimTarget_t *target, const char *place)
++{
++	if (target->meters <= ETA_STAIRS_AT_FOOT_METERS)
++	{
++		etaAimTarget_t up = *target;
++
++		VectorCopy(target->along, up.point);
++		ETA_AimStartSnap(&up, NULL);
++		ETA_HudNarrator_HoldPassive(cg.time);
++		ETA_Speech_Say(va("Facing %s the stairs. Walk forward",
++		                  target->along[2] > target->point[2] ? "up" : "down"));
++		return;
++	}
++
++	ETA_AimStartSnap(target, place ? va("%s, %s", target->name, place) : target->name);
++}
++
+ /* The chosen one, if there still is one: F's answer before anything
+    else. qfalse when nothing is chosen, or it is gone. */
+ static qboolean ETA_ChooseTake(const etaAimTarget_t *list, int count, int *index)
+@@ -2415,9 +2439,16 @@ static void CG_AccessibilityActivateDown_f(void)
+ 			/* Turned to and said; used on arrival when in reach - but a
+ 			   ladder is climbed with F once there, and a locked door is
+ 			   never pressed at. */
+-			ETA_AimStartSnap(&list[index], list[index].name);
+-			eta_use.pending = (qboolean)(!list[index].ladder && !list[index].locked
+-			                             && list[index].meters <= ETA_USE_REACH_METERS);
++			if (list[index].stairs)
++			{
++				ETA_StairsTurn(&list[index], NULL);
++			}
++			else
++			{
++				ETA_AimStartSnap(&list[index], list[index].name);
++				eta_use.pending = (qboolean)(!list[index].ladder && !list[index].locked
++				                             && list[index].meters <= ETA_USE_REACH_METERS);
++			}
+ 			eta_aim.cycleIndex = index;
+ 			eta_aim.cycleAt    = cg.time;
+ 			return;
+@@ -2457,10 +2488,32 @@ static void CG_AccessibilityActivateDown_f(void)
+ 	{
+ 		index = (eta_aim.cycleIndex + 1) % count;
+ 	}
++	else if (list[0].stairs)
++	{
++		/* Stairs underfoot do not stand in the way of something to use
++		   within reach: that is what F was pressed for. */
++		int j;
++
++		for (j = 1; j < count; j++)
++		{
++			if (!list[j].stairs && list[j].meters <= ETA_USE_REACH_METERS)
++			{
++				index = j;
++				break;
++			}
++		}
++	}
+ 
+ 	eta_aim.cycleIndex = index;
+ 	eta_aim.cycleAt    = cg.time;
+ 
++	/* Stairs: turned to their foot, and from there up or down them. */
++	if (list[index].stairs)
++	{
++		ETA_StairsTurn(&list[index], count > 1 ? va("%d of %d", index + 1, count) : NULL);
++		return;
++	}
++
+ 	/* A ladder is turned to and said, always: pressing use at it does
+ 	   nothing, and F climbs it once the player is there. */
+ 	if (list[index].ladder)
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index b587018..7d04142 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4372,6 +4372,201 @@ static etaDynamite_t ETA_DynamiteUse(const entityState_t *es)
+    the box the pliers reach for. */
+ #define ETA_DYNAMITE_AIM_LIFT 6.0f
+ 
++/**
++ * @brief Flights of stairs near the player, for the F list.
++ *
++ * The tester found the stairs to the Allied command post on Oasis, with
++ * the way's "Stairs up" callout, and could not get onto them: the map
++ * has nothing that says where stairs are, so they were not on the F list
++ * the way the ladders are, and turning to face straight up a flight by
++ * ear is guesswork. So stairs are looked for as the list is made: out
++ * from the player in sixteen directions, a few centimetres at a time,
++ * the floor followed for fourteen metres - and a run of sharp rises a step
++ * high, with flatter footing between them, is a flight. The stairs there
++ * are steps cut in the rock, not neat treads, so the footing need only
++ * be walkable. Sloping ground is not stairs: a dune rises as much, but
++ * evenly, never a step at a time. The same flight seen from several
++ * directions is one, taken along the direction it climbs most steeply -
++ * which is straight up it.
++ */
++#define ETA_STAIRS_STEP      8.0f    /* between the looks along each direction */
++#define ETA_STAIRS_LOOKS     72      /* about fourteen metres: a flight starting ten metres off, whole */
++#define ETA_STAIRS_RISER     6.0f    /* this much up or down in one look: a step */
++#define ETA_STAIRS_LEVEL     2.5f    /* this little: the footing between steps */
++#define ETA_STAIRS_TOO_HIGH  22.0f   /* higher, a ledge or a drop, not a stair */
++#define ETA_STAIRS_RISERS    3       /* this many steps make a flight */
++#define ETA_STAIRS_HEIGHT    48.0f   /* and this high in all */
++#define ETA_STAIRS_WALKABLE  0.7f    /* the game's MIN_WALK_NORMAL */
++#define ETA_STAIRS_SAME      96.0f   /* feet this close: the same flight */
++
++typedef struct
++{
++	vec3_t foot, top;
++	float  rise, slope;
++	int    direction;
++} etaFlight_t;
++
++static int ETA_StairsNear(const vec3_t origin, etaAimTarget_t *out, int max)
++{
++	static const vec3_t mins = { -8.0f, -8.0f, 0.0f };
++	static const vec3_t maxs = { 8.0f, 8.0f, 8.0f };
++	etaFlight_t         flights[16];
++	int                 count = 0, d, i, made = 0;
++
++	for (d = 0; d < 16; d++)
++	{
++		float  bearing = (float)d * 22.5f * (float)M_PI / 180.0f;
++		float  dx = sinf(bearing), dy = cosf(bearing);
++		float  z = origin[2] - 24.0f, rise = 0.0f, level = 0.0f;
++		int    s, risers = 0, footings = 0, sign = 0;
++		vec3_t prev, foot, top;
++
++		VectorSet(prev, origin[0], origin[1], z);
++		VectorCopy(prev, foot);
++		VectorCopy(prev, top);
++
++		for (s = 1; s <= ETA_STAIRS_LOOKS; s++)
++		{
++			trace_t trace;
++			vec3_t  start, end, here;
++			float   dz;
++			int     now;
++
++			VectorSet(start, origin[0] + dx * ETA_STAIRS_STEP * s, origin[1] + dy * ETA_STAIRS_STEP * s,
++			          z + ETA_STAIRS_TOO_HIGH + 2.0f);
++			VectorSet(end, start[0], start[1], z - ETA_STAIRS_TOO_HIGH - 2.0f);
++			trap_CM_BoxTrace(&trace, start, end, mins, maxs, 0, MASK_PLAYERSOLID);
++
++			if (trace.startsolid || trace.allsolid || trace.fraction >= 1.0f
++			    || trace.plane.normal[2] < ETA_STAIRS_WALKABLE)
++			{
++				break;   /* a wall, a drop, or ground too steep to stand on */
++			}
++
++			VectorCopy(trace.endpos, here);
++			dz  = here[2] - z;
++			now = dz > 0.0f ? 1 : -1;
++
++			if (fabsf(dz) >= ETA_STAIRS_RISER)
++			{
++				/* A step. One the other way ends the flight. */
++				if (risers && now != sign)
++				{
++					break;
++				}
++				if (!risers)
++				{
++					VectorCopy(prev, foot);
++					sign     = now;
++					rise     = 0.0f;
++					footings = 0;
++				}
++				rise += dz;
++				risers++;
++				level = 0.0f;
++				VectorCopy(here, top);
++			}
++			else if (risers)
++			{
++				/* Between steps: footing, or the slope of the rock. */
++				if (fabsf(dz) < ETA_STAIRS_LEVEL)
++				{
++					footings++;
++				}
++				if (dz * (float)sign < -ETA_STAIRS_LEVEL)
++				{
++					break;   /* going back the other way */
++				}
++				rise  += dz;
++				level += ETA_STAIRS_STEP;
++				if (level > 64.0f)
++				{
++					break;   /* the landing at the top */
++				}
++				VectorCopy(here, top);
++			}
++
++			VectorCopy(here, prev);
++			z = here[2];
++		}
++
++		if (risers >= ETA_STAIRS_RISERS && footings >= 2 && fabsf(rise) >= ETA_STAIRS_HEIGHT && count < 16)
++		{
++			etaFlight_t *f = &flights[count++];
++			float        run;
++
++			VectorCopy(foot, f->foot);
++			VectorCopy(top, f->top);
++			f->rise      = rise;
++			f->direction = d;
++			run          = sqrtf((top[0] - foot[0]) * (top[0] - foot[0]) + (top[1] - foot[1]) * (top[1] - foot[1]));
++			f->slope     = fabsf(rise) / (run > 1.0f ? run : 1.0f);
++		}
++	}
++
++	/* One flight seen from several directions: the steepest look is the
++	   one straight up it. */
++	for (i = 0; i < count && made < max; i++)
++	{
++		etaFlight_t    *f = &flights[i];
++		etaAimTarget_t *t;
++		int             j, best = i;
++		vec3_t          axis;
++
++		if (f->direction < 0)
++		{
++			continue;
++		}
++		for (j = i + 1; j < count; j++)
++		{
++			if (flights[j].direction >= 0 && (flights[j].rise > 0.0f) == (f->rise > 0.0f)
++			    && Distance(flights[j].foot, f->foot) < ETA_STAIRS_SAME)
++			{
++				if (flights[j].slope > flights[best].slope)
++				{
++					flights[best].direction = -1;
++					best                    = j;
++				}
++				else
++				{
++					flights[j].direction = -1;
++				}
++			}
++		}
++		if (best != i)
++		{
++			f->direction = -1;
++		}
++		f = &flights[best];
++		if (f->direction < 0)
++		{
++			continue;
++		}
++
++		t = &out[made++];
++		memset(t, 0, sizeof(*t));
++		t->entityNum = -1;
++		t->stairs    = qtrue;
++		VectorCopy(f->foot, t->point);
++		t->point[2] += 24.0f + 40.0f;   /* a standing player's eyes over the foot */
++		VectorSubtract(f->top, f->foot, axis);
++		axis[2] = 0.0f;
++		VectorNormalize(axis);
++		VectorMA(t->point, 256.0f, axis, t->along);
++		t->along[2] = t->point[2] + (f->rise > 0.0f ? 64.0f : -64.0f);
++		{
++			int meters = (int)(fabsf(f->rise) * ETA_QU_TO_METERS + 0.5f);
++
++			Q_strncpyz(t->name, va("Stairs %s, %d %s", f->rise > 0.0f ? "up" : "down",
++			                       meters < 1 ? 1 : meters, meters <= 1 ? "meter" : "meters"), sizeof(t->name));
++		}
++		t->meters = Distance(origin, t->point) * ETA_QU_TO_METERS;
++		f->direction = -1;
++	}
++
++	return made;
++}
++
+ /**
+  * @brief The things close by the player could use, nearest first.
+  *
+@@ -4583,6 +4778,17 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 		ETA_AimInsert(list, &count, max, &target);
+ 	}
+ 
++	/* And the flights of stairs close by, which the map does not list. */
++	{
++		etaAimTarget_t flights[4];
++		int            n = ETA_StairsNear(ps->origin, flights, 4);
++
++		for (i = 0; i < n; i++)
++		{
++			ETA_AimInsert(list, &count, max, &flights[i]);
++		}
++	}
++
+ 	return count;
+ }
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 508de72..441becb 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3496,6 +3496,8 @@ typedef struct
+ 	char   name[64];
+ 	qboolean ladder;    ///< one of the map's ladders: F turns to it, and climbs it there
+ 	qboolean locked;    ///< a door this player cannot open: said, never pressed at
++	qboolean stairs;    ///< a flight of stairs: F turns to its foot, and there up or down it
++	vec3_t   along;     ///< stairs: a point up or down the flight from its foot, at eye height
+ } etaAimTarget_t;
+ 
+ int      CG_AccessibilityUseTargets(etaAimTarget_t *list, int max);

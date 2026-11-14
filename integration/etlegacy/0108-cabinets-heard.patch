@@ -1,0 +1,169 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 49b1914..21bedef 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4551,9 +4551,16 @@ static int ETA_GatherAwareness(ETA_AwareThing *list, int max, qboolean players,
+  * so a floor strewn after a fight does not become a din. A dropped
+  * objective - the gold, the documents - rings the flag's bell: it is
+  * there to be taken, or taken back.
++ *
++ * A health or ammo cabinet plays the same sound as a pack: the tester
++ * found the cabinets silent. One is a solid model with a trigger in
++ * front of it, or the trigger alone on some maps, so a cabinet and its
++ * own trigger are one sound, and the cabinet is in sight when the line
++ * reaches it.
+  */
+ #define ETA_PICKUP_CUE_RANGE 400.0f   /* about ten metres */
+ #define ETA_PICKUP_CUES      3        /* the nearest this many */
++#define ETA_PICKUP_SAME      96.0f    /* one of a kind this near another is the same thing */
+ 
+ static void ETA_BeaconPickups(void)
+ {
+@@ -4563,6 +4570,7 @@ static void ETA_BeaconPickups(void)
+ 		vec3_t              origin;
+ 		float               distance;
+ 		eta_loopSoundType_t which;
++		qboolean            cabinet;
+ 	} near[ETA_PICKUP_CUES];
+ 	vec3_t eye;
+ 	int    count = 0, i;
+@@ -4582,45 +4590,105 @@ static void ETA_BeaconPickups(void)
+ 		eta_loopSoundType_t which;
+ 		vec3_t              origin;
+ 		float               distance;
++		qboolean            same = qfalse, cabinet = qfalse;
+ 		int                 at;
+ 
+-		if (es->eType != ET_ITEM || (es->eFlags & EF_NODRAW))
++		if (es->eFlags & EF_NODRAW)
+ 		{
+ 			continue;
+ 		}
+ 
+-		item = BG_GetItem(es->modelindex);
+-		if (!item)
++		if (es->eType == ET_CABINET_H || es->eType == ET_CABINET_A || es->eType == ET_HEALER || es->eType == ET_SUPPLIER)
+ 		{
+-			continue;
+-		}
++			which   = (es->eType == ET_CABINET_H || es->eType == ET_HEALER) ? ETA_LOOP_HEALTH : ETA_LOOP_AMMO;
++			cabinet = qtrue;
++			VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++			if (es->solid == SOLID_BMODEL && es->modelindex > 0 && es->modelindex < MAX_MODELS)
++			{
++				/* A trigger: a brush, drawn round its middle. */
++				VectorAdd(origin, cgs.inlineModelMidpoints[es->modelindex], origin);
++			}
++			else
++			{
++				origin[2] += 30.0f;   /* halfway up the cabinet */
++			}
++			distance = Distance(ps->origin, origin);
+ 
+-		if (item->giType == IT_HEALTH)
+-		{
+-			which = ETA_LOOP_HEALTH;
+-		}
+-		else if (item->giType == IT_AMMO || (item->giType == IT_WEAPON && item->giWeapon == WP_AMMO))
+-		{
+-			which = ETA_LOOP_AMMO;
+-		}
+-		else if (item->giType == IT_WEAPON)
+-		{
+-			which = ETA_LOOP_WEAPON;
+-		}
+-		else if (item->giType == IT_TEAM)
+-		{
+-			which = ETA_LOOP_FLAG;
++			if (distance > ETA_PICKUP_CUE_RANGE)
++			{
++				continue;
++			}
++
++			/* The cabinet itself stops the line: reaching it is seeing it. */
++			{
++				trace_t trace;
++
++				CG_Trace(&trace, eye, NULL, NULL, origin, cg.snap->ps.clientNum, MASK_SOLID);
++				if (trace.fraction < 1.0f && trace.entityNum != es->number)
++				{
++					continue;
++				}
++			}
+ 		}
+ 		else
+ 		{
+-			continue;
+-		}
++			if (es->eType != ET_ITEM)
++			{
++				continue;
++			}
+ 
+-		VectorCopy(cg_entities[es->number].lerpOrigin, origin);
+-		origin[2] += 8.0f;
+-		distance = Distance(ps->origin, origin);
++			item = BG_GetItem(es->modelindex);
++			if (!item)
++			{
++				continue;
++			}
++
++			if (item->giType == IT_HEALTH)
++			{
++				which = ETA_LOOP_HEALTH;
++			}
++			else if (item->giType == IT_AMMO || (item->giType == IT_WEAPON && item->giWeapon == WP_AMMO))
++			{
++				which = ETA_LOOP_AMMO;
++			}
++			else if (item->giType == IT_WEAPON)
++			{
++				which = ETA_LOOP_WEAPON;
++			}
++			else if (item->giType == IT_TEAM)
++			{
++				which = ETA_LOOP_FLAG;
++			}
++			else
++			{
++				continue;
++			}
++
++			VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++			origin[2] += 8.0f;
++			distance = Distance(ps->origin, origin);
+ 
+-		if (distance > ETA_PICKUP_CUE_RANGE || !ETA_ClearLine(eye, origin))
++			if (distance > ETA_PICKUP_CUE_RANGE || !ETA_ClearLine(eye, origin))
++			{
++				continue;
++			}
++		}
++
++		/* A cabinet and its own trigger: one sound, the nearer. */
++		for (at = 0; at < count && !same; at++)
++		{
++			if (cabinet && near[at].cabinet && near[at].which == which
++			    && Distance(near[at].origin, origin) < ETA_PICKUP_SAME)
++			{
++				same = qtrue;
++				if (distance < near[at].distance)
++				{
++					VectorCopy(origin, near[at].origin);
++					near[at].distance = distance;
++				}
++			}
++		}
++		if (same)
+ 		{
+ 			continue;
+ 		}
+@@ -4638,6 +4706,7 @@ static void ETA_BeaconPickups(void)
+ 			VectorCopy(origin, near[at].origin);
+ 			near[at].distance = distance;
+ 			near[at].which    = which;
++			near[at].cabinet  = cabinet;
+ 			if (count < ETA_PICKUP_CUES)
+ 			{
+ 				count++;

@@ -1,0 +1,103 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index bed1be2..298f7bd 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -1583,6 +1583,10 @@ void UI_LoadMenus(const char *menuFile, qboolean reset)
+ 	UI_ParseMenu("ui/options_accessibility_environment.menu");
+ 	UI_ParseMenu("ui/options_accessibility_speech.menu");
+ 	UI_ParseMenu("ui/options_accessibility_keys.menu");
++
++	/* And one for hosting your own game: bots, and friends joining with
++	   the plain game. */
++	UI_ParseMenu("ui/options_accessibility_hosting.menu");
+ #endif
+ 
+ 	Com_DPrintf("UI menu load time = %d milli seconds\n", trap_Milliseconds() - start);
+@@ -4892,6 +4896,68 @@ static const char *UI_GetDemoPath(qboolean prefix)
+ 	return path;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/* The mod's Hosting page, registered when the ui starts so the page reads
++   out its real values before anybody has hosted anything. */
++static vmCvar_t eta_hostPlain;
++static vmCvar_t eta_hostBots;
++static vmCvar_t eta_hostBotSkill;
++
++static void UI_AccessibilityRegisterHostCvars(void)
++{
++	trap_Cvar_Register(&eta_hostPlain, "eta_hostPlain", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_hostBots, "eta_hostBots", "0", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_hostBotSkill, "eta_hostBotSkill", "2", CVAR_ARCHIVE);
++}
++
++/**
++ * @brief What the accessibility mod changes when the player hosts a game.
++ *
++ * Two things, both chosen on the mod's Hosting page, and applied on Start
++ * Server - before the map command this script queues has run.
++ *
++ * Friends with the plain game. The mod's pk3 sits in the legacy folder,
++ * and a server asks everybody who joins for every pk3 in that folder. A
++ * pure server turns away a friend without it; a server that hands out
++ * downloads gives it to them, and they go home with a game that talks.
++ * With eta_hostPlain on, the default, the server checks nobody's files
++ * and hands out none, so a friend joins with the game they already have.
++ * The host keeps the mod either way: it is their own server, so the pk3
++ * is always on its list.
++ *
++ * Bots. Omni-bot is loaded by the game module as the map starts, and only
++ * if omnibot_enable is set by then, so it is set here. The bot count is a
++ * command to Omni-bot, and there is no Omni-bot until the map is up, so it
++ * is queued behind the map command. maxbots fills the server to that many
++ * players in all, and a bot makes way for each friend who joins.
++ */
++static void UI_AccessibilityHostServer(void)
++{
++	trap_Cvar_Update(&eta_hostPlain);
++	trap_Cvar_Update(&eta_hostBots);
++	trap_Cvar_Update(&eta_hostBotSkill);
++
++	if (eta_hostPlain.integer)
++	{
++		trap_Cvar_Set("sv_pure", "0");
++		trap_Cvar_Set("sv_allowDownload", "0");
++	}
++
++	if (eta_hostBots.integer <= 0)
++	{
++		/* Off means off. omnibot_enable is archived, so without this a
++		   server hosted with bots once would have them every time after. */
++		trap_Cvar_Set("omnibot_enable", "0");
++		return;
++	}
++
++	trap_Cvar_Set("omnibot_enable", "1");
++	trap_Cmd_ExecuteText(EXEC_APPEND, va("wait 10 ; bot difficulty %i ; bot maxbots %i\n",
++	                                     (int)Com_Clamp(1, 6, eta_hostBotSkill.integer),
++	                                     (int)Com_Clamp(1, MAX_CLIENTS, eta_hostBots.integer)));
++}
++#endif
++
+ /**
+  * @brief UI_RunMenuScript
+  * @param[in] args
+@@ -4947,6 +5013,10 @@ void UI_RunMenuScript(char **args)
+ 				trap_Cmd_ExecuteText(EXEC_APPEND, va("wait ; wait ; map %s\n", uiInfo.mapList[ui_currentNetMap.integer].mapLoadName));
+ 			}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++			UI_AccessibilityHostServer();
++#endif
++
+ 			// set user cvars here
+ 
+ 			// set timelimit
+@@ -9221,6 +9291,7 @@ void UI_Init(int etLegacyClient, int clientVersion)
+ 	ETA_AccessibilityRuntime_Init();
+ 	ETA_MenuNarrator_Init();
+ 	UI_AccessibilityInstallBinds();
++	UI_AccessibilityRegisterHostCvars();
+ #endif
+ }
+ 

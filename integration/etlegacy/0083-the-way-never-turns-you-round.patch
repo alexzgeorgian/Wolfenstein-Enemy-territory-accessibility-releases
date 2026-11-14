@@ -1,0 +1,238 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index b4a0c32..0d63ffa 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2947,11 +2947,12 @@ static float ETA_MarkerSquareRadius(void)
+ #define ETA_ROUTE_RETRY_MS      3000    /* after finding no way at all */
+ #define ETA_ROUTE_STRAY         128.0f  /* this far off the way: replan */
+ #define ETA_ROUTE_STEER_MS      150
+-#define ETA_ROUTE_LOOKAHEAD     32      /* points ahead worth checking */
++#define ETA_ROUTE_LOOKAHEAD     16      /* points ahead worth checking */
+ #define ETA_ROUTE_CLEAR_AHEAD   320.0f  /* how far toward the ping must be walkable */
+ #define ETA_ROUTE_OPENING_REACH 512.0f  /* how far an opening is looked down */
+ #define ETA_ROUTE_OPENING_MIN   192.0f  /* how far it must run to count */
+ #define ETA_ROUTE_OPENING_STEP  15      /* degrees between the looks */
++#define ETA_ROUTE_ON_WAY        48.0f   /* this near the way's point: on it */
+ 
+ typedef struct
+ {
+@@ -2968,11 +2969,63 @@ typedef struct
+ 	int      side;        /* which way round the last opening was: -1, 1, 0 */
+ 	int      saidJump;    /* the jump on the way last told of, by its point */
+ 	qboolean overEdge;    /* steer is across a jump or up a ladder */
++	qboolean onWay;       /* steer is the way's next point, from on the way */
+ 	qboolean jumps;       /* this search may jump: there was no way without */
+ } eta_route_t;
+ 
+ static eta_route_t eta_route;
+ 
++/**
++ * @brief Whether a whole player fits through the step, the probe aside.
++ *
++ * The probe that finds the way is narrower than a player, so that a
++ * doorway is found wherever the squares fall. That let the way through
++ * gaps a player does not fit: a walk following the ping on the real
++ * Oasis stopped for good at two of them, and the ping pointed at the
++ * gap the whole time. So each step is tried once more with the player's
++ * own width and standing height, from the middle of the square or a
++ * little to either side of it - a doorway the square's middle is
++ * off-centre in is still found - and the way keeps to wherever it
++ * fitted. The probe is only as tall as a crouching player, and nothing
++ * tells the player to crouch, so a way under something lower than a
++ * standing player is no way.
++ */
++#define ETA_ROUTE_BODY_HALF  18.0f   /* the player's own: -18 to 18 */
++#define ETA_ROUTE_BODY_NUDGE 10.0f
++#define ETA_ROUTE_BODY_TOP   48.0f   /* standing: playerMaxs in g_client.c */
++
++static qboolean ETA_RouteRoom(const float from[3], float to[3], float lift)
++{
++	static const vec3_t mins = { -ETA_ROUTE_BODY_HALF, -ETA_ROUTE_BODY_HALF, -24.0f + 18.0f };
++	static const vec3_t maxs = { ETA_ROUTE_BODY_HALF, ETA_ROUTE_BODY_HALF, ETA_ROUTE_BODY_TOP };
++	static const float  nudges[5][2] =
++	{
++		{ 0.0f, 0.0f },
++		{ ETA_ROUTE_BODY_NUDGE, 0.0f }, { -ETA_ROUTE_BODY_NUDGE, 0.0f },
++		{ 0.0f, ETA_ROUTE_BODY_NUDGE }, { 0.0f, -ETA_ROUTE_BODY_NUDGE }
++	};
++	trace_t trace;
++	vec3_t  start, end;
++	int     i;
++
++	VectorSet(start, from[0], from[1], from[2] + lift);
++
++	for (i = 0; i < 5; i++)
++	{
++		VectorSet(end, to[0] + nudges[i][0], to[1] + nudges[i][1], from[2] + lift);
++		trap_CM_BoxTrace(&trace, start, end, mins, maxs, 0, MASK_PLAYERSOLID);
++
++		if (!trace.startsolid && trace.fraction >= 1.0f)
++		{
++			to[0] = end[0];
++			to[1] = end[1];
++			return qtrue;
++		}
++	}
++
++	return qfalse;
++}
++
+ /**
+  * @brief Can a player walk one square, and at what height do they land.
+  */
+@@ -3047,6 +3100,13 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ 		}
+ 	}
+ 
++	if (!ETA_RouteRoom(from, to, lift))
++	{
++		return ETA_PATH_NONE;
++	}
++	end[0] = to[0];
++	end[1] = to[1];
++
+ 	/* Down onto the floor there, from a step up. */
+ 	VectorCopy(end, start);
+ 	start[2] += 18.0f;
+@@ -3128,28 +3188,61 @@ static float ETA_RouteWalkable(const vec3_t from, const vec3_t to)
+ 	reach  = trace.fraction;
+ 	length = Distance(from, to) * reach;
+ 
++	/* Somewhere lower down, more steeply than a stair runs, is not walked
++	   to either: it is a drop off an edge. */
++	if (from[2] - to[2] > ETA_ROUTE_MAX_DROP)
++	{
++		vec3_t flat;
++
++		VectorSubtract(to, from, flat);
++		flat[2] = 0.0f;
++
++		if (from[2] - to[2] > VectorLength(flat))
++		{
++			return 0.0f;
++		}
++	}
++
+ 	/* And floor all the way: a straight line across a hole the way goes
+-	   round is not a way. Sampled every couple of squares, looking down
+-	   as far as a safe drop. */
++	   round is not a way, and nor is one off the side of a stair or the
++	   end of a balcony. Looking only for some floor, however far down,
++	   let the line off a balcony near the Allied Command Post on Oasis
++	   to the floor seven metres under it - the way went down the
++	   stairs, and the ping said to walk off the edge. So from one look
++	   to the next the floor may fall no faster than a stair does, one
++	   unit down for one along, or a step where the looks are close; and
++	   the last look is at the end itself. Sampled every couple of
++	   squares, looking down as far as a safe drop. */
+ 	samples = (int)(length / (2.0f * ETA_ROUTE_CELL));
+ 
+-	for (i = 1; i <= samples; i++)
+ 	{
+-		vec3_t point, below;
+-		float  f = reach * (float)i / (float)(samples + 1);
++		float lastFloor = from[2] - 24.0f, lastAt = 0.0f;
+ 
+-		point[0] = from[0] + (to[0] - from[0]) * f;
+-		point[1] = from[1] + (to[1] - from[1]) * f;
+-		point[2] = a[2];
+-		VectorCopy(point, below);
+-		below[2] -= 24.0f + ETA_ROUTE_MAX_DROP + fabsf(from[2] - to[2]);
++		for (i = 1; i <= samples + 1; i++)
++		{
++			vec3_t point, below;
++			float  f = reach * (float)i / (float)(samples + 1);
++			float  along;
+ 
+-		trap_CM_BoxTrace(&trace, point, below, NULL, NULL, 0, MASK_PLAYERSOLID);
++			point[0] = from[0] + (to[0] - from[0]) * f;
++			point[1] = from[1] + (to[1] - from[1]) * f;
++			point[2] = a[2];
++			VectorCopy(point, below);
++			below[2] -= 24.0f + ETA_ROUTE_MAX_DROP + fabsf(from[2] - to[2]);
+ 
+-		if (trace.fraction >= 1.0f
+-		    || (CG_PointContents(trace.endpos, -1) & (CONTENTS_LAVA | CONTENTS_SLIME)))
+-		{
+-			return f - reach / (float)(samples + 1);
++			trap_CM_BoxTrace(&trace, point, below, NULL, NULL, 0, MASK_PLAYERSOLID);
++
++			along = length * (float)i / (float)(samples + 1);
++
++			if (trace.fraction >= 1.0f
++			    || trace.endpos[2] < lastFloor - MAX(along - lastAt, 18.0f)
++			    || (CG_PointContents(trace.endpos, -1) & (CONTENTS_LAVA | CONTENTS_SLIME)))
++			{
++				return f - reach / (float)(samples + 1);
++			}
++
++			lastFloor = trace.endpos[2];
++			lastAt    = along;
+ 		}
+ 	}
+ 
+@@ -3170,11 +3263,11 @@ static qboolean ETA_RouteClear(const vec3_t from, const vec3_t to)
+  * The side it found last time is looked at first, so walking along a
+  * wall the ping does not swap ends of it from one moment to the next.
+  */
+-static qboolean ETA_RouteOpening(const vec3_t here, float wantYaw, vec3_t out)
++static qboolean ETA_RouteOpening(const vec3_t here, float wantYaw, int widest, vec3_t out)
+ {
+ 	int step;
+ 
+-	for (step = 1; step * ETA_ROUTE_OPENING_STEP <= 180; step++)
++	for (step = 1; step * ETA_ROUTE_OPENING_STEP <= widest; step++)
+ 	{
+ 		int turn;
+ 
+@@ -3401,6 +3494,7 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 	}
+ 
+ 	eta_route.overEdge = qfalse;
++	eta_route.onWay    = qfalse;
+ 
+ 	if (state == ETA_PATH_FOUND && best == count - 1 && special == count)
+ 	{
+@@ -3412,9 +3506,12 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 	if (best == nearest && best + 1 < count)
+ 	{
+ 		/* Nothing ahead is in a straight line - the player is past a
+-		   corner the probe cannot see round. The next point is still
+-		   the way. */
++		   corner the probe cannot see round, or on a stair, whose risers
++		   stop a straight line however short. The next point is still
++		   the way: the search stepped to it, square by square, the way a
++		   player walks. */
+ 		best++;
++		eta_route.onWay = (qboolean)(nearestDistance <= ETA_ROUTE_ON_WAY);
+ 	}
+ 
+ 	ETA_PathFinder_Point(best, point);
+@@ -3492,7 +3589,12 @@ static void ETA_RouteFrame(void)
+ 	   that is the point - it is jumped, or climbed, and the ping says
+ 	   where. Looking for a way round it would lead away from the only
+ 	   way up. */
+-	if (eta_route.steering && eta_route.overEdge)
++	/* Or the next step of the way, taken from on it: a stair, a corner.
++	   Looking round for an opening here once sent the ping back down
++	   the stairs the way went up - "the way goes south-west" with the
++	   marker and the way both north-east - and the player turned round
++	   on every flight. */
++	if (eta_route.steering && (eta_route.overEdge || eta_route.onWay))
+ 	{
+ 		eta_route.aimSet = qfalse;
+ 		eta_route.side   = 0;
+@@ -3517,7 +3619,12 @@ static void ETA_RouteFrame(void)
+ 
+ 	/* A wall in the way: the nearest open way out instead. */
+ 	vectoangles(delta, angles);
+-	eta_route.aimSet = ETA_RouteOpening(here, angles[YAW], eta_route.aim);
++	/* Along the way, never further round than square on to it: the way
++	   is known to go on ahead, and an opening found behind the player
++	   turned them right round - "the way goes south-west" with the way
++	   and the marker both north-east. Straight at the marker, before
++	   there is a way, anywhere will do. */
++	eta_route.aimSet = ETA_RouteOpening(here, angles[YAW], eta_route.steering ? 90 : 180, eta_route.aim);
+ }
+ 
+ /**

@@ -1,0 +1,40 @@
+diff --git a/src/cgame/cg_draw_hud.c b/src/cgame/cg_draw_hud.c
+index e03c7cd..a5f4e65 100644
+--- a/src/cgame/cg_draw_hud.c
++++ b/src/cgame/cg_draw_hud.c
+@@ -36,6 +36,10 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#endif
++
+ hudData_t      hudData;
+ hudComponent_t *showOnlyHudComponent = NULL;
+ 
+@@ -3345,6 +3349,24 @@ void CG_DrawRespawnTimer(hudComponent_t *comp)
+ 			}
+ 		}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		// s is this component's exact on-screen text, so narrating it keeps
++		// speech in sync with what's actually displayed. It's redrawn every
++		// frame, so a static "last narrated" value stops this from
++		// re-announcing the same second over and over.
++		if (cgs.gamestate == GS_PLAYING && Q_isanumber(s))
++		{
++			static int lastNarratedSeconds = -1;
++			int        secondsRemaining    = atoi(s);
++
++			if (secondsRemaining != lastNarratedSeconds)
++			{
++				ETA_HudNarrator_SpeakRespawn(secondsRemaining);
++				lastNarratedSeconds = secondsRemaining;
++			}
++		}
++#endif
++
+ 		CG_DrawCompText(comp, s, drawColor, blink ? ITEM_TEXTSTYLE_BLINK : comp->styleText, &cgs.media.limboFont1);
+ 	}
+ }

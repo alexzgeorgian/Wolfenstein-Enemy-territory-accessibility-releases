@@ -1,0 +1,41 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 76e5f37..428593d 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8750,6 +8750,16 @@ static void UI_RunCinematicFrame(int handle)
+  * skipped that step got a working mod with a dead status key and no way to
+  * tell the difference from a broken one.
+  *
++ * One of these is not narration at all. `weapalt` is how a rifle goes to
++ * its scope, a mortar and an MG are set down, and a satchel is detonated,
++ * and the stock config binds it to MOUSE2 and to nothing else - it is the
++ * only action in default.cfg with no key. Played from the keyboard alone
++ * the scope is therefore unreachable, which is the same defect as the
++ * limbo panel being mouse-only, and it cost a tester a session of trying
++ * to scope an FG 42 and hearing nothing because they never got into the
++ * scope. KP_SLASH is free in default.cfg *and* in default_left.cfg, which
++ * F9 and F10 are not.
++ *
+  * F5, F6 and F8 are free in the engine's own default.cfg - it binds F1-F4,
+  * F7 and F11-F12 and leaves these three alone - so claiming them takes
+  * nothing away from a default install.
+@@ -8776,11 +8786,14 @@ static void UI_AccessibilityInstallBinds(void)
+ 		const char *replaces;
+ 	} binds[] =
+ 	{
+-		{ K_F5, "accessibilityStatus",     NULL            },
+-		{ K_F6, "accessibilityRepeat",     NULL            },
+-		{ K_F8, "accessibilityStopSpeech", NULL            },
+-		{ '9',  "accessibilityHealth",     "weaponbank 9"  },
+-		{ '0',  "accessibilityAmmo",       "weaponbank 10" }
++		{ K_F5,       "accessibilityStatus",     NULL            },
++		{ K_F6,       "accessibilityRepeat",     NULL            },
++		{ K_F8,       "accessibilityStopSpeech", NULL            },
++		{ '9',        "accessibilityHealth",     "weaponbank 9"  },
++		{ '0',        "accessibilityAmmo",       "weaponbank 10" },
++		/* Not narration - a part of the game that cannot be reached at
++		   all without a mouse. See the comment above the table. */
++		{ K_KP_SLASH, "weapalt",                 NULL            }
+ 	};
+ 
+ 	vmCvar_t installed;

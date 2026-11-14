@@ -1,0 +1,149 @@
+#include "ui/menudef.h"
+#include "ui/menumacros.h"
+
+// Accessibility Mode Updates //
+//
+// Shipped by the accessibility mod. Three popups, opened by the ui
+// module when a check of the release page finds a newer version
+// (UI_AccessibilityUpdateFrame in ui_main.c), never by a button:
+//
+//   eta_update_offer - a newer version for this game: download it?
+//   eta_update_game  - a newer version for a newer ET: Legacy: update
+//                      the game first
+//   eta_update_ready - downloaded and checked: restart now, or at quit
+//
+// Each is read out when it opens, title and message together, the way
+// the game's own popups are. The message is eta_updateMessage, which the
+// ui module words before opening the popup.
+//
+// Escape is always the gentle answer. On the offer it is Later; on the
+// last one it still puts the download in place at quit, because a
+// checked download thrown away on a stray key press would only be
+// downloaded again.
+
+#define WINDOW_X		0
+#define WINDOW_Y		0
+#define WINDOW_WIDTH	__WINDOW_WIDTH
+#define WINDOW_HEIGHT	480
+#define GROUP_NAME		"grpAccessibilityUpdate"
+
+#define SUBWINDOW_WIDTH		320
+#define SUBWINDOW_HEIGHT	112
+#define SUBWINDOW_X			.5*(WINDOW_WIDTH-SUBWINDOW_WIDTH)
+#define SUBWINDOW_Y			.5*(WINDOW_HEIGHT-SUBWINDOW_HEIGHT)
+#define BUTTON_W			.5*(SUBWINDOW_WIDTH-18)
+
+menuDef {
+	name		"eta_update_offer"
+	visible		0
+	fullscreen	0
+	rect		WINDOW_X WINDOW_Y WINDOW_WIDTH WINDOW_HEIGHT
+	style		WINDOW_STYLE_FILLED
+	popup
+	modal
+
+	fadeClamp	0.5
+	fadeAmount  0.075
+
+	onOpen {
+		setitemcolor background backcolor 0 0 0 0 ;
+		fadein background
+	}
+
+	onESC {
+		close eta_update_offer
+	}
+
+	itemDef {
+		name		"background"
+		rect		0 0 WINDOW_WIDTH 480
+		style		WINDOW_STYLE_FILLED
+		background	"ui/assets/fadebox.tga"
+		backcolor	0 0 0 0
+		visible		1
+		decoration
+	}
+
+	SUBWINDOWBLACK( SUBWINDOW_X, SUBWINDOW_Y, SUBWINDOW_WIDTH, SUBWINDOW_HEIGHT, _("ACCESSIBILITY MODE UPDATE") )
+	CVARLABEL( SUBWINDOW_X+4, SUBWINDOW_Y+18, (SUBWINDOW_WIDTH)-8, 60, "eta_updateMessage", .2, ITEM_ALIGN_CENTER, .5*((SUBWINDOW_WIDTH)-8), 10 )
+
+	BUTTON( SUBWINDOW_X+6, SUBWINDOW_Y+SUBWINDOW_HEIGHT-24, BUTTON_W, 18, _("DOWNLOAD"), .3, 14, close eta_update_offer ; uiScript accessibilityUpdateDownload )
+	BUTTON( SUBWINDOW_X+6+BUTTON_W+6, SUBWINDOW_Y+SUBWINDOW_HEIGHT-24, BUTTON_W, 18, _("LATER"), .3, 14, close eta_update_offer )
+}
+
+menuDef {
+	name		"eta_update_game"
+	visible		0
+	fullscreen	0
+	rect		WINDOW_X WINDOW_Y WINDOW_WIDTH WINDOW_HEIGHT
+	style		WINDOW_STYLE_FILLED
+	popup
+	modal
+
+	fadeClamp	0.5
+	fadeAmount  0.075
+
+	onOpen {
+		setitemcolor background backcolor 0 0 0 0 ;
+		fadein background
+	}
+
+	onESC {
+		close eta_update_game
+	}
+
+	itemDef {
+		name		"background"
+		rect		0 0 WINDOW_WIDTH 480
+		style		WINDOW_STYLE_FILLED
+		background	"ui/assets/fadebox.tga"
+		backcolor	0 0 0 0
+		visible		1
+		decoration
+	}
+
+	SUBWINDOWBLACK( SUBWINDOW_X, SUBWINDOW_Y, SUBWINDOW_WIDTH, SUBWINDOW_HEIGHT, _("UPDATE ET: LEGACY FIRST") )
+	CVARLABEL( SUBWINDOW_X+4, SUBWINDOW_Y+18, (SUBWINDOW_WIDTH)-8, 60, "eta_updateMessage", .2, ITEM_ALIGN_CENTER, .5*((SUBWINDOW_WIDTH)-8), 10 )
+
+	BUTTON( SUBWINDOW_X+6, SUBWINDOW_Y+SUBWINDOW_HEIGHT-24, BUTTON_W, 18, _("ET: LEGACY DOWNLOADS"), .3, 14, close eta_update_game ; uiScript accessibilityUpdateGamePage )
+	BUTTON( SUBWINDOW_X+6+BUTTON_W+6, SUBWINDOW_Y+SUBWINDOW_HEIGHT-24, BUTTON_W, 18, _("LATER"), .3, 14, close eta_update_game )
+}
+
+menuDef {
+	name		"eta_update_ready"
+	visible		0
+	fullscreen	0
+	rect		WINDOW_X WINDOW_Y WINDOW_WIDTH WINDOW_HEIGHT
+	style		WINDOW_STYLE_FILLED
+	popup
+	modal
+
+	fadeClamp	0.5
+	fadeAmount  0.075
+
+	onOpen {
+		setitemcolor background backcolor 0 0 0 0 ;
+		fadein background
+	}
+
+	onESC {
+		close eta_update_ready ;
+		uiScript accessibilityUpdateWhenQuit
+	}
+
+	itemDef {
+		name		"background"
+		rect		0 0 WINDOW_WIDTH 480
+		style		WINDOW_STYLE_FILLED
+		background	"ui/assets/fadebox.tga"
+		backcolor	0 0 0 0
+		visible		1
+		decoration
+	}
+
+	SUBWINDOWBLACK( SUBWINDOW_X, SUBWINDOW_Y, SUBWINDOW_WIDTH, SUBWINDOW_HEIGHT, _("UPDATE DOWNLOADED") )
+	CVARLABEL( SUBWINDOW_X+4, SUBWINDOW_Y+18, (SUBWINDOW_WIDTH)-8, 60, "eta_updateMessage", .2, ITEM_ALIGN_CENTER, .5*((SUBWINDOW_WIDTH)-8), 10 )
+
+	BUTTON( SUBWINDOW_X+6, SUBWINDOW_Y+SUBWINDOW_HEIGHT-24, BUTTON_W, 18, _("RESTART NOW"), .3, 14, close eta_update_ready ; uiScript accessibilityUpdateRestart )
+	BUTTON( SUBWINDOW_X+6+BUTTON_W+6, SUBWINDOW_Y+SUBWINDOW_HEIGHT-24, BUTTON_W, 18, _("WHEN I QUIT"), .3, 14, close eta_update_ready ; uiScript accessibilityUpdateWhenQuit )
+}

@@ -1,0 +1,120 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 9fe06c6..62d1d60 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4782,6 +4782,9 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 	   about - the player's own key, or the engine refusing to let them up. */
+ 	ETA_NarrateStanceChange();
+ 	ETA_NarrateObjectiveApproach();
++
++	/* Last, so everything above still sees the previous frame's totals. */
++	CG_AccessibilitySampleTotals();
+ #endif
+ 
+ 	if ( !cg.showGameView ) {
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index 1a0dbcf..61a72de 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -448,6 +448,61 @@ A new item was picked up this frame
+  * know is whether they are resupplied. It is the same number, from the
+  * same helper, that the status report gives.
+  */
++/**
++ * Reserve ammo and health as of the frame before this one.
++ *
++ * A pickup arrives with a new snapshot, and by the time the event is
++ * dispatched cg.snap->ps already holds what the server granted - the
++ * "before" is gone. Sampling the two numbers ourselves once a frame
++ * sidesteps the ordering question rather than trying to answer it.
++ */
++static int eta_previousReserve[MAX_WEAPONS];
++static int eta_previousHealth;
++static qboolean eta_havePrevious = qfalse;
++
++/**
++ * Records this frame's totals, to compare the next pickup against.
++ * Called once a frame from CG_DrawActive, after the narration has had
++ * its look at the old values.
++ */
++void CG_AccessibilitySampleTotals( void ) {
++	int i;
++
++	if ( !cg.snap ) {
++		eta_havePrevious = qfalse;
++		return;
++	}
++
++	for ( i = 0; i < MAX_WEAPONS; i++ ) {
++		eta_previousReserve[i] = cg.snap->ps.ammo[i];
++	}
++
++	eta_previousHealth = cg.snap->ps.stats[STAT_HEALTH];
++	eta_havePrevious = qtrue;
++}
++
++/**
++ * Rounds added to the player's reserve since the last frame. Only
++ * increases count: firing spends reserve and reloading moves it into the
++ * clip, and neither is a pickup. A pack tops up every weapon the player
++ * carries at once, so the increases are summed.
++ */
++static int ETA_ReserveGained( void ) {
++	int i, gained = 0;
++
++	if ( !eta_havePrevious ) {
++		return 0;
++	}
++
++	for ( i = 0; i < MAX_WEAPONS; i++ ) {
++		if ( cg.snap->ps.ammo[i] > eta_previousReserve[i] ) {
++			gained += cg.snap->ps.ammo[i] - eta_previousReserve[i];
++		}
++	}
++
++	return gained;
++}
++
+ static void ETA_NarrateItemPickup( int itemNum ) {
+ 	gitem_t *item = &bg_itemlist[itemNum];
+ 	char text[256];
+@@ -465,9 +520,27 @@ static void ETA_NarrateItemPickup( int itemNum ) {
+ 	ETA_Speech_Say( text );
+ 
+ 	if ( item->giType == IT_HEALTH ) {
++		int gained = eta_havePrevious ? cg.snap->ps.stats[STAT_HEALTH] - eta_previousHealth : 0;
++
++		/* Walking over a pack at full health is worth knowing about: it
++		   otherwise sounds exactly like one that healed you, and the pack
++		   is gone either way. */
++		if ( gained > 0 ) {
++			ETA_HudNarrator_SpeakGain( gained, qfalse );
++		} else {
++			ETA_HudNarrator_SpeakAlreadyFull();
++		}
++
+ 		ETA_HudNarrator_SpeakHealth( cg.snap->ps.stats[STAT_HEALTH] );
+ 	} else if ( item->giType == IT_AMMO || ( item->giType == IT_WEAPON && item->giTag == WP_AMMO ) ) {
+ 		int ammo, clips, akimboammo;
++		int gained = ETA_ReserveGained();
++
++		if ( gained > 0 ) {
++			ETA_HudNarrator_SpeakGain( gained, qtrue );
++		} else {
++			ETA_HudNarrator_SpeakAlreadyFull();
++		}
+ 
+ 		CG_PlayerAmmoValue( &ammo, &clips, &akimboammo );
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 4e4666b..f2df972 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2404,6 +2404,7 @@ typedef struct {
+ 
+ void CG_AccessibilityNarrateObjective( void );
+ const char *CG_AccessibilityWeaponName( weapon_t weap );
++void CG_AccessibilitySampleTotals( void );
+ extern vmCvar_t eta_objectiveCallouts;
+ 
+ qboolean ETA_MapObjectiveAt( const mapEntityData_t *mEnt, vec3_t origin, int *oidIndex );

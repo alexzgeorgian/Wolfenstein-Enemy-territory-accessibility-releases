@@ -1,0 +1,172 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index d23740d..263c182 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -5084,6 +5084,48 @@ static void ETA_AimInsert(etaAimTarget_t *list, int *count, int max, const etaAi
+ 		}
+ 	}
+ 
++	/* Full. The farthest thing goes - unless it is an objective: the
++	   tester found F miss the construction they were sent to build in a
++	   spot littered with weapons and packs, every one of them nearer, so
++	   the objective was the one left off. An objective takes the place of
++	   the farthest thing that is not one, and only another objective, or
++	   a nearer one, ever pushes one off. */
++	if (*count >= max && max > 0)
++	{
++		int victim = -1;
++
++		for (i = *count - 1; i >= 0; i--)
++		{
++			if (!list[i].objective)
++			{
++				victim = i;
++				break;
++			}
++		}
++
++		if (!add->objective)
++		{
++			if (victim < 0 || add->meters >= list[victim].meters)
++			{
++				return;
++			}
++		}
++		else if (victim < 0)
++		{
++			if (add->meters >= list[*count - 1].meters)
++			{
++				return;
++			}
++			victim = *count - 1;
++		}
++
++		for (i = victim; i < *count - 1; i++)
++		{
++			list[i] = list[i + 1];
++		}
++		(*count)--;
++	}
++
+ 	for (at = *count; at > 0 && list[at - 1].meters > add->meters; at--)
+ 	{
+ 		if (at < max)
+@@ -5416,7 +5458,8 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 			              es->eType == ET_EXPLOSIVE_INDICATOR ? "dynamite target"
+ 			              : (ours ? "to build" : "enemy construction")),
+ 			           sizeof(target.name));
+-			needSight = qfalse;
++			needSight        = qfalse;
++			target.objective = qtrue;
+ 			break;
+ 		}
+ 		case ET_CABINET_H:
+diff --git a/src/cgame/cg_loadpanel.c b/src/cgame/cg_loadpanel.c
+index 778c1bf..0432447 100644
+--- a/src/cgame/cg_loadpanel.c
++++ b/src/cgame/cg_loadpanel.c
+@@ -809,6 +809,16 @@ static int      eta_loadingBriefingUntil;   /* in trap_Milliseconds */
+ static int      eta_loadingMilestones;      /* bit per quarter said */
+ static qboolean eta_loadingReadySaid = qtrue;
+ 
++#ifdef __APPLE__
++/* On a Mac the briefing waits for the end of the load. The game does the
++   whole load without once letting the Mac's own event loop run, and
++   VoiceOver and the system voice both need it to: what was said as the
++   load began was lost, and the tester never heard which map it was. So
++   on a Mac the briefing is kept, and said with "Loaded" once the load is
++   over. */
++static char eta_loadingBriefing[ETA_MAX_SPEECH_TEXT_LENGTH + 1];
++#endif
++
+ static void ETA_LoadingSay(const char *text)
+ {
+ 	ETA_Speech_Say(text);
+@@ -845,8 +855,13 @@ void CG_AccessibilityLoadingBegin(void)
+ 
+ 	CG_AccessibilitySpeakableText(description, briefing, sizeof(briefing));
+ 
+-	Com_sprintf(text, sizeof(text), "Loading %s. %s. %s", name,
+-	            CG_LoadPanel_GameTypeName(cgs.gametype), briefing);
++	Com_sprintf(text, sizeof(text),
++#ifdef __APPLE__
++	            "Loaded. %s. %s. %s",
++#else
++	            "Loading %s. %s. %s",
++#endif
++	            name, CG_LoadPanel_GameTypeName(cgs.gametype), briefing);
+ 
+ 	/* Too long for one line: end at the last whole sentence that fits,
+ 	   rather than lose the lot. */
+@@ -860,13 +875,24 @@ void CG_AccessibilityLoadingBegin(void)
+ 		}
+ 	}
+ 
++#ifdef __APPLE__
++	Q_strncpyz(eta_loadingBriefing, text, sizeof(eta_loadingBriefing));
++	eta_loadingBriefingUntil = 0;
++#else
+ 	ETA_LoadingSay(text);
++#endif
+ }
+ 
+ void CG_AccessibilityLoadingProgress(void)
+ {
+ 	int used, expected, percent, quarter;
+ 
++#ifdef __APPLE__
++	/* Figures said mid-load would be lost on a Mac like the briefing,
++	   and come out late, all at once. */
++	return;
++#endif
++
+ 	if (eta_loadingReadySaid)
+ 	{
+ 		return;
+@@ -918,6 +944,34 @@ void CG_AccessibilityLoadingFrame(void)
+ 
+ 	eta_loadingReadySaid = qtrue;
+ 
++#ifdef __APPLE__
++	/* "Loaded", the map and its briefing, kept from the start of the
++	   load; the team and class key follows as a line of its own. */
++	if (eta_loadingBriefing[0])
++	{
++		ETA_Speech_Say(eta_loadingBriefing);
++		eta_loadingBriefing[0] = '\0';
++		if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR)
++		{
++			return;
++		}
++		trap_Key_KeysForBinding("openlimbomenu", &key1, &key2);
++		if (key1 != -1)
++		{
++			char keyName[32];
++
++			trap_Key_KeynumToStringBuf(key1, keyName, sizeof(keyName));
++			Q_strupr(keyName);
++			ETA_Speech_Say(va("Press %s to choose your team and class", keyName));
++		}
++		else
++		{
++			ETA_Speech_Say("Open the limbo menu to choose your team and class");
++		}
++		return;
++	}
++#endif
++
+ 	if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR)
+ 	{
+ 		ETA_Speech_Say("Loaded");
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1f1e405..1b944ef 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3501,6 +3501,7 @@ typedef struct
+ 	qboolean ladder;    ///< one of the map's ladders: F turns to it, and climbs it there
+ 	qboolean locked;    ///< nothing to press: a door this player cannot open, an enemy not yet a body; said, never pressed at
+ 	qboolean stairs;    ///< a flight of stairs: F turns to its foot, and there up or down it
++	qboolean objective; ///< a construction or a dynamite target: kept on F's list however crowded
+ 	vec3_t   along;     ///< stairs: a point up or down the flight from its foot, at eye height
+ 	qboolean uniform;   ///< an enemy body: use is held until its uniform is taken
+ } etaAimTarget_t;

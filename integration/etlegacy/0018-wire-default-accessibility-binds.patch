@@ -1,0 +1,79 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index d48037f..45b0d52 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8739,6 +8739,66 @@ static void UI_RunCinematicFrame(int handle)
+ 	trap_CIN_RunCinematic(handle);
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief The keys the accessibility commands need, installed once if the
++ * player has not already spoken for them.
++ *
++ * The commands the mod registers are worth nothing until a key reaches them,
++ * and the only way a key reached them before was a config file copied by
++ * hand into a second folder. A tester who installed the mod correctly and
++ * skipped that step got a working mod with a dead status key and no way to
++ * tell the difference from a broken one.
++ *
++ * F5, F6 and F8 are free in the engine's own default.cfg - it binds F1-F4,
++ * F7 and F11-F12 and leaves these three alone - so claiming them takes
++ * nothing away from a default install.
++ *
++ * Two rules keep this from being a key thief. An existing binding is never
++ * replaced, whatever it is, so a player who uses F5 for something else keeps
++ * it. And eta_bindsInstalled, archived, records that this ran, so a player
++ * who deliberately unbinds one does not find it back next launch.
++ */
++static void UI_AccessibilityInstallBinds(void)
++{
++	static const struct
++	{
++		int        key;
++		const char *command;
++	} binds[] =
++	{
++		{ K_F5, "accessibilityStatus"     },
++		{ K_F6, "accessibilityRepeat"     },
++		{ K_F8, "accessibilityStopSpeech" }
++	};
++
++	vmCvar_t installed;
++	int      i;
++
++	trap_Cvar_Register(&installed, "eta_bindsInstalled", "0", CVAR_ARCHIVE);
++
++	if (installed.integer)
++	{
++		return;
++	}
++
++	for (i = 0; i < (int)(sizeof(binds) / sizeof(binds[0])); i++)
++	{
++		char current[MAX_STRING_CHARS];
++
++		current[0] = '\0';
++		trap_Key_GetBindingBuf(binds[i].key, current, sizeof(current));
++
++		if (current[0] == '\0')
++		{
++			trap_Key_SetBinding(binds[i].key, binds[i].command);
++		}
++	}
++
++	trap_Cvar_Set("eta_bindsInstalled", "1");
++}
++#endif
++
+ /**
+  * @brief _UI_Init
+  * @param[in] etLegacyClient
+@@ -8945,6 +9005,7 @@ void UI_Init(int etLegacyClient, int clientVersion)
+ 	   relying on cgame's. */
+ 	ETA_AccessibilityRuntime_Init();
+ 	ETA_MenuNarrator_Init();
++	UI_AccessibilityInstallBinds();
+ #endif
+ }
+ 

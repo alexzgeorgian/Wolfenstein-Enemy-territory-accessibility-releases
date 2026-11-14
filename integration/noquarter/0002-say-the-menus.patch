@@ -1,0 +1,1364 @@
+diff --git a/src/ui/ui_atoms.c b/src/ui/ui_atoms.c
+index 7da5ad7..550cdad 100644
+--- a/src/ui/ui_atoms.c
++++ b/src/ui/ui_atoms.c
+@@ -8,6 +8,10 @@
+  */
+ #include "ui_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "menu/menu_narrator.h"
++#endif
++
+ // these are here so the functions in q_shared.c can link
+ #ifndef UI_HARD_LINKED
+ 
+@@ -106,6 +110,35 @@ qboolean UI_ConsoleCommand( int realTime ) {
+ 		UI_ShowPostGame(qtrue);
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Reached two ways. In the main menu there is no match, so the cgame
++	   is not there to answer and the name the player bound comes here.
++	   In a menu opened mid-match the cgame is asked first and hands it
++	   over under the "...MenuItem" / "...Menu" name, which only this
++	   module answers. */
++	if ( Q_stricmp( cmd, "accessibilityRepeat" ) == 0 ||
++		 Q_stricmp( cmd, "accessibilityRepeatMenuItem" ) == 0 ) {
++		/* A menu item is said once, when focus lands on it. Without this
++		   a name lost under another sound is only heard again by moving
++		   away and back - and on a menu of one item, not at all. */
++		ETA_MenuNarrator_RepeatCurrentItem();
++		return qtrue;
++	}
++
++	if ( Q_stricmp( cmd, "accessibilityStopSpeech" ) == 0 ||
++		 Q_stricmp( cmd, "accessibilityStopSpeechMenu" ) == 0 ) {
++		ETA_MenuNarrator_Stop();
++		return qtrue;
++	}
++
++	/* Not a key a player binds: how resetting the controls puts the
++	   mod's keys back, queued behind the config that took them away. */
++	if ( Q_stricmp( cmd, "accessibilityInstallBinds" ) == 0 ) {
++		UI_AccessibilityInstallBinds();
++		return qtrue;
++	}
++#endif
++
+ 	if ( Q_stricmp (cmd, "ui_report") == 0 ) {
+ 		UI_Report();
+ 		return qtrue;
+diff --git a/src/ui/ui_local.h b/src/ui/ui_local.h
+index 3d9100e..1a9db4e 100644
+--- a/src/ui/ui_local.h
++++ b/src/ui/ui_local.h
+@@ -90,6 +90,13 @@ extern vmCvar_t ui_autoredirect;
+ // ui_main.c
+ //
+ void			UI_Report();
++
++#ifdef FEATURE_ACCESSIBILITY
++// [Accessibility]: offers the mod's keys, skipping any generation the player
++// has already been offered. At start-up, and from the console command of the
++// same name after the controls are reset to defaults.
++void UI_AccessibilityInstallBinds( void );
++#endif
+ void			UI_Load();
+ void			UI_LoadMenus(const char *menuFile, qboolean reset);
+ void			_UI_SetActiveMenu( uiMenuCommand_t menu );
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 8b29899..d5bc4c7 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -41,6 +41,15 @@ static int uitogamecode[] = {4,6,2,3,1,5,7};
+ // NERVE - SMF - enabled for multiplayer
+ static void UI_StartServerRefresh(qboolean full);
+ static void UI_StopServerRefresh( void );
++
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/accessibility_runtime.h"
++#include "menu/menu_narrator.h"
++
++static void UI_AccessibilityConsoleFrame( void );
++static void UI_AccessibilitySay( const char *text );
++static const char *UI_AccessibilityFeederRow( int feederID, int index );
++#endif
+ static void UI_DoServerRefresh( void );
+ static void UI_FeederSelection(float feederID, int index);
+ qboolean UI_FeederSelectionClick( itemDef_t *item );
+@@ -944,6 +953,10 @@ void _UI_Refresh( int realtime ) {
+ 	// OSP - blackout if speclocked
+ 	if(ui_blackout.integer > 0) UI_FillRect(-10, -10, 650, 490, colorBlack);
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	UI_AccessibilityConsoleFrame();
++#endif
++
+ 	if (Menu_Count() > 0) {
+ 		// paint all the menus
+ 		Menu_PaintAll();
+@@ -974,6 +987,11 @@ _UI_Shutdown
+ */
+ void _UI_Shutdown( void ) {
+ 	trap_LAN_SaveCachedServers();
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_MenuNarrator_Shutdown();
++	ETA_AccessibilityRuntime_Shutdown();
++#endif
+ }
+ 
+ char *defaultMenu = NULL;
+@@ -4100,6 +4118,9 @@ void UI_RunMenuScript(char **args) {
+ 				Menus_CloseAll();
+ 				Menus_ActivateByName( "backgroundmusic", qtrue );
+ 				Menus_ActivateByName( "main_opener", qtrue);
++#ifdef FEATURE_ACCESSIBILITY
++				UI_AccessibilitySay( "Main menu" );
++#endif
+ 			}
+ 		}
+ 		else if (Q_stricmp(name, "ServerSort") == 0) {
+@@ -5026,6 +5047,15 @@ void UI_RunMenuScript(char **args) {
+ 
+ 			trap_Cvar_Set( "ui_handedness", "" );
+ 			trap_Cvar_Set( "ui_profile_mousePitch", "" );
++#ifdef FEATURE_ACCESSIBILITY
++			/* Resetting the controls execs the stock config, which drops
++			   every key the mod added - and the installer, having offered
++			   them once, would never offer them again. Forgetting which
++			   were offered brings them back, queued behind the exec so the
++			   config does not overwrite them. */
++			trap_Cvar_Set( "eta_bindsInstalled", "0" );
++			trap_Cmd_ExecuteText( EXEC_APPEND, "accessibilityInstallBinds\n" );
++#endif
+ 		}
+ 		else if( Q_stricmp( name, "profileCvarsReset" ) == 0 ) {
+ 			trap_Cvar_Set( "ui_handedness", "" );
+@@ -5034,6 +5064,16 @@ void UI_RunMenuScript(char **args) {
+ 		else if( Q_stricmp( name, "defaultControls" ) == 0 ) {
+ 			int ui_handedness = trap_Cvar_VariableValue( "ui_handedness" );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++			/* Resetting the controls execs the stock config, which drops
++			   every key the mod added - and the installer, having offered
++			   them once, would never offer them again. Forgetting which
++			   were offered brings them back, queued behind the exec so the
++			   config does not overwrite them. */
++			trap_Cvar_Set( "eta_bindsInstalled", "0" );
++			trap_Cmd_ExecuteText( EXEC_APPEND, "accessibilityInstallBinds\n" );
++#endif
++
+ 			if( ui_handedness == 0 ) {
+ 				// exec default.cfg
+ 				trap_Cmd_ExecuteText( EXEC_APPEND, "exec default.cfg\n");
+@@ -6751,6 +6791,25 @@ void _UI_Init( qboolean inGameLoad ) {
+ 
+ 	trap_AddCommand( "campaign" );
+ 	trap_AddCommand( "listcampaigns" );
++
++#ifdef FEATURE_ACCESSIBILITY
++	/* Without this the menus narrate into a void: the speech backends do
++	   nothing until their Init has found NVDA or made the SAPI voice. The
++	   ui links its own copy of the library, so it needs its own Init. */
++	ETA_AccessibilityRuntime_Init();
++	ETA_MenuNarrator_Init();
++	UI_AccessibilityInstallBinds();
++	ETA_FeederRowText = UI_AccessibilityFeederRow;
++
++	/* The first name of each pair is what a player binds. The second is
++	   how the cgame hands the request over when a menu is open mid-match;
++	   it is not a name the cgame answers, or it would come straight back. */
++	trap_AddCommand( "accessibilityRepeat" );
++	trap_AddCommand( "accessibilityRepeatMenuItem" );
++	trap_AddCommand( "accessibilityStopSpeech" );
++	trap_AddCommand( "accessibilityStopSpeechMenu" );
++	trap_AddCommand( "accessibilityInstallBinds" );
++#endif
+ #ifdef HW_BAN
+ 	trap_AddCommand( "hwguid" );
+ 	trap_AddCommand( "hwinfo" );
+@@ -6875,6 +6934,9 @@ void _UI_SetActiveMenu( uiMenuCommand_t menu ) {
+ 			else {
+ 				Menus_ActivateByName( "main_opener", qtrue );
+ 			}
++#ifdef FEATURE_ACCESSIBILITY
++			UI_AccessibilitySay( "No Quarter. Main menu" );
++#endif
+ 
+ 			trap_Cvar_VariableStringBuffer("com_errorMessage", buf, sizeof(buf));
+ 
+@@ -6962,6 +7024,9 @@ void _UI_SetActiveMenu( uiMenuCommand_t menu ) {
+ 			Menu_SetFeederSelection( NULL, FEEDER_PLAYER_LIST, 0, NULL );
+ 			Menus_CloseAll();
+ 			Menus_ActivateByName( "ingame_main", qtrue );
++#ifdef FEATURE_ACCESSIBILITY
++			UI_AccessibilitySay( "In-game menu" );
++#endif
+ 			return;
+ 
+ 		// NERVE - SMF
+@@ -7634,6 +7699,14 @@ static void UI_StopServerRefresh( void ) {
+ 						count - uiInfo.serverStatus.numDisplayServers);
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* On screen the list simply fills; said, the refresh would end in
++	   silence. How many it found, and how many are playing. */
++	UI_AccessibilitySay( va( "%i %s, %i %s", uiInfo.serverStatus.numDisplayServers,
++							 uiInfo.serverStatus.numDisplayServers == 1 ? "server" : "servers",
++							 uiInfo.serverStatus.numPlayersOnServers,
++							 uiInfo.serverStatus.numPlayersOnServers == 1 ? "player" : "players" ) );
++#endif
+ }
+ 
+ /*
+@@ -7803,3 +7876,181 @@ void UI_ShowHWInfo_f() {
+ }
+ 
+ #endif // HW_BAN
++
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * [Accessibility]: what the menus say beyond the controls themselves.
++ * Ported from the mod's ET: Legacy menus.
++ */
++
++/* Said over whatever was being said: where the player is, or an answer. */
++static void UI_AccessibilitySay( const char *text ) {
++	ETA_MenuNarrator_OnConfirmDialogShown( text );
++}
++
++/*
++ * Says when the console opens or closes over the menus. A tester opened
++ * it by mistake and never knew. Only before a match: in one, the cgame's
++ * own speech covers it.
++ */
++static void UI_AccessibilityConsoleFrame( void ) {
++	static qboolean wasOpen;
++	uiClientState_t cstate;
++	qboolean open = ( trap_Key_GetCatcher() & KEYCATCH_CONSOLE ) ? qtrue : qfalse;
++
++	trap_GetClientState( &cstate );
++	if( cstate.connState == CA_ACTIVE ) {
++		wasOpen = open;
++		return;
++	}
++
++	if( open == wasOpen ) {
++		return;
++	}
++	wasOpen = open;
++
++	UI_AccessibilitySay( open ? "Console open. The same key closes it" : "Console closed" );
++}
++
++/*
++ * The keys the accessibility commands need, offered once if the player
++ * has not already spoken for them. A command is worth nothing until a
++ * key reaches it.
++ *
++ * Two rules keep this from being a key thief. A key already bound is
++ * left alone, so a player who uses F6 for something else keeps it. And
++ * eta_bindsInstalled, archived, records the newest generation offered,
++ * so a key deliberately unbound does not come back - while rows added
++ * by a later version, with a newer generation, still are offered.
++ *
++ * F6 and F8 are free in the stock default.cfg, which binds F1 to F4, F7
++ * and F11 and F12. The match's own keys join this table as the mod's
++ * match speech comes to No Quarter.
++ */
++void UI_AccessibilityInstallBinds( void ) {
++	static const struct {
++		int			key;
++		const char	*command;
++		int			generation;
++	} binds[] = {
++		{ K_F6, "accessibilityRepeat",     1 },
++		{ K_F8, "accessibilityStopSpeech", 1 },
++	};
++
++	vmCvar_t installed;
++	int i;
++	int newest = 0;
++
++	trap_Cvar_Register( &installed, "eta_bindsInstalled", "0", CVAR_ARCHIVE );
++
++	for( i = 0; i < (int)( sizeof( binds ) / sizeof( binds[0] ) ); i++ ) {
++		char current[MAX_STRING_CHARS];
++
++		if( binds[i].generation > newest ) {
++			newest = binds[i].generation;
++		}
++
++		if( binds[i].generation <= installed.integer ) {
++			continue;
++		}
++
++		current[0] = '\0';
++		trap_Key_GetBindingBuf( binds[i].key, current, sizeof( current ) );
++
++		if( current[0] == '\0' ) {
++			trap_Key_SetBinding( binds[i].key, binds[i].command );
++		}
++	}
++
++	if( newest > installed.integer ) {
++		trap_Cvar_Set( "eta_bindsInstalled", va( "%i", newest ) );
++	}
++
++	/* The controls pages keep their own copy of which key each command is
++	   on, read at start-up. Left stale, the first key changed there would
++	   write that copy back over what was just installed. */
++	Controls_GetConfig();
++}
++
++/*
++ * A server, as said when the server list is on it. On screen a row is
++ * five columns and a row of small icons - a padlock, crossed guns and
++ * the rest - and none of it was said. This is the row in words: name,
++ * map, game type, players, ping, and each icon it shows.
++ */
++static const char *UI_AccessibilityFeederRow( int feederID, int index ) {
++	static char row[512];
++	char info[MAX_STRING_CHARS];
++	char name[256];
++	const char *type = NULL;
++	const char *humans;
++	int ping, game, clients, maxclients, i;
++
++	if( feederID != FEEDER_SERVERS || index < 0 || index >= uiInfo.serverStatus.numDisplayServers ) {
++		return NULL;
++	}
++
++	trap_LAN_GetServerInfo( ui_netSource.integer, uiInfo.serverStatus.displayServers[index], info, sizeof( info ) );
++	ping = atoi( Info_ValueForKey( info, "ping" ) );
++	if( ping <= 0 ) {
++		Com_sprintf( row, sizeof( row ), "%s, not answering yet", Info_ValueForKey( info, "addr" ) );
++		return row;
++	}
++
++	Q_strncpyz( name, Info_ValueForKey( info, "hostname" ), sizeof( name ) );
++	Q_CleanStr( name );
++
++	game = atoi( Info_ValueForKey( info, "gametype" ) );
++	for( i = 0; i < uiInfo.numGameTypes; i++ ) {
++		if( uiInfo.gameTypes[i].gtEnum == game ) {
++			type = uiInfo.gameTypes[i].gameType;
++			break;
++		}
++	}
++
++	clients = atoi( Info_ValueForKey( info, "clients" ) );
++	maxclients = atoi( Info_ValueForKey( info, "sv_maxclients" ) );
++	humans = Info_ValueForKey( info, "humans" );
++
++	Com_sprintf( row, sizeof( row ), "%s, map %s, %s, ", name[0] ? name : Info_ValueForKey( info, "addr" ),
++				 Info_ValueForKey( info, "mapname" ), type ? type : "unknown game type" );
++
++	/* Only a server that says how many are human tells them from bots. */
++	if( humans[0] && clients > atoi( humans ) ) {
++		int h = atoi( humans );
++
++		Q_strcat( row, sizeof( row ), va( "%i %s and %i %s of %i, ", h, h == 1 ? "player" : "players",
++										  clients - h, clients - h == 1 ? "bot" : "bots", maxclients ) );
++	} else {
++		Q_strcat( row, sizeof( row ), va( "%i of %i players, ", clients, maxclients ) );
++	}
++	Q_strcat( row, sizeof( row ), va( "ping %i", ping ) );
++
++	/* The icons, in the order the screen draws them. */
++	if( atoi( Info_ValueForKey( info, "needpass" ) ) ) {
++		Q_strcat( row, sizeof( row ), ", password" );
++	}
++	if( atoi( Info_ValueForKey( info, "friendlyFire" ) ) & 1 ) {
++		Q_strcat( row, sizeof( row ), ", friendly fire" );
++	}
++	if( atoi( Info_ValueForKey( info, "maxlives" ) ) ) {
++		Q_strcat( row, sizeof( row ), ", max lives" );
++	}
++	if( atoi( Info_ValueForKey( info, "punkbuster" ) ) ) {
++		Q_strcat( row, sizeof( row ), ", PunkBuster" );
++	}
++	if( atoi( Info_ValueForKey( info, "weaprestrict" ) ) < 100 ) {
++		Q_strcat( row, sizeof( row ), ", weapon limits" );
++	}
++	if( atoi( Info_ValueForKey( info, "g_antilag" ) ) ) {
++		Q_strcat( row, sizeof( row ), ", anti-lag" );
++	}
++	if( atoi( Info_ValueForKey( info, "balancedteams" ) ) ) {
++		Q_strcat( row, sizeof( row ), ", balanced teams" );
++	}
++	if( !Q_stricmp( Info_ValueForKey( info, "game" ), "nq" ) ) {
++		Q_strcat( row, sizeof( row ), ", No Quarter" );
++	}
++	return row;
++}
++#endif
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 21a5d1a..50a878f 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -9,6 +9,11 @@
+ #include "ui_shared.h"
+ #include "ui_local.h"	// For CS settings/retrieval
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/runtime_guard.h"
++#include "menu/menu_narrator.h"
++#endif
++
+ #define SCROLL_TIME_START				500
+ #define SCROLL_TIME_ADJUST				150
+ #define SCROLL_TIME_ADJUSTOFFSET		40
+@@ -1993,6 +1998,9 @@ void Script_SetEditFocus( itemDef_t *item, qboolean *bAbort, char **args ) {
+ 			editItem->cursorPos = 0;
+ 			g_editingField = qtrue;
+ 			g_editItem = editItem;
++#ifdef FEATURE_ACCESSIBILITY
++			ETA_MenuItem_NarrateTextFieldValue(editItem);
++#endif
+ 
+ 		}
+ 	}
+@@ -2163,6 +2171,481 @@ qboolean Item_SettingShow(itemDef_t *item, qboolean fVoteTest)
+ 	return(qtrue);
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * [Accessibility]: what the menus say, worked out from the controls
++ * themselves. Ported from the mod's ET: Legacy menus, where every rule
++ * here was asked for by a tester playing without sight.
++ */
++
++/* Defined further down, beside the drawing that uses them too. */
++const char *Item_Multi_Setting(itemDef_t *item);
++char* BindingFromName(const char *cvar);
++
++/*
++ * The name to speak for one character, for the few where the character
++ * itself says nothing useful out loud. A space spoken as " " is silence,
++ * which sounds the same as the key not having registered. The rest are
++ * the ones a server address or a player name is made of.
++ */
++static const char *ETA_SpokenPunctuation(char c) {
++	switch (c) {
++		case ' ':  return "space";
++		case '.':  return "dot";
++		case '-':  return "dash";
++		case '_':  return "underscore";
++		case ':':  return "colon";
++		case '/':  return "slash";
++		case '\\': return "backslash";
++		case '@':  return "at";
++		default:   return NULL;
++	}
++}
++
++/* One character of a field, as said. The menus here hold one byte per
++   character, so the index is the byte. */
++static qboolean ETA_CharacterAt(const char *text, int index, char *out, size_t size) {
++	const char *named;
++
++	out[0] = '\0';
++
++	if (!text || index < 0 || index >= (int)strlen(text) || size < 2) {
++		return qfalse;
++	}
++
++	named = ETA_SpokenPunctuation(text[index]);
++	if (named) {
++		Q_strncpyz(out, named, size);
++	} else {
++		out[0] = text[index];
++		out[1] = '\0';
++	}
++	return qtrue;
++}
++
++/*
++ * Fields whose contents speech must not read out. No Quarter draws every
++ * field in clear, but a password read aloud in a room is a different
++ * exposure from one shown on a monitor its owner is sitting at, so speech
++ * is more careful than the screen without changing what the screen does.
++ */
++static qboolean ETA_IsSecretField(itemDef_t *item) {
++	static const char *secret[] = {
++		"password", "g_password", "rconPassword", "sv_privatePassword",
++		"refereePassword", "ui_password", "shoutcastPassword"
++	};
++	int i;
++
++	if (!item || !item->cvar) {
++		return qfalse;
++	}
++	for (i = 0; i < (int)(sizeof(secret) / sizeof(secret[0])); i++) {
++		if (!Q_stricmp(item->cvar, secret[i])) {
++			return qtrue;
++		}
++	}
++	return qfalse;
++}
++
++/* The text a field is holding right now. These menus edit the cvar
++   itself as the player types, so reading it is always current. A
++   password is said as its length and never its content. */
++static void ETA_TextFieldValue(itemDef_t *item, char *out, size_t size) {
++	char raw[1024];
++
++	out[0] = '\0';
++
++	if (!item || !item->cvar) {
++		return;
++	}
++
++	memset(raw, 0, sizeof(raw));
++	DC->getCVarString(item->cvar, raw, sizeof(raw));
++
++	if (ETA_IsSecretField(item)) {
++		int len = (int)strlen(raw);
++
++		Com_sprintf(out, size, len == 1 ? "%i character" : "%i characters", len);
++		return;
++	}
++
++	Q_strncpyz(out, raw, size);
++}
++
++/*
++ * Which key or keys a control is on, said out loud: the string the
++ * screen draws beside the label, so the two cannot disagree. For nothing
++ * bound No Quarter draws the command in brackets, "[+sprint]", which
++ * read aloud is a command name nobody asked for.
++ */
++static const char *ETA_BindingText(itemDef_t *item) {
++	const char *binding = BindingFromName(item->cvar);
++
++	if (!binding || !*binding || binding[0] == '[' || binding[0] == '(') {
++		return "not bound";
++	}
++
++	return binding;
++}
++
++/*
++ * Controls the game draws with no words of their own. The server
++ * browser's filters are a row of three-way boxes beside small icons - a
++ * padlock, a crossed-out gun - and on screen the icon is the label; to a
++ * screen reader there was nothing. Each gets a name here, from what its
++ * own tooltip says it does.
++ */
++static const struct {
++	const char *cvar;
++	const char *label;
++} eta_unlabelled[] = {
++	{ "ui_browserShowEmptyOrFull",          "Empty or full servers"      },
++	{ "ui_browserShowPasswordProtected",    "Password protected servers" },
++	{ "ui_browserShowFriendlyFire",         "Friendly fire"              },
++	{ "ui_browserShowMaxlives",             "Max lives"                  },
++	{ "ui_browserShowWeaponsRestricted",    "Weapon limits"              },
++	{ "ui_browserShowAntilag",              "Anti-lag"                   },
++	{ "ui_browserShowTeamBalanced",         "Team balance"               },
++	{ "ui_browserShowPunkBuster",           "PunkBuster"                 },
++	{ "ui_browserNQonly",                   "No Quarter servers"         },
++};
++
++/* Set by the ui module: a fuller line for a row of a list it feeds - a
++   server's name, map, players and what its icons show - than the columns
++   on screen give. NULL in the cgame. */
++const char *(*ETA_FeederRowText)(int feederID, int index) = NULL;
++
++/* What a control is called when spoken: its text, or the name given
++   above, or for a list what it lists. May be NULL. */
++const char *ETA_MenuItem_Label(itemDef_t *item) {
++	int i;
++
++	if (!item) {
++		return NULL;
++	}
++	if (item->text && item->text[0]) {
++		return item->text;
++	}
++	if (item->cvar) {
++		for (i = 0; i < (int)(sizeof(eta_unlabelled) / sizeof(eta_unlabelled[0])); i++) {
++			if (!Q_stricmp(item->cvar, eta_unlabelled[i].cvar)) {
++				return eta_unlabelled[i].label;
++			}
++		}
++	}
++	if (item->type == ITEM_TYPE_LISTBOX) {
++		switch ((int)item->special) {
++			case FEEDER_SERVERS:
++				return "Server list";
++			case FEEDER_SERVERSTATUS:
++				return "Server details";
++			default:
++				return "List";
++		}
++	}
++	return NULL;
++}
++
++/* The same, never NULL: what a change of value is said against. */
++static const char *ETA_MenuItem_SpokenLabel(itemDef_t *item) {
++	const char *label = ETA_MenuItem_Label(item);
++
++	return label ? label : "Control";
++}
++
++/*
++ * One row of a list, as said: the row's columns, or the fuller line the
++ * ui gives for it, then where it is in the list. The lists were silent:
++ * arrowing through the servers or a server's details said nothing, so a
++ * list was only any use to someone who could see it.
++ */
++static qboolean ETA_ListBoxRowText(itemDef_t *item, char *out, size_t outSize) {
++	listBoxDef_t *listPtr = (listBoxDef_t*)item->typeData;
++	int count = DC->feederCount(item->special);
++	int index = listPtr ? listPtr->cursorPos : 0;
++	const char *custom;
++	char cell[256];
++
++	out[0] = '\0';
++	if (count <= 0) {
++		return qfalse;
++	}
++	if (index < 0 || index >= count) {
++		index = 0;
++	}
++
++	custom = ETA_FeederRowText ? ETA_FeederRowText((int)item->special, index) : NULL;
++	if (custom && custom[0]) {
++		Q_strncpyz(out, custom, outSize);
++	} else {
++		int columns = (listPtr && listPtr->numColumns > 0) ? listPtr->numColumns : 1;
++		int j;
++
++		for (j = 0; j < columns; j++) {
++			qhandle_t images[MAX_LB_COLUMNS];
++			int numImages = 0;
++			const char *text = DC->feederItemText(item->special, index, j, images, &numImages);
++
++			if (!text || !text[0]) {
++				continue;
++			}
++			Q_strncpyz(cell, text, sizeof(cell));
++			Q_CleanStr(cell);
++			if (!cell[0]) {
++				continue;
++			}
++			if (out[0]) {
++				Q_strcat(out, outSize, ", ");
++			}
++			Q_strcat(out, outSize, cell);
++		}
++	}
++
++	Q_strcat(out, outSize, va(", %i of %i", index + 1, count));
++	return qtrue;
++}
++
++/* Says the row a list is on, after the keyboard moved it. */
++void ETA_MenuItem_NarrateListRow(itemDef_t *item) {
++	char row[ETA_MAX_MENU_TEXT_LENGTH];
++	menuDef_t *parent;
++
++	if (!item || item->type != ITEM_TYPE_LISTBOX || !ETA_ListBoxRowText(item, row, sizeof(row))) {
++		return;
++	}
++	parent = (menuDef_t*)item->parent;
++	ETA_MenuNarrator_OnFocusChanged(parent ? parent->window.name : NULL, row);
++}
++
++/*
++ * What one setting currently reads as. The single place each type's
++ * value is turned into words, so arriving at a row and changing it cannot
++ * drift apart and describe the same setting differently.
++ */
++const char *ETA_MenuItem_SettingText(itemDef_t *item) {
++	if (!item || !item->cvar) {
++		return NULL;
++	}
++
++	switch (item->type) {
++		case ITEM_TYPE_MULTI:
++			/* Item_Multi_Setting reads the choices without asking
++			   whether there are any. */
++			return item->typeData ? Item_Multi_Setting(item) : NULL;
++		case ITEM_TYPE_TRICHECKBOX:
++		{
++			/* The browser's filter boxes name their states "Only show..."
++			   and the like: said without the dots, and a box with no names
++			   said for what its three states do. */
++			static char setting[ETA_MAX_MENU_TEXT_LENGTH];
++			const char *named = item->typeData ? Item_Multi_Setting(item) : NULL;
++			size_t length;
++
++			if (!named || !named[0]) {
++				float value = DC->getCVarValue(item->cvar);
++
++				return value == 1.f ? "only these" : (value == 2.f ? "all but these" : "off");
++			}
++			Q_strncpyz(setting, named, sizeof(setting));
++			length = strlen(setting);
++			while (length > 0 && setting[length - 1] == '.') {
++				setting[--length] = '\0';
++			}
++			return setting;
++		}
++		case ITEM_TYPE_CHECKBOX:
++			/* A bit-flag box is one bit of its cvar, as it is drawn. */
++			if (item->bitflag) {
++				return ((int)DC->getCVarValue(item->cvar) & item->bitflag) ? "On" : "Off";
++			}
++			return (DC->getCVarValue(item->cvar) != 0.f) ? "On" : "Off";
++		case ITEM_TYPE_YESNO:
++			return (DC->getCVarValue(item->cvar) != 0.f) ? "Yes" : "No";
++		case ITEM_TYPE_SLIDER:
++			return va("%.2f", DC->getCVarValue(item->cvar));
++		case ITEM_TYPE_BIND:
++			/* A controls list that reads out only "Crouch" says the
++			   control exists and nothing about it. The key is the row. */
++			return ETA_BindingText(item);
++		default:
++			return NULL;
++	}
++}
++
++/* The last thing said about a text box, so the two paths that announce
++   one - arriving at it, and starting to edit it - do not both say it. */
++static char eta_lastFieldText[ETA_MAX_MENU_TEXT_LENGTH + 1];
++
++#define ETA_TEXTFIELD(type) ((type) == ITEM_TYPE_EDITFIELD || (type) == ITEM_TYPE_NUMERICFIELD)
++
++/*
++ * What a menu item says when focus lands on it: its label, and its
++ * setting when it has one. A text box's label alone is useless - "Name"
++ * does not say what the name currently is - so it says its contents too.
++ */
++const char *ETA_MenuItem_FocusText(itemDef_t *item) {
++	static char text[ETA_MAX_MENU_TEXT_LENGTH + 1];
++	char value[ETA_MAX_MENU_TEXT_LENGTH];
++
++	if (!item) {
++		return NULL;
++	}
++
++	if (item->type == ITEM_TYPE_LISTBOX) {
++		char row[ETA_MAX_MENU_TEXT_LENGTH];
++
++		eta_lastFieldText[0] = '\0';
++		if (!ETA_ListBoxRowText(item, row, sizeof(row))) {
++			Com_sprintf(text, sizeof(text), "%s, empty", ETA_MenuItem_SpokenLabel(item));
++			return text;
++		}
++		Com_sprintf(text, sizeof(text), "%s, %s", ETA_MenuItem_SpokenLabel(item), row);
++		return text;
++	}
++
++	if (!ETA_TEXTFIELD(item->type)) {
++		const char *setting = ETA_MenuItem_SettingText(item);
++		const char *label = ETA_MenuItem_Label(item);
++
++		eta_lastFieldText[0] = '\0';
++
++		if (!label || !setting || !*setting) {
++			return label;
++		}
++
++		Com_sprintf(text, sizeof(text), "%s, %s", label, setting);
++		return text;
++	}
++
++	ETA_TextFieldValue(item, value, sizeof(value));
++
++	Com_sprintf(text, sizeof(text), "%s, %s, %s",
++				ETA_MenuItem_Label(item) ? ETA_MenuItem_Label(item) : "Text box",
++				item->type == ITEM_TYPE_NUMERICFIELD ? "number box" : "edit box",
++				value[0] ? value : "empty");
++
++	Q_strncpyz(eta_lastFieldText, text, sizeof(eta_lastFieldText));
++	return text;
++}
++
++/*
++ * Speaks what one keypress did to a text box. Called after the menu has
++ * handled the key, with what the field held before it, so what is said
++ * is the difference actually made: a key the field refused - a letter in
++ * a number box, a character past the limit - says nothing.
++ */
++void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int beforeCursor) {
++	char after[ETA_MAX_MENU_TEXT_LENGTH];
++	char spoken[64];
++	int beforeLen, afterLen;
++
++	if (!item || !ETA_TEXTFIELD(item->type) || !before) {
++		return;
++	}
++
++	ETA_TextFieldValue(item, after, sizeof(after));
++
++	beforeLen = (int)strlen(before);
++	afterLen = (int)strlen(after);
++
++	if (!strcmp(before, after)) {
++		/* The cursor moving is read out, because stepping through a field
++		   character by character is how it gets checked without sight. */
++		if (item->cursorPos == beforeCursor || ETA_IsSecretField(item)) {
++			return;
++		}
++
++		if (ETA_CharacterAt(after, item->cursorPos, spoken, sizeof(spoken))) {
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), spoken);
++		} else {
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), "end");
++		}
++		return;
++	}
++
++	/* The contents changed, so arriving here later reads it out again. */
++	eta_lastFieldText[0] = '\0';
++
++	if (ETA_IsSecretField(item)) {
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), afterLen < beforeLen ? "deleted" : "star");
++		return;
++	}
++
++	if (afterLen < beforeLen) {
++		/* Backspace takes the character before the old cursor, Delete the
++		   one at it; which happened is read off where the cursor ended up. */
++		int removed = (item->cursorPos < beforeCursor) ? beforeCursor - 1 : beforeCursor;
++
++		if (!ETA_CharacterAt(before, removed, spoken, sizeof(spoken))) {
++			Q_strncpyz(spoken, "character", sizeof(spoken));
++		}
++
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item),
++										afterLen == 0 ? va("%s deleted, empty", spoken)
++													  : va("%s deleted", spoken));
++		return;
++	}
++
++	if (afterLen - beforeLen > 1) {
++		/* More than one character at once is a paste, read whole. */
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), after[0] ? after : "empty");
++		return;
++	}
++
++	/* One character typed, or one overwritten in overstrike mode. */
++	if (ETA_CharacterAt(after, item->cursorPos - 1, spoken, sizeof(spoken))) {
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), spoken);
++	}
++}
++
++/* Reads a text box's whole contents, for starting to edit one. */
++void ETA_MenuItem_NarrateTextFieldValue(itemDef_t *item) {
++	char previous[ETA_MAX_MENU_TEXT_LENGTH + 1];
++
++	if (!item || !ETA_TEXTFIELD(item->type)) {
++		return;
++	}
++
++	Q_strncpyz(previous, eta_lastFieldText, sizeof(previous));
++
++	if (!Q_stricmp(previous, ETA_MenuItem_FocusText(item))) {
++		return;
++	}
++
++	ETA_MenuNarrator_OnFocusChanged(item->parent ? ((menuDef_t*)item->parent)->window.name : NULL,
++									ETA_MenuItem_FocusText(item));
++}
++
++/*
++ * Can this key act on this item? The settings controls asked two things:
++ * does the item have focus, and is the mouse cursor inside it. From the
++ * keyboard the second can never be true - arrowing onto an item does not
++ * move the cursor - so Enter on a highlighted setting did nothing. A
++ * mouse button keeps the cursor test; every other key is the keyboard,
++ * whose place is wherever the focus is.
++ */
++static qboolean ETA_ItemTakesKey(itemDef_t *item, int key) {
++	if (!(item->window.flags & WINDOW_HASFOCUS)) {
++		return qfalse;
++	}
++
++	if (key == K_MOUSE1 || key == K_MOUSE2 || key == K_MOUSE3
++		|| key == K_MOUSE4 || key == K_MOUSE5) {
++		return Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory);
++	}
++
++	return qtrue;
++}
++
++/* Reads as the line it replaces, so the feature-off build is No
++   Quarter's own text. */
++#define ETA_ITEM_REACHED(item, key) ETA_ItemTakesKey(item, key)
++#else
++#define ETA_ITEM_REACHED(item, key) \
++	(Rect_ContainsPoint(&(item)->window.rect, DC->cursorx, DC->cursory) \
++	 && (item)->window.flags & WINDOW_HASFOCUS)
++#endif
++
+ // will optionaly set focus to this item
+ qboolean Item_SetFocus(itemDef_t *item, float x, float y) {
+ 	int i;
+@@ -2230,6 +2713,12 @@ qboolean Item_SetFocus(itemDef_t *item, float x, float y) {
+ 		DC->startLocalSound( *sfx, CHAN_LOCAL_SOUND );
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	if (item->window.flags & WINDOW_HASFOCUS) {
++		ETA_MenuNarrator_OnFocusChanged(parent ? parent->window.name : NULL, ETA_MenuItem_FocusText(item));
++	}
++#endif
++
+ 	for (i = 0; i < parent->itemCount; ++i) {
+ 		if (parent->items[i] == item) {
+ 			parent->cursorItem = i;
+@@ -2586,7 +3075,7 @@ qboolean Item_ListBox_HandleKey( itemDef_t *item, int key, qboolean down, qboole
+ 	listBoxDef_t *listPtr = (listBoxDef_t*)item->typeData;
+ 	int count = DC->feederCount(item->special);
+ 
+-	if( force || (Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory) && item->window.flags & WINDOW_HASFOCUS)) {
++	if( force || ETA_ITEM_REACHED(item, key) ) {
+ 
+ 		int max = Item_ListBox_MaxScroll(item);
+ 		int viewmax;
+@@ -2816,8 +3305,7 @@ qboolean Item_ListBox_HandleKey( itemDef_t *item, int key, qboolean down, qboole
+ 
+ qboolean Item_CheckBox_HandleKey( itemDef_t *item, int key )
+ {
+-	if( Rect_ContainsPoint( &item->window.rect, DC->cursorx, DC->cursory ) &&
+-		item->window.flags & WINDOW_HASFOCUS && item->cvar )
++	if( ETA_ITEM_REACHED(item, key) && item->cvar )
+ 	{
+ 		if( key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3 ) {
+ 			// ATVI Wolfenstein Misc #462
+@@ -2845,7 +3333,7 @@ qboolean Item_CheckBox_HandleKey( itemDef_t *item, int key )
+ }
+ 
+ qboolean Item_YesNo_HandleKey(itemDef_t *item, int key) {
+-	if (Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory) && item->window.flags & WINDOW_HASFOCUS && item->cvar) {
++	if (ETA_ITEM_REACHED(item, key) && item->cvar) {
+ 
+ 		if (key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3) {
+ 			// ATVI Wolfenstein Misc #462
+@@ -2937,7 +3425,7 @@ const char *Item_Multi_Setting(itemDef_t *item)
+ qboolean Item_Multi_HandleKey(itemDef_t *item, int key) {
+ 	multiDef_t *multiPtr = (multiDef_t*)item->typeData;
+ 	if (multiPtr) {
+-		if (Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory) && item->window.flags & WINDOW_HASFOCUS && item->cvar) {
++		if (ETA_ITEM_REACHED(item, key) && item->cvar) {
+ 			if (key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3) {
+ 				int current = Item_Multi_FindCvarByValue(item);
+ 				int max = Item_Multi_CountSettings(item);
+@@ -3104,6 +3592,9 @@ qboolean Item_TextField_HandleKey(itemDef_t *item, int key) {
+ 			newItem = Menu_SetNextCursorItem(item->parent);
+ 			if (newItem && (newItem->type == ITEM_TYPE_EDITFIELD || newItem->type == ITEM_TYPE_NUMERICFIELD)) {
+ 				g_editItem = newItem;
++#ifdef FEATURE_ACCESSIBILITY
++				ETA_MenuItem_NarrateTextFieldValue(newItem);
++#endif
+ 			}
+ 		}
+ 
+@@ -3111,6 +3602,9 @@ qboolean Item_TextField_HandleKey(itemDef_t *item, int key) {
+ 			newItem = Menu_SetPrevCursorItem(item->parent);
+ 			if (newItem && (newItem->type == ITEM_TYPE_EDITFIELD || newItem->type == ITEM_TYPE_NUMERICFIELD)) {
+ 				g_editItem = newItem;
++#ifdef FEATURE_ACCESSIBILITY
++				ETA_MenuItem_NarrateTextFieldValue(newItem);
++#endif
+ 			}
+ 		}
+ 
+@@ -3288,8 +3782,101 @@ void Item_StopCapture(itemDef_t *item) {
+ 
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * How far one arrow-key press moves a slider. A slider takes its value
++ * from where in the bar the pointer was clicked, so the keyboard needs a
++ * behaviour invented for it: twenty presses end to end, snapped to a
++ * step of 1, 2 or 5 so every value said is one a person would choose -
++ * 0.05 for a volume, a whole 1 for a sensitivity.
++ */
++static float ETA_SliderStep(float minVal, float maxVal) {
++	float range = maxVal - minVal;
++	float magnitude = 1.0f;
++	float raw;
++	int guard;
++
++	if (!(range > 0.0f)) {
++		return 0.0f;
++	}
++
++	raw = range / 20.0f;
++
++	for (guard = 0; raw >= 10.0f && guard < 64; guard++) {
++		raw /= 10.0f;
++		magnitude *= 10.0f;
++	}
++
++	for (guard = 0; raw < 1.0f && guard < 64; guard++) {
++		raw *= 10.0f;
++		magnitude /= 10.0f;
++	}
++
++	if (raw < 1.5f) {
++		raw = 1.0f;
++	} else if (raw < 3.5f) {
++		raw = 2.0f;
++	} else if (raw < 7.5f) {
++		raw = 5.0f;
++	} else {
++		raw = 10.0f;
++	}
++
++	return raw * magnitude;
++}
++
++/* One arrow-key press. Snaps to the nearest step first, so a slider the
++   mouse left at 0.3712 moves along steps the player can predict. */
++static float ETA_SliderNudge(editFieldDef_t *editDef, float current, int direction) {
++	float step = ETA_SliderStep(editDef->minVal, editDef->maxVal);
++	float rung;
++	float value;
++
++	if (step <= 0.0f) {
++		return current;
++	}
++
++	rung = (float)floor((double)((current - editDef->minVal) / step) + 0.5);
++	value = editDef->minVal + (rung + (float)direction) * step;
++
++	if (value < editDef->minVal) {
++		value = editDef->minVal;
++	}
++	if (value > editDef->maxVal) {
++		value = editDef->maxVal;
++	}
++
++	return value;
++}
++#endif
++
+ qboolean Item_Slider_HandleKey(itemDef_t *item, int key, qboolean down)
+ {
++#ifdef FEATURE_ACCESSIBILITY
++	/* The keyboard path, ahead of the pointer test below, which the
++	   keyboard can never pass. Left and right are free here: the menu
++	   moves on up, down and tab. */
++	if (item->window.flags & WINDOW_HASFOCUS && item->cvar
++		&& (key == K_LEFTARROW || key == K_KP_LEFTARROW
++			|| key == K_RIGHTARROW || key == K_KP_RIGHTARROW)) {
++		editFieldDef_t *editDef = item->typeData;
++
++		if (editDef) {
++			float current = DC->getCVarValue(item->cvar);
++			float nudged = ETA_SliderNudge(editDef, current,
++										   (key == K_LEFTARROW || key == K_KP_LEFTARROW) ? -1 : 1);
++
++			if (nudged != current) {
++				DC->setCVar(item->cvar, va("%f", nudged));
++			}
++
++			/* Answered even when the value did not move, so the end of
++			   the range says itself rather than going silent. */
++			return qtrue;
++		}
++	}
++#endif
++
+ 	if (item->window.flags & WINDOW_HASFOCUS && item->cvar && Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory)) {
+ 
+ 		if (key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3) {
+@@ -3597,11 +4184,71 @@ static rectDef_t *Item_CorrectedTextRect(itemDef_t *item) {
+ 	return &rect;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * Has the mouse cursor moved since the last time this was asked? Exact,
++ * not a tolerance: the question is whether the player touched the mouse
++ * at all. The first call answers yes, so a menu opened with the cursor
++ * over something still picks that up once.
++ */
++static qboolean ETA_MenuCursorMoved(float x, float y) {
++	static qboolean seen = qfalse;
++	static float lastX, lastY;
++
++	if (seen && lastX == x && lastY == y) {
++		return qfalse;
++	}
++
++	seen = qtrue;
++	lastX = x;
++	lastY = y;
++
++	return qtrue;
++}
++
++/* A setting the key just changed, said once the item's own action has
++   run - a bit-flag box only changes its value in that action. A list
++   says the row it moved to. */
++static void ETA_NarrateItemChange(itemDef_t *item, int listBefore) {
++	switch (item->type) {
++		case ITEM_TYPE_LISTBOX:
++		{
++			listBoxDef_t *listPtr = (listBoxDef_t*)item->typeData;
++
++			if (listPtr && listPtr->cursorPos != listBefore) {
++				ETA_MenuItem_NarrateListRow(item);
++			}
++			break;
++		}
++		case ITEM_TYPE_CHECKBOX:
++		case ITEM_TYPE_TRICHECKBOX:
++		case ITEM_TYPE_YESNO:
++		case ITEM_TYPE_MULTI:
++		case ITEM_TYPE_SLIDER:
++			if (item->cvar) {
++				ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), ETA_MenuItem_SettingText(item));
++			}
++			break;
++		default:
++			break;
++	}
++}
++#endif
++
+ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down) {
+ 	int i;
+ 	itemDef_t *item = NULL;
+ 	qboolean inHandler = qfalse;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* A cursor that has not moved must not take focus off the item the
++	   keyboard put it on. This re-runs mouse-move focus on every key from
++	   wherever the cursor sits; played from the keyboard alone the cursor
++	   never moves, so it won every time, and on the server list Enter
++	   joined whichever server sat under the parked cursor. The cursor
++	   still wins the moment it actually moves. */
++	if (ETA_MenuCursorMoved(DC->cursorx, DC->cursory))
++#endif
+ 	Menu_HandleMouseMove( menu, DC->cursorx, DC->cursory );		// NERVE - SMF - fix for focus not resetting on unhidden buttons
+ 
+ 	if (inHandler) {
+@@ -3624,12 +4271,31 @@ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down) {
+ 	}
+ 
+ 	if (g_editingField && down) {
++#ifdef FEATURE_ACCESSIBILITY
++		/* The field before the key, compared with what the menu left
++		   behind: what is said is the change actually made. */
++		char eta_before[ETA_MAX_MENU_TEXT_LENGTH];
++		itemDef_t *eta_field = g_editItem;
++		int eta_beforeCursor = eta_field ? eta_field->cursorPos : 0;
++
++		eta_before[0] = '\0';
++		if (eta_field && eta_field->cvar) {
++			DC->getCVarString(eta_field->cvar, eta_before, sizeof(eta_before));
++		}
++#endif
+ 		if (!Item_TextField_HandleKey(g_editItem, key)) {
+ 			g_editingField = qfalse;
+ 			g_editItem = NULL;
+ 			inHandler = qfalse;
+ 			return;
+-		} else if (key == K_MOUSE1 || key == K_MOUSE2 || key == K_MOUSE3) {
++		}
++#ifdef FEATURE_ACCESSIBILITY
++		/* Tab and the arrows move to another field, which says itself. */
++		if (eta_field && eta_field == g_editItem) {
++			ETA_MenuItem_NarrateTextFieldKey(eta_field, eta_before, eta_beforeCursor);
++		}
++#endif
++		if (key == K_MOUSE1 || key == K_MOUSE2 || key == K_MOUSE3) {
+ 			g_editingField = qfalse;
+ 			g_editItem = NULL;
+ 			Display_MouseMove(NULL, DC->cursorx, DC->cursory);
+@@ -3664,8 +4330,15 @@ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down) {
+ 	}
+ 
+ 	if (item != NULL) {
++#ifdef FEATURE_ACCESSIBILITY
++		int eta_listBefore = (item->type == ITEM_TYPE_LISTBOX && item->typeData)
++							 ? ((listBoxDef_t*)item->typeData)->cursorPos : 0;
++#endif
+ 		if (Item_HandleKey(item, key, down)) {
+ 			Item_Action(item);
++#ifdef FEATURE_ACCESSIBILITY
++			ETA_NarrateItemChange(item, eta_listBefore);
++#endif
+ 			inHandler = qfalse;
+ 			return;
+ 		}
+@@ -3749,6 +4422,9 @@ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down) {
+ 					item->cursorPos = 0;
+ 					g_editingField = qtrue;
+ 					g_editItem = item;
++#ifdef FEATURE_ACCESSIBILITY
++					ETA_MenuItem_NarrateTextFieldValue(item);
++#endif
+ 				}
+ 				else
+ 					Item_Action( item );
+@@ -3787,6 +4463,9 @@ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down) {
+ 						item->cursorPos = 0;
+ 						g_editingField = qtrue;
+ 						g_editItem = item;
++#ifdef FEATURE_ACCESSIBILITY
++						ETA_MenuItem_NarrateTextFieldValue(item);
++#endif
+ 
+ 						// see elsewhere for venomous comment about this particular piece of "functionality"
+ 						//%	DC->setOverstrikeMode(qtrue);
+@@ -4591,10 +5270,23 @@ qboolean Item_Bind_HandleKey(itemDef_t *item, int key, qboolean down)
+ {
+ 	int                     id;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Focus is enough, as for every other control: arrowing onto a row
++	   does not move the cursor. */
++	if (ETA_ItemTakesKey(item, key) && !g_waitingForKey) {
++#else
+ 	if (Rect_ContainsPoint(&item->window.rect, DC->cursorx, DC->cursory) && !g_waitingForKey) {
++#endif
+ 		if (down && (key == K_MOUSE1 || key == K_ENTER)) {
+ 				g_waitingForKey = qtrue;
+ 				g_bindItem = item;
++#ifdef FEATURE_ACCESSIBILITY
++				/* The screen marks the row to say it is listening. With
++				   nothing said, whatever the player presses next becomes
++				   the binding without their knowing. */
++				ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item),
++												"press the key to use. Escape to cancel, backspace to clear");
++#endif
+ 				return qtrue;
+ 		} else {
+ 				return qfalse;
+@@ -4613,6 +5305,12 @@ qboolean Item_Bind_HandleKey(itemDef_t *item, int key, qboolean down)
+ 			case K_ESCAPE:
+ 					g_waitingForKey = qfalse;
+ 					g_bindItem = NULL;
++#ifdef FEATURE_ACCESSIBILITY
++					/* What the control is on now, which after a cancel is
++					   the one thing the player cannot infer. */
++					ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item),
++													va("unchanged, %s", ETA_BindingText(item)));
++#endif
+ 					return qtrue;
+ 			case K_BACKSPACE:
+ 					id = BindingIDFromName(item->cvar);
+@@ -4634,6 +5332,9 @@ qboolean Item_Bind_HandleKey(itemDef_t *item, int key, qboolean down)
+ 					Controls_SetConfig(qtrue);
+ 					g_waitingForKey = qfalse;
+ 					g_bindItem = NULL;
++#ifdef FEATURE_ACCESSIBILITY
++					ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), "not bound");
++#endif
+ 					return qtrue;
+ 
+ 			case '`':
+@@ -4714,6 +5415,13 @@ qboolean Item_Bind_HandleKey(itemDef_t *item, int key, qboolean down)
+ 	g_waitingForKey = qfalse;
+ 	g_bindItem = NULL;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Read back from the row, not the key pressed: the key may have been
++	   taken off another control or added as a second one. */
++	ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item),
++									va("bound to %s", ETA_BindingText(item)));
++#endif
++
+ 	return qtrue;
+ }
+ 
+@@ -5383,6 +6091,49 @@ qboolean Menus_AnyFullScreenVisible() {
+   return qfalse;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * Reads a popup as it opens: every text item it declares, title and
++ * body, in order. A message held in a cvar - the error popup's
++ * com_errorMessage - is read the way the screen draws it.
++ */
++static void ETA_NarrateConfirmDialog(menuDef_t *menu) {
++	char text[ETA_MAX_MENU_TEXT_LENGTH + 1];
++	int i;
++
++	text[0] = '\0';
++
++	for (i = 0; i < menu->itemCount; i++) {
++		itemDef_t *item = menu->items[i];
++		const char *itemText = NULL;
++		char cvarText[256];
++
++		if (item->type != ITEM_TYPE_TEXT) {
++			continue;
++		}
++
++		if (item->text) {
++			itemText = item->text;
++		} else if (item->cvar) {
++			DC->getCVarString(item->cvar, cvarText, sizeof(cvarText));
++			itemText = cvarText;
++		}
++
++		if (itemText && *itemText) {
++			if (text[0] != '\0') {
++				Q_strcat(text, sizeof(text), " ");
++			}
++			Q_strcat(text, sizeof(text), itemText);
++		}
++	}
++
++	if (text[0] != '\0') {
++		Q_CleanStr(text);
++		ETA_MenuNarrator_OnConfirmDialogShown(text);
++	}
++}
++#endif
++
+ menuDef_t *Menus_ActivateByName(const char *p, qboolean modalStack) {
+ 	int i;
+ 	menuDef_t *m = NULL;
+@@ -5392,6 +6143,11 @@ menuDef_t *Menus_ActivateByName(const char *p, qboolean modalStack) {
+ 		if (Q_stricmp(Menus[i].window.name, p) == 0) {
+ 			m = &Menus[i];
+ 			Menus_Activate(m);
++#ifdef FEATURE_ACCESSIBILITY
++			if (m->window.flags & WINDOW_POPUP) {
++				ETA_NarrateConfirmDialog(m);
++			}
++#endif
+ 			if (modalStack && m->window.flags & WINDOW_MODAL) {
+ 				if (modalMenuCount >= MAX_MODAL_MENUS)
+ 					Com_Error(ERR_DROP, "MAX_MODAL_MENUS exceeded\n");
+diff --git a/src/ui/ui_shared.h b/src/ui/ui_shared.h
+index a475a7b..698b39b 100644
+--- a/src/ui/ui_shared.h
++++ b/src/ui/ui_shared.h
+@@ -481,6 +481,17 @@ void Item_Init(itemDef_t *item);
+ void Menu_PostParse(menuDef_t *menu);
+ menuDef_t *Menu_GetFocused();
+ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down);
++
++#ifdef FEATURE_ACCESSIBILITY
++// [Accessibility]: what a control says, from ui_shared.c, for the ui and cgame menus
++const char *ETA_MenuItem_SettingText(itemDef_t *item);
++const char *ETA_MenuItem_FocusText(itemDef_t *item);
++const char *ETA_MenuItem_Label(itemDef_t *item);
++void ETA_MenuItem_NarrateListRow(itemDef_t *item);
++extern const char *(*ETA_FeederRowText)(int feederID, int index);
++void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int beforeCursor);
++void ETA_MenuItem_NarrateTextFieldValue(itemDef_t *item);
++#endif
+ void Menu_HandleMouseMove(menuDef_t *menu, float x, float y);
+ void Menu_ScrollFeeder(menuDef_t *menu, int feeder, qboolean down);
+ qboolean Float_Parse(char **p, float *f);

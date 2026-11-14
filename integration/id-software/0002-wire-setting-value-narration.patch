@@ -1,0 +1,74 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 370c79a..a749182 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -3154,10 +3154,20 @@ qboolean Item_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 	case ITEM_TYPE_RADIOBUTTON:
+ 		return qfalse;
+ 		break;
+-	case ITEM_TYPE_CHECKBOX:
+ 	case ITEM_TYPE_TRICHECKBOX:
+ 		return Item_CheckBox_HandleKey( item, key );
+ 		break;
++	case ITEM_TYPE_CHECKBOX:
++	{
++		qboolean changed = Item_CheckBox_HandleKey( item, key );
++#ifdef FEATURE_ACCESSIBILITY
++		if ( changed && item->cvar ) {
++			ETA_MenuNarrator_OnValueChanged( item->text, ( DC->getCVarValue( item->cvar ) != 0.f ) ? "On" : "Off" );
++		}
++#endif
++		return changed;
++		break;
++	}
+ 	case ITEM_TYPE_EDITFIELD:
+ 	case ITEM_TYPE_NUMERICFIELD:
+ 		//return Item_TextField_HandleKey(item, key);
+@@ -3170,11 +3180,27 @@ qboolean Item_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 		return Item_ListBox_HandleKey( item, key, down, qfalse );
+ 		break;
+ 	case ITEM_TYPE_YESNO:
+-		return Item_YesNo_HandleKey( item, key );
++	{
++		qboolean changed = Item_YesNo_HandleKey( item, key );
++#ifdef FEATURE_ACCESSIBILITY
++		if ( changed && item->cvar ) {
++			ETA_MenuNarrator_OnValueChanged( item->text, ( DC->getCVarValue( item->cvar ) != 0.f ) ? "Yes" : "No" );
++		}
++#endif
++		return changed;
+ 		break;
++	}
+ 	case ITEM_TYPE_MULTI:
+-		return Item_Multi_HandleKey( item, key );
++	{
++		qboolean changed = Item_Multi_HandleKey( item, key );
++#ifdef FEATURE_ACCESSIBILITY
++		if ( changed ) {
++			ETA_MenuNarrator_OnValueChanged( item->text, Item_Multi_Setting( item ) );
++		}
++#endif
++		return changed;
+ 		break;
++	}
+ 	case ITEM_TYPE_OWNERDRAW:
+ 		return Item_OwnerDraw_HandleKey( item, key );
+ 		break;
+@@ -3182,8 +3208,16 @@ qboolean Item_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 		return Item_Bind_HandleKey( item, key, down );
+ 		break;
+ 	case ITEM_TYPE_SLIDER:
+-		return Item_Slider_HandleKey( item, key, down );
++	{
++		qboolean changed = Item_Slider_HandleKey( item, key, down );
++#ifdef FEATURE_ACCESSIBILITY
++		if ( changed && item->cvar ) {
++			ETA_MenuNarrator_OnValueChanged( item->text, va( "%.2f", DC->getCVarValue( item->cvar ) ) );
++		}
++#endif
++		return changed;
+ 		break;
++	}
+ 		//case ITEM_TYPE_IMAGE:
+ 		//  Item_Image_Paint(item);
+ 		//  break;

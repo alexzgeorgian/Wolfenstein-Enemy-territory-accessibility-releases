@@ -1,0 +1,124 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 87b20b0..5fee5f0 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -1979,6 +1979,28 @@ qboolean Item_SettingShow( itemDef_t *item, qboolean fVoteTest ) {
+ 
+ 
+ // will optionaly set focus to this item
++#ifdef FEATURE_ACCESSIBILITY
++/* Which key or keys a control is on, said out loud.
++
++   The engine already renders this for the eye beside the label, so this
++   borrows that string rather than assembling one that could disagree
++   with what everybody else is looking at. The one substitution is for
++   nothing being bound: the engine draws "(???)", which is clear on a
++   screen and is three question marks to a screen reader. */
++/* Defined further down, beside the drawing that uses it too. */
++char* BindingFromName( const char *cvar );
++
++static const char *ETA_BindingText( itemDef_t *item ) {
++	const char *binding = BindingFromName( item->cvar );
++
++	if ( !binding || !*binding || binding[0] == '(' ) {
++		return "not bound";
++	}
++
++	return binding;
++}
++#endif
++
+ qboolean Item_SetFocus( itemDef_t *item, float x, float y ) {
+ 	int i;
+ 	itemDef_t *oldFocus;
+@@ -2047,7 +2069,16 @@ qboolean Item_SetFocus( itemDef_t *item, float x, float y ) {
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	if ( item->window.flags & WINDOW_HASFOCUS ) {
+-		ETA_MenuNarrator_OnFocusChanged( parent ? parent->window.name : NULL, item->text );
++		const char *spoken = item->text;
++
++		/* A controls list that reads out only "Crouch" tells a player the
++		   control exists and nothing about it. The key it is on is the
++		   entire content of the row. */
++		if ( item->type == ITEM_TYPE_BIND && item->cvar && item->text ) {
++			spoken = va( "%s, %s", item->text, ETA_BindingText( item ) );
++		}
++
++		ETA_MenuNarrator_OnFocusChanged( parent ? parent->window.name : NULL, spoken );
+ 	}
+ #endif
+ 
+@@ -4746,10 +4777,29 @@ qboolean Item_Bind_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 	int id;
+ 	int i;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Focus is enough. The rectangle test alone can never be satisfied
++	   from the keyboard: arrowing onto a row does not move the cursor.
++	   Written out rather than through ETA_ITEM_REACHED because this row,
++	   unlike the others, never asked for focus at all - so the
++	   feature-off text stays exactly the engine's own. */
++	if ( ETA_ItemTakesKey( item, key ) && !g_waitingForKey ) {
++#else
+ 	if ( Rect_ContainsPoint( &item->window.rect, DC->cursorx, DC->cursory ) && !g_waitingForKey ) {
++#endif
+ 		if ( down && ( key == K_MOUSE1 || key == K_ENTER ) ) {
+ 			g_waitingForKey = qtrue;
+ 			g_bindItem = item;
++
++#ifdef FEATURE_ACCESSIBILITY
++			/* The screen turns the row red to say it is listening. With
++			   nothing said, a player presses Enter, hears silence, and has
++			   no way to know the game is waiting on them - and whatever
++			   they press next becomes the binding. */
++			ETA_MenuNarrator_OnValueChanged( item->text ? item->text : "Control",
++											 "press the key to use. Escape to cancel, backspace to clear" );
++#endif
++
+ 			return qtrue;
+ 		} else {
+ 			return qfalse;
+@@ -4769,6 +4819,14 @@ qboolean Item_Bind_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 		case K_ESCAPE:
+ 			g_waitingForKey = qfalse;
+ 			g_bindItem = NULL;
++
++#ifdef FEATURE_ACCESSIBILITY
++			/* Reads the binding back rather than just saying "cancelled":
++			   what the player wants to know is what the control is on now. */
++			ETA_MenuNarrator_OnValueChanged( item->text ? item->text : "Control",
++											 va( "unchanged, %s", ETA_BindingText( item ) ) );
++#endif
++
+ 			return qtrue;
+ 
+ 		case K_BACKSPACE:
+@@ -4780,6 +4838,11 @@ qboolean Item_Bind_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 			Controls_SetConfig( qtrue );
+ 			g_waitingForKey = qfalse;
+ 			g_bindItem = NULL;
++
++#ifdef FEATURE_ACCESSIBILITY
++			ETA_MenuNarrator_OnValueChanged( item->text ? item->text : "Control", "not bound" );
++#endif
++
+ 			return qtrue;
+ 
+ 		case '`':
+@@ -4832,6 +4895,15 @@ qboolean Item_Bind_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 	g_waitingForKey = qfalse;
+ 	g_bindItem = NULL;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Read back after the binding is applied, not from the key that was
++	   pressed: this code may have taken that key off another control, or
++	   added it as a second binding, or replaced both. Only the row itself
++	   knows how it ended up. */
++	ETA_MenuNarrator_OnValueChanged( item->text ? item->text : "Control",
++									 va( "bound to %s", ETA_BindingText( item ) ) );
++#endif
++
+ 	return qtrue;
+ }
+ 

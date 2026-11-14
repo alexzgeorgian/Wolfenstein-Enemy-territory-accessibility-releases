@@ -1,0 +1,56 @@
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index d387a48..81edc0e 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -40,6 +40,7 @@
+ #include "cg_local.h"
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++#include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
+ #endif
+ 
+@@ -125,6 +126,27 @@ void CG_DamageFeedback(int yawByte, int pitchByte, int damage)
+ 		cg.v_dmg_pitch = -kick * front;
+ 		cg.v_dmg_angle = angles[YAW];
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		// angles[YAW] here is already the damage bearing relative to the
++		// player's view (0 = front, 90 = right, 180 = behind, 270 = left) -
++		// the same value cg.v_dmg_angle above uses for the on-screen damage
++		// indicator, just reused rather than re-derived.
++		{
++			int directionDegrees = (int)angles[YAW];
++
++			if (directionDegrees < 0)
++			{
++				directionDegrees += 360;
++			}
++			else if (directionDegrees >= 360)
++			{
++				directionDegrees -= 360;
++			}
++
++			ETA_AudioCueSystem_PlayDamageDirectionCue(directionDegrees);
++		}
++#endif
++
+ 		vd->damageX = -left;
+ 		vd->damageY = front;
+ 	}
+@@ -334,6 +356,15 @@ void CG_CheckLocalSounds(playerState_t *ps, playerState_t *ops)
+ 			CG_PainEvent(&cg.predictedPlayerEntity, ps->stats[STAT_HEALTH], qfalse);
+ 
+ 			cg.painTime = cg.time;
++
++#ifdef FEATURE_ACCESSIBILITY
++			// same trigger as the pain sound above, but only while
++			// critically low, so routine chip damage doesn't cue every hit
++			if (ps->stats[STAT_HEALTH] <= 25)
++			{
++				ETA_AudioCueSystem_PlayLowHealthCue();
++			}
++#endif
+ 		}
+ 	}
+ }

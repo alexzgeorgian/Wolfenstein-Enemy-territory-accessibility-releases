@@ -1,0 +1,74 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 3631f18..1e8ad0c 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -2623,8 +2623,50 @@ qboolean Item_ListBox_HandleKey( itemDef_t *item, int key, qboolean down, qboole
+ 	return qfalse;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/* Can this key act on this item?
++
++   The settings controls all asked two questions before doing anything:
++   does this item have focus, and is the mouse cursor inside it. With a
++   hand on the mouse those are the same question - focus follows the
++   pointer. From the keyboard they come apart, and the second can never
++   be satisfied: arrowing onto an item sets its focus flag, but nothing
++   moves the cursor, which sits wherever it was last pushed.
++
++   So Enter on a highlighted "Game Type:" did nothing at all, and the
++   narration that announces a change could not fire because no change
++   happened. A tester found it trying to host a game. The same line
++   guards the checkboxes and the yes/no fields, which between them are
++   most of the settings in this game.
++
++   A mouse button keeps the cursor test exactly as it was: a click is an
++   act performed at a place, and clicking one control must never operate
++   another. Every other key is the keyboard, and the keyboard's place is
++   wherever the focus is. */
++static qboolean ETA_ItemTakesKey( itemDef_t *item, int key ) {
++	if ( !( item->window.flags & WINDOW_HASFOCUS ) ) {
++		return qfalse;
++	}
++
++	if ( key == K_MOUSE1 || key == K_MOUSE2 || key == K_MOUSE3
++		 || key == K_MOUSE4 || key == K_MOUSE5 ) {
++		return Rect_ContainsPoint( &item->window.rect, DC->cursorx, DC->cursory );
++	}
++
++	return qtrue;
++}
++
++/* Reads as the line it replaces, so each call site stays one condition
++   and the feature-off build is the engine's own text. */
++#define ETA_ITEM_REACHED( item, key ) ETA_ItemTakesKey( item, key )
++#else
++#define ETA_ITEM_REACHED( item, key ) \
++	( Rect_ContainsPoint( &( item )->window.rect, DC->cursorx, DC->cursory ) \
++	  && ( item )->window.flags & WINDOW_HASFOCUS )
++#endif
++
+ qboolean Item_CheckBox_HandleKey( itemDef_t *item, int key ) {
+-	if ( Rect_ContainsPoint( &item->window.rect, DC->cursorx, DC->cursory ) && item->window.flags & WINDOW_HASFOCUS && item->cvar ) {
++	if ( ETA_ITEM_REACHED( item, key ) && item->cvar ) {
+ 		if ( key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3 ) {
+ 			// ATVI Wolfenstein Misc #462
+ 			// added the flag to toggle via action script only
+@@ -2646,7 +2688,7 @@ qboolean Item_CheckBox_HandleKey( itemDef_t *item, int key ) {
+ }
+ 
+ qboolean Item_YesNo_HandleKey( itemDef_t *item, int key ) {
+-	if ( Rect_ContainsPoint( &item->window.rect, DC->cursorx, DC->cursory ) && item->window.flags & WINDOW_HASFOCUS && item->cvar ) {
++	if ( ETA_ITEM_REACHED( item, key ) && item->cvar ) {
+ 		if ( key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3 ) {
+ 			// ATVI Wolfenstein Misc #462
+ 			// added the flag to toggle via action script only
+@@ -2726,7 +2768,7 @@ const char *Item_Multi_Setting( itemDef_t *item ) {
+ qboolean Item_Multi_HandleKey( itemDef_t *item, int key ) {
+ 	multiDef_t *multiPtr = (multiDef_t*)item->typeData;
+ 	if ( multiPtr ) {
+-		if ( Rect_ContainsPoint( &item->window.rect, DC->cursorx, DC->cursory ) && item->window.flags & WINDOW_HASFOCUS && item->cvar ) {
++		if ( ETA_ITEM_REACHED( item, key ) && item->cvar ) {
+ 			if ( key == K_MOUSE1 || key == K_ENTER || key == K_MOUSE2 || key == K_MOUSE3 ) {
+ 				int current = Item_Multi_FindCvarByValue( item );
+ 				int max = Item_Multi_CountSettings( item );

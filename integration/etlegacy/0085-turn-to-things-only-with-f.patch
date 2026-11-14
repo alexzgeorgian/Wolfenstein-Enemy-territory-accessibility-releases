@@ -1,0 +1,188 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 36ba57d..0a8980e 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1784,14 +1784,10 @@ static void ETA_TurnStopStep(qboolean arrived)
+  *     they are, and the crosshair tick says the sights are on them. A turn
+  *     key, a snap, the map or a build being counted out stand it down, and
+  *     a turn by hand keeps it off for ETA_AIM_MANUAL_MS.
+- *   - Things to use, by themselves (eta_autoUse): the tester found the
+- *     key that turns to things worked, and asked for it to work the way
+- *     the enemy lock does - on its own. So stopping beside something that
+- *     can be used, with nothing under the crosshair, turns the view onto
+- *     it, quietly; the game's own use icon is named as it comes up, and F
+- *     uses it. Only within reach, only standing still - a view that swung
+- *     to every door walked past would walk the player into them - and
+- *     once per thing until the player has walked away from it.
++ *   - Things to use are turned to only when F is pressed. They were once
++ *     turned to by themselves, on stopping beside one; in matches that
++ *     swung the view away from where the tester was looking, and they
++ *     asked for it gone - F is enough.
+  *
+  * Pitch moves too: the keys look up and down as well as turn. The two
+  * key numbers for looking are the turn keys' neighbours, so the player's
+@@ -1807,9 +1803,6 @@ static void ETA_TurnStopStep(qboolean arrived)
+ #define ETA_AIM_AUTO_METERS 40.0f
+ #define ETA_USE_KEY         "994"
+ #define ETA_USE_REACH_METERS 2.5f
+-#define ETA_USE_STILL_MS     300
+-#define ETA_USE_STILL_SPEED  60.0f
+-#define ETA_USE_DONE_MAX     8
+ 
+ typedef enum
+ {
+@@ -1844,10 +1837,6 @@ static struct
+ 	qboolean pending;   /* use it on arriving */
+ 	qboolean held;      /* the player's key is still down */
+ 	int      releaseAt;
+-	int      stillSince;                    /* standing still since */
+-	int      done[ETA_USE_DONE_MAX];        /* turned to already ... */
+-	vec3_t   doneAt[ETA_USE_DONE_MAX];      /* ... from here */
+-	int      doneCount;
+ } eta_use;
+ 
+ static void ETA_UseKey(qboolean down)
+@@ -2442,98 +2431,6 @@ static void ETA_AutoLock(void)
+ 	eta_aim.started   = cg.time;
+ }
+ 
+-/**
+- * @brief Things to use, by themselves: standing still beside one with
+- * nothing under the crosshair turns the view onto it.
+- */
+-static void ETA_AutoUse(void)
+-{
+-	const playerState_t *ps = &cg.predictedPlayerState;
+-	etaAimTarget_t      list[ETA_AIM_MAX_TARGETS];
+-	vec3_t              flat;
+-	qboolean            hint;
+-	int                 count, i, j;
+-
+-	VectorSet(flat, ps->velocity[0], ps->velocity[1], 0.0f);
+-
+-	if (VectorLength(flat) > ETA_USE_STILL_SPEED)
+-	{
+-		eta_use.stillSince = 0;
+-	}
+-	else if (!eta_use.stillSince || cg.time < eta_use.stillSince)
+-	{
+-		eta_use.stillSince = cg.time;
+-	}
+-
+-	/* Walked away from something already turned to: it is news again. */
+-	for (i = 0; i < eta_use.doneCount; )
+-	{
+-		if (Distance(ps->origin, eta_use.doneAt[i]) > (ETA_USE_REACH_METERS + 1.5f) / ETA_QU_TO_METERS)
+-		{
+-			eta_use.done[i] = eta_use.done[eta_use.doneCount - 1];
+-			VectorCopy(eta_use.doneAt[eta_use.doneCount - 1], eta_use.doneAt[i]);
+-			eta_use.doneCount--;
+-			continue;
+-		}
+-		i++;
+-	}
+-
+-	if (!eta_autoUse.integer || !eta_use.stillSince || cg.time - eta_use.stillSince < ETA_USE_STILL_MS
+-	    || cgs.autoMapExpanded || eta_turn.step || eta_turn.held || CG_AccessibilityBuildBusy())
+-	{
+-		return;
+-	}
+-
+-	/* A turn by hand is the player looking somewhere on purpose. */
+-	if (cg.time < eta_aim.manualUntil && eta_aim.manualUntil - cg.time <= ETA_AIM_MANUAL_MS)
+-	{
+-		return;
+-	}
+-
+-	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
+-	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
+-	if (hint)
+-	{
+-		return;
+-	}
+-
+-	count = CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS);
+-
+-	for (i = 0; i < count && list[i].meters <= ETA_USE_REACH_METERS; i++)
+-	{
+-		/* A ladder is climbed with F, never turned to unasked: standing
+-		   by one is not wanting to climb it. */
+-		if (list[i].ladder)
+-		{
+-			continue;
+-		}
+-
+-		for (j = 0; j < eta_use.doneCount; j++)
+-		{
+-			if (eta_use.done[j] == list[i].entityNum)
+-			{
+-				break;
+-			}
+-		}
+-
+-		if (j < eta_use.doneCount)
+-		{
+-			continue;
+-		}
+-
+-		if (eta_use.doneCount < ETA_USE_DONE_MAX)
+-		{
+-			eta_use.done[eta_use.doneCount] = list[i].entityNum;
+-			VectorCopy(ps->origin, eta_use.doneAt[eta_use.doneCount]);
+-			eta_use.doneCount++;
+-		}
+-
+-		ETA_AimStartSnap(&list[i], NULL);
+-		eta_aim.automatic = qtrue;
+-		return;
+-	}
+-}
+-
+ /**
+  * @brief The keys belong to the map while it is open.
+  *
+@@ -2703,12 +2600,7 @@ void CG_AccessibilityAimFrame(void)
+ 	{
+ 		if (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL)
+ 		{
+-			/* An enemy first; a thing to use only with none to fight. */
+ 			ETA_AutoLock();
+-			if (eta_aim.mode == ETA_AIM_NONE)
+-			{
+-				ETA_AutoUse();
+-			}
+ 		}
+ 		if (eta_aim.mode == ETA_AIM_NONE)
+ 		{
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1ade9eb..996d01f 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3552,7 +3552,6 @@ extern vmCvar_t eta_mapToggle;
+ extern vmCvar_t eta_playerCallouts;
+ extern vmCvar_t eta_groundCallouts;
+ extern vmCvar_t eta_autoLock;
+-extern vmCvar_t eta_autoUse;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 6274782..bf4e6a4 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2209,7 +2209,6 @@ vmCvar_t eta_mapToggle;
+ vmCvar_t eta_playerCallouts;
+ vmCvar_t eta_groundCallouts;
+ vmCvar_t eta_autoLock;
+-vmCvar_t eta_autoUse;
+ 
+ /**
+  * @brief The sounds this mod brings with it, and why they are not the
+@@ -2401,7 +2400,6 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_playerCallouts,      "eta_playerCallouts",      "1" },
+ 	{ &eta_groundCallouts,      "eta_groundCallouts",      "1" },
+ 	{ &eta_autoLock,            "eta_autoLock",            "1" },
+-	{ &eta_autoUse,             "eta_autoUse",             "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },

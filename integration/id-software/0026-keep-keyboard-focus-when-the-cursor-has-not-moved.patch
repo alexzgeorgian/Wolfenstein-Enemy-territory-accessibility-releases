@@ -1,0 +1,53 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index d15bc68..3631f18 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -3452,11 +3452,48 @@ static rectDef_t *Item_CorrectedTextRect( itemDef_t *item ) {
+ 	return &rect;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * Has the mouse cursor moved since the last time this was asked?
++ *
++ * Exact rather than a tolerance: the question is whether the player
++ * touched the mouse at all. A cursor resting untouched answers qfalse
++ * forever, which is the point - keyboard focus then survives a key press.
++ * The first call answers qtrue, so a menu opened with the cursor already
++ * over something still picks that up once, as it did before.
++ */
++static qboolean ETA_MenuCursorMoved( float x, float y ) {
++	static qboolean seen = qfalse;
++	static float lastX, lastY;
++
++	if ( seen && lastX == x && lastY == y ) {
++		return qfalse;
++	}
++
++	seen = qtrue;
++	lastX = x;
++	lastY = y;
++
++	return qtrue;
++}
++#endif
++
+ void Menu_HandleKey( menuDef_t *menu, int key, qboolean down ) {
+ 	int i;
+ 	itemDef_t *item = NULL;
+ 	qboolean inHandler = qfalse;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* A cursor that has not moved must not take focus off the item the
++	   keyboard put it on. This line re-runs mouse-move focus on every key
++	   press from wherever the cursor sits; played from the keyboard alone
++	   the cursor never moves, so it wins every time and the item the arrow
++	   keys selected loses focus the instant a key is pressed. On the
++	   join-server screen the list carries onEnter { uiScript JoinServer },
++	   so that lands the player on a server they never chose. The cursor
++	   still wins the moment it actually moves. */
++	if ( ETA_MenuCursorMoved( DC->cursorx, DC->cursory ) )
++#endif
+ 	Menu_HandleMouseMove( menu, DC->cursorx, DC->cursory );     // NERVE - SMF - fix for focus not resetting on unhidden buttons
+ 
+ 	if ( inHandler ) {

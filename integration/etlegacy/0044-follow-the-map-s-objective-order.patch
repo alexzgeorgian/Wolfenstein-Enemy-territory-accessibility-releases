@@ -1,0 +1,519 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index d020a10..2cab4c0 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -1604,6 +1604,170 @@ static qboolean CG_AccessibilityMapObjectiveAt(const mapEntityData_t *mEnt, vec3
+  * @param[out] out
+  * @return qtrue when this team has an objective the client can place
+  */
++/**
++ * @brief How many objectives this team's map has.
++ *
++ * Straight out of CS_MULTI_INFO, which is where the limbo panel gets
++ * the same number for its own objective list.
++ */
++int CG_AccessibilityObjectiveCount(team_t team)
++{
++	if (team != TEAM_AXIS && team != TEAM_ALLIES)
++	{
++		return 0;
++	}
++
++	return Q_atoi(Info_ValueForKey(CG_ConfigString(CS_MULTI_INFO), "o"));
++}
++
++/**
++ * @brief The state of one numbered objective, for this team.
++ *
++ * The numbering and the three states are the engine's own. A map script
++ * sets them with its objective status command, keyed "x<n>" for Axis
++ * and "a<n>" for Allies, counting from one - and that command's own
++ * error message states what the values mean: 0 default, 1 complete,
++ * 2 failed. Nothing here is this mod's invention, which matters,
++ * because the whole point is to follow the order the map was written
++ * in rather than one the mod made up.
++ *
++ * @param[in] team
++ * @param[in] number 1-based
++ */
++int CG_AccessibilityObjectiveState(team_t team, int number)
++{
++	const char *cs;
++
++	if (number < 1 || number > MAX_OBJECTIVES)
++	{
++		return 0;
++	}
++
++	cs = CG_ConfigString(CS_MULTI_OBJECTIVE);
++
++	return Q_atoi(Info_ValueForKey(cs, va("%s%i",
++	                                      team == TEAM_AXIS ? "x" : "a",
++	                                      number)));
++}
++
++/**
++ * @brief The map's description of one numbered objective, or NULL.
++ */
++const char *CG_AccessibilityObjectiveDescription(team_t team, int number)
++{
++	const char *text;
++
++	if (number < 1 || number > MAX_OBJECTIVES)
++	{
++		return NULL;
++	}
++
++	text = (team == TEAM_AXIS) ? cg.objDescription_Axis[number - 1]
++	                           : cg.objDescription_Allied[number - 1];
++
++	return (text && text[0]) ? text : NULL;
++}
++
++/**
++ * @brief The first objective this team still has to do.
++ *
++ * The lowest-numbered one that is neither complete nor failed. A tester
++ * playing on their own reported wandering the map because the narration
++ * pointed at whichever objective was *nearest*, and a map's objectives
++ * have to be done in order - so the nearest one is usually one that
++ * cannot be started yet.
++ *
++ * A failed objective is stepped over rather than stopped at: it is not
++ * coming back, and standing the player in front of it forever would be
++ * worse than moving them on.
++ *
++ * @return the 1-based number, or -1 when there is nothing left to do
++ */
++int CG_AccessibilityCurrentObjective(team_t team)
++{
++	int count = CG_AccessibilityObjectiveCount(team);
++	int i;
++
++	for (i = 1; i <= count; i++)
++	{
++		if (CG_AccessibilityObjectiveState(team, i) == 0)
++		{
++			return i;
++		}
++	}
++
++	return -1;
++}
++
++/**
++ * @brief Where on the map a numbered objective is.
++ *
++ * The link between "objective 2 of 4" and a place to walk to is the
++ * objflags bitmask the map author puts on each trigger - the engine's
++ * own comment calls it "which commandmap objectives this entity belongs
++ * to" - and the stock command map uses exactly this test to highlight
++ * the objective the player has selected in the limbo panel.
++ *
++ * Not every map sets it. When none of the entities claims this
++ * objective number there is nothing to point at, and the caller falls
++ * back to the nearest rather than inventing a position.
++ *
++ * @param[in]  team
++ * @param[in]  number 1-based
++ * @param[out] out
++ * @return qtrue when this objective has a place on the map
++ */
++qboolean CG_AccessibilityObjectiveByNumber(team_t team, int number, etaObjective_t *out)
++{
++	int i;
++
++	if (number < 1 || number > MAX_OBJECTIVES)
++	{
++		return qfalse;
++	}
++
++	for (i = 0; i < mapEntityCount; i++)
++	{
++		const mapEntityData_t *mEnt = &mapEntities[i];
++		vec3_t                origin;
++		int                   oidIndex = -1;
++
++		if (mEnt->team != team)
++		{
++			continue;
++		}
++
++		if (!CG_AccessibilityMapObjectiveAt(mEnt, origin, &oidIndex))
++		{
++			continue;
++		}
++
++		if (oidIndex < 0 || oidIndex >= MAX_OID_TRIGGERS)
++		{
++			continue;
++		}
++
++		/* A cabinet is somewhere to go and never the objective. */
++		if (cgs.oidInfo[oidIndex].spawnflags & (1 << 5))
++		{
++			continue;
++		}
++
++		if (!(cgs.oidInfo[oidIndex].objflags & (1 << (number - 1))))
++		{
++			continue;
++		}
++
++		out->name      = cgs.oidInfo[oidIndex].name[0] ? cgs.oidInfo[oidIndex].name : NULL;
++		out->entityNum = cgs.oidInfo[oidIndex].entityNum;
++		VectorCopy(origin, out->origin);
++
++		return qtrue;
++	}
++
++	return qfalse;
++}
++
+ qboolean CG_AccessibilityNearestObjective(team_t team, const vec3_t from, etaObjective_t *out)
+ {
+ 	int      i;
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 5d435f8..9c63d56 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -342,6 +342,23 @@ qboolean CG_AccessibilityObjective(team_t team, const vec3_t from, etaObjective_
+ 		return qfalse;
+ 	}
+ 
++	/* The map's own running order comes first. A tester playing alone
++	   reported wandering because this pointed at whichever objective was
++	   *nearest*, and a map's objectives have to be done in sequence - so
++	   the nearest is usually one that cannot be started yet. Where the
++	   map says which objective is which, that wins over both the main
++	   objective and proximity. */
++	{
++		int current = CG_AccessibilityCurrentObjective(team);
++
++		if (current > 0 && CG_AccessibilityObjectiveByNumber(team, current, out))
++		{
++			stickyTeam   = team;
++			stickyEntNum = out->entityNum;
++			return qtrue;
++		}
++	}
++
+ 	mainObjective = CG_MainObjectiveForTeam(team);
+ 
+ 	if (mainObjective)
+@@ -588,6 +605,46 @@ void CG_AccessibilityNarrateObjective(void)
+  * '*' is the separator the map text uses for a line break; the panel turns
+  * each into a newline, and speech turns each into a pause.
+  */
++/**
++ * @brief Says which objective is next, and how many are behind it.
++ *
++ * The piece a player on their own could not get any other way. ET's
++ * maps run their objectives in sequence and the mod was pointing at
++ * whichever was closest, so a tester spent a match walking between
++ * things that could not be started yet. This reads the map's own list,
++ * in the map's own order, with the map's own idea of what is done.
++ */
++void CG_AccessibilityNarrateObjectiveOrder(void)
++{
++	team_t     team    = cgs.clientinfo[cg.clientNum].team;
++	int        count   = CG_AccessibilityObjectiveCount(team);
++	int        current = CG_AccessibilityCurrentObjective(team);
++	const char *text;
++
++	if (team != TEAM_AXIS && team != TEAM_ALLIES)
++	{
++		return;
++	}
++
++	if (count <= 0)
++	{
++		/* Plenty of maps list none. Saying so is better than silence,
++		   which a player reads as the report having failed. */
++		ETA_Speech_Say("This map lists no objectives");
++		return;
++	}
++
++	if (current < 0)
++	{
++		ETA_HudNarrator_SpeakObjectivesComplete();
++		return;
++	}
++
++	text = CG_AccessibilityObjectiveDescription(team, current);
++
++	ETA_HudNarrator_SpeakObjectiveStep(current, count, ETA_OBJECTIVE_PENDING, text);
++}
++
+ static void CG_AccessibilityNarrateObjectiveText(void)
+ {
+ 	char       text[384];
+@@ -737,6 +794,8 @@ static void CG_AccessibilityStatus_f(void)
+ 	/* Where before what: "I am at the Old City Wall" frames everything
+ 	   that follows, and it is the part a player can pass straight on to
+ 	   their team. */
++	CG_AccessibilityNarrateObjectiveOrder();
++
+ 	CG_AccessibilitySpeakLocation();
+ 
+ 	CG_AccessibilityNarrateObjective();
+@@ -759,6 +818,9 @@ static void CG_objectivesDown_f(void)
+ 	{
+ 		ETA_Speech_BeginReport();
+ 		ETA_HudNarrator_HoldPassive(cg.time);
++		/* Which one is next, before what it says and where it is: a
++		   player who does not know the order cannot use either. */
++		CG_AccessibilityNarrateObjectiveOrder();
+ 		CG_AccessibilityNarrateObjectiveText();
+ 		CG_AccessibilityNarrateObjective();
+ 		ETA_Speech_EndReport();
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index a640274..2d163db 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3655,6 +3655,105 @@ static qboolean ETA_GroundRiseAhead(const playerState_t *ps, const vec3_t forwar
+  * are looking when they are standing still, which is the same rule the
+  * drop warning uses and for the same reason.
+  */
++/**
++ * @brief Says when an objective is finished, or lost.
++ *
++ * The single most useful thing to hear on a map played alone, and the
++ * mod said nothing about it. A sighted player watches a stamp land on
++ * the objective panel; without it, the only evidence that a job is done
++ * is that the thing you were walking towards stops being there.
++ *
++ * The state comes from the map script, which is the same source the
++ * panel's stamp comes from, so this cannot claim something the game
++ * does not agree with.
++ *
++ * Not held back by the passive hold: finishing an objective is news
++ * that outranks a report the player asked for, and unlike the scenery
++ * it happens once.
++ */
++static void ETA_NarrateObjectiveOrder(void)
++{
++	static int  lastStates[MAX_OBJECTIVES + 1];
++	static team_t lastTeam = TEAM_FREE;
++	team_t      team       = cgs.clientinfo[cg.clientNum].team;
++	int         count, i;
++
++	if (!cg.snap || !eta_objectiveCallouts.integer
++	    || (team != TEAM_AXIS && team != TEAM_ALLIES))
++	{
++		lastTeam = TEAM_FREE;
++		return;
++	}
++
++	count = CG_AccessibilityObjectiveCount(team);
++
++	if (count <= 0 || count > MAX_OBJECTIVES)
++	{
++		lastTeam = TEAM_FREE;
++		return;
++	}
++
++	/* Changing team means a different list with different numbering, so
++	   the remembered states describe somebody else's map. Taking them as
++	   this team's would announce a handful of objectives as freshly
++	   completed the moment a player switched sides. */
++	if (team != lastTeam)
++	{
++		for (i = 1; i <= MAX_OBJECTIVES; i++)
++		{
++			lastStates[i] = CG_AccessibilityObjectiveState(team, i);
++		}
++
++		lastTeam = team;
++		return;
++	}
++
++	for (i = 1; i <= count; i++)
++	{
++		int state = CG_AccessibilityObjectiveState(team, i);
++
++		if (state == lastStates[i])
++		{
++			continue;
++		}
++
++		lastStates[i] = state;
++
++		/* Only ever forward. A state going back to pending is a map
++		   script resetting something, not an objective un-finishing,
++		   and announcing it would be nonsense. */
++		if (state != 1 && state != 2)
++		{
++			continue;
++		}
++
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakObjectiveStep(i, count,
++		                                   state == 1 ? ETA_OBJECTIVE_COMPLETE
++		                                              : ETA_OBJECTIVE_FAILED,
++		                                   CG_AccessibilityObjectiveDescription(team, i));
++		ETA_Speech_EndReport();
++
++		/* One per frame. Two stamps landing together would destroy each
++		   other, and the next frame will find the second one. */
++		return;
++	}
++
++	if (CG_AccessibilityCurrentObjective(team) < 0)
++	{
++		static qboolean saidComplete = qfalse;
++
++		if (!saidComplete)
++		{
++			saidComplete = qtrue;
++
++			ETA_Speech_BeginReport();
++			ETA_HudNarrator_SpeakObjectivesComplete();
++			ETA_Speech_EndReport();
++		}
++	}
++}
++
+ static void ETA_NarrateStairsAhead(void)
+ {
+ 	static int lastSpoken = -1;
+@@ -6792,9 +6891,12 @@ void CG_DrawActive()
+ 		ETA_NarrateLocation();
+ 	}
+ 
+-	/* Never held. The one thing allowed to cut off an answer the player
+-	   asked for is being told they are about to walk off something that
+-	   will kill them. */
++	/* Neither of these is held back. A drop warning is the one report
++	   worth interrupting an answer for - and finishing an objective is
++	   the other: it happens once, it is what the whole map is for, and
++	   a player on their own has no other sign of it. */
++	ETA_NarrateObjectiveOrder();
++
+ 	ETA_NarrateDropAhead();
+ 
+ 	/* Alongside the stance, and for the same reason: both are things the
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 8042efb..2e9d10a 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3408,6 +3408,18 @@ typedef struct
+ qboolean CG_AccessibilityObjective(team_t team, const vec3_t from, etaObjective_t *out);
+ qboolean CG_AccessibilityNearestObjective(team_t team, const vec3_t from, etaObjective_t *out);
+ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObjective_t *out);
++
++/*
++ * The map's own running order of objectives, and which one is next.
++ * See cg_commandmap.c - the numbering and the three states are the
++ * engine's, set by the map script.
++ */
++int CG_AccessibilityObjectiveCount(team_t team);
++int CG_AccessibilityObjectiveState(team_t team, int number);
++const char *CG_AccessibilityObjectiveDescription(team_t team, int number);
++int CG_AccessibilityCurrentObjective(team_t team);
++qboolean CG_AccessibilityObjectiveByNumber(team_t team, int number, etaObjective_t *out);
++void CG_AccessibilityNarrateObjectiveOrder(void);
+ void CG_AccessibilityNarrateObjective(void);
+ void CG_AccessibilitySpeakLocation(void);
+ 
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 21f054f..c6ff762 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8784,16 +8784,17 @@ static void UI_AccessibilityInstallBinds(void)
+ 		int        key;
+ 		const char *command;
+ 		const char *replaces;
++		int        generation;
+ 	} binds[] =
+ 	{
+-		{ K_F5,       "accessibilityStatus",     NULL            },
+-		{ K_F6,       "accessibilityRepeat",     NULL            },
+-		{ K_F8,       "accessibilityStopSpeech", NULL            },
+-		{ '9',        "accessibilityHealth",     "weaponbank 9"  },
+-		{ '0',        "accessibilityAmmo",       "weaponbank 10" },
++		{ K_F5,       "accessibilityStatus",     NULL,            1 },
++		{ K_F6,       "accessibilityRepeat",     NULL,            1 },
++		{ K_F8,       "accessibilityStopSpeech", NULL,            1 },
++		{ '9',        "accessibilityHealth",     "weaponbank 9",  2 },
++		{ '0',        "accessibilityAmmo",       "weaponbank 10", 2 },
+ 		/* Not narration - a part of the game that cannot be reached at
+ 		   all without a mouse. See the comment above the table. */
+-		{ K_KP_SLASH, "weapalt",                 NULL            },
++		{ K_KP_SLASH, "weapalt",                 NULL,            3 },
+ 		/* The command map survey. These only do anything while the map
+ 		   key is held, so in a stock install they cost nothing: the
+ 		   arrow keys and the navigation cluster above them are bound to
+@@ -8805,30 +8806,49 @@ static void UI_AccessibilityInstallBinds(void)
+ 		   their movement keys and binds the survey wherever suits
+ 		   them. Walking while trying to read the map would be worse
+ 		   than having to bind a key. */
+-		{ K_UPARROW,   "accessibilityMapNorth", NULL            },
+-		{ K_DOWNARROW, "accessibilityMapSouth", NULL            },
+-		{ K_RIGHTARROW,"accessibilityMapEast",  NULL            },
+-		{ K_LEFTARROW, "accessibilityMapWest",  NULL            },
+-		{ K_PGUP,      "accessibilityMapUp",    NULL            },
+-		{ K_PGDN,      "accessibilityMapDown",  NULL            },
+-		{ K_HOME,      "accessibilityMapHere",  NULL            },
+-		{ K_END,       "accessibilityMapNext",  NULL            }
++		{ K_UPARROW,   "accessibilityMapNorth", NULL,            4 },
++		{ K_DOWNARROW, "accessibilityMapSouth", NULL,            4 },
++		{ K_RIGHTARROW,"accessibilityMapEast",  NULL,            4 },
++		{ K_LEFTARROW, "accessibilityMapWest",  NULL,            4 },
++		{ K_PGUP,      "accessibilityMapUp",    NULL,            4 },
++		{ K_PGDN,      "accessibilityMapDown",  NULL,            4 },
++		{ K_HOME,      "accessibilityMapHere",  NULL,            4 },
++		{ K_END,       "accessibilityMapNext",  NULL,            4 }
+ 	};
+ 
+ 	vmCvar_t installed;
+ 	int      i;
++	int      newest = 0;
+ 
+ 	trap_Cvar_Register(&installed, "eta_bindsInstalled", "0", CVAR_ARCHIVE);
+ 
+-	if (installed.integer)
+-	{
+-		return;
+-	}
+-
+ 	for (i = 0; i < (int)(sizeof(binds) / sizeof(binds[0])); i++)
+ 	{
+ 		char current[MAX_STRING_CHARS];
+ 
++		if (binds[i].generation > newest)
++		{
++			newest = binds[i].generation;
++		}
++
++		/* Anything this player has already been offered is left alone,
++		   however they left it. That is the whole point of recording
++		   this: a key deliberately unbound must not come back.
++
++		   What the recording used to be was a flag - had this ever run,
++		   yes or no - and that was wrong in a way nobody could see from
++		   inside the game. Every bind added in a later version was
++		   simply never installed for anyone who had run an earlier one,
++		   because the flag was already set and the function returned at
++		   the top. Three releases of keys went out that way and the
++		   tester found it the only way it could be found: by pressing
++		   them and getting silence. A generation per row fixes it -
++		   rows the player has not been offered yet are still offered. */
++		if (binds[i].generation <= installed.integer)
++		{
++			continue;
++		}
++
+ 		current[0] = '\0';
+ 		trap_Key_GetBindingBuf(binds[i].key, current, sizeof(current));
+ 
+@@ -8856,7 +8876,8 @@ static void UI_AccessibilityInstallBinds(void)
+ 		}
+ 	}
+ 
+-	trap_Cvar_Set("eta_bindsInstalled", "1");
++	/* Records the newest generation offered, not merely "yes". */
++	trap_Cvar_Set("eta_bindsInstalled", va("%i", newest));
+ }
+ #endif
+ 

@@ -1,0 +1,63 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index a749182..0f4073a 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
+ #include "ui_local.h"    // For CS settings/retrieval
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++#include "core/runtime_guard.h"
+ #include "menu/menu_narrator.h"
+ #endif
+ 
+@@ -5311,6 +5312,38 @@ qboolean Menus_AnyFullScreenVisible() {
+ 	return qfalse;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Narrates a newly shown popup/confirm dialog by reading every static
++ * text item it declares (its title plus any body labels), in declaration
++ * order. This relies on the SUBWINDOW/SUBWINDOWBLACK/LABEL/LABELWHITE .menu
++ * macros (etmain/ui/menumacros.h) always emitting ITEM_TYPE_TEXT decoration
++ * items with a literal text string - true of every popup built with them -
++ * but not guaranteed for a hand-rolled popup that doesn't use those macros.
++ */
++static void ETA_NarrateConfirmDialog( menuDef_t *menu ) {
++	char text[ETA_MAX_MENU_TEXT_LENGTH + 1];
++	int i;
++
++	text[0] = '\0';
++
++	for ( i = 0; i < menu->itemCount; i++ ) {
++		itemDef_t *item = menu->items[i];
++
++		if ( item->type == ITEM_TYPE_TEXT && item->text ) {
++			if ( text[0] != '\0' ) {
++				Q_strcat( text, sizeof( text ), " " );
++			}
++			Q_strcat( text, sizeof( text ), item->text );
++		}
++	}
++
++	if ( text[0] != '\0' ) {
++		ETA_MenuNarrator_OnConfirmDialogShown( text );
++	}
++}
++#endif
++
+ menuDef_t *Menus_ActivateByName( const char *p, qboolean modalStack ) {
+ 	int i;
+ 	menuDef_t *m = NULL;
+@@ -5319,6 +5352,11 @@ menuDef_t *Menus_ActivateByName( const char *p, qboolean modalStack ) {
+ 		if ( Q_stricmp( Menus[i].window.name, p ) == 0 ) {
+ 			m = &Menus[i];
+ 			Menus_Activate( m );
++#ifdef FEATURE_ACCESSIBILITY
++			if ( m->window.flags & WINDOW_POPUP ) {
++				ETA_NarrateConfirmDialog( m );
++			}
++#endif
+ 			if ( modalStack && m->window.flags & WINDOW_MODAL ) {
+ 				if ( modalMenuCount >= MAX_MODAL_MENUS ) {
+ 					Com_Error( ERR_DROP, "MAX_MODAL_MENUS exceeded\n" );

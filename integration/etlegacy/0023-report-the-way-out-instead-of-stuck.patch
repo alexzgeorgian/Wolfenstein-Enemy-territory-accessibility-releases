@@ -1,0 +1,87 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 24db51c..237d249 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -397,9 +397,10 @@ static qboolean CG_AccessibilityAmmoValue(int *loaded, int *reserve)
+  * @brief Speaks the team's current main objective, how far off it is and
+  * which way to turn for it.
+  *
+- * Shared by the full status report and the objectives key, so the two
+- * cannot drift into describing the same objective differently. The caller
+- * opens the report; this only contributes parts to it.
++ * Shared by the full status report, the objectives key and the stuck
++ * detector, so they cannot drift into describing the same objective
++ * differently. The caller opens the report; this only contributes parts
++ * to it. Not static - cg_playerstate.c uses it too (see cg_local.h).
+  *
+  * The route correction reuses the bearing ETA_NarrateObjectiveChange
+  * (cg_playerstate.c) already computes for the objective-direction cue, via
+@@ -409,7 +410,7 @@ static qboolean CG_AccessibilityAmmoValue(int *loaded, int *reserve)
+  * reads more naturally aloud than a 0-359 clock position. The +-15 degree
+  * "ahead" band is a judgment call, not a value found in this engine.
+  */
+-static void CG_AccessibilityNarrateObjective(void)
++void CG_AccessibilityNarrateObjective(void)
+ {
+ 	playerState_t *ps;
+ 	oidInfo_t     *objective;
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 6b40a67..672e39c 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3388,6 +3388,7 @@ void CG_RemoveGameConsoleCommand(void);
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ oidInfo_t *CG_MainObjectiveForTeam(team_t team);
++void CG_AccessibilityNarrateObjective(void);
+ 
+ /**
+  * Quake units to meters, for the accessibility navigation system's
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 3715fe5..6c164bc 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -455,7 +455,9 @@ static void ETA_NarrateObjectiveChange(playerState_t *ps)
+  */
+ static void ETA_NarrateStuckDetection(playerState_t *ps, playerState_t *ops)
+ {
+-	team_t team = (team_t)ps->persistant[PERS_TEAM];
++	team_t    team = (team_t)ps->persistant[PERS_TEAM];
++	usercmd_t cmd;
++	int       trying;
+ 
+ 	if ((team != TEAM_AXIS && team != TEAM_ALLIES) || ps->pm_type != PM_NORMAL)
+ 	{
+@@ -463,7 +465,31 @@ static void ETA_NarrateStuckDetection(playerState_t *ps, playerState_t *ops)
+ 		return;
+ 	}
+ 
+-	ETA_NavigationSystem_UpdateMovement(Distance(ps->origin, ops->origin) * ETA_QU_TO_METERS, cg.frametime / 1000.0f);
++	/* The player's own movement input. Without it this reported anyone who
++	   stood still for three seconds, which in a firefight is most people
++	   most of the time - hence the announcements that arrived for no
++	   reason. Leaning and jumping are left out: neither is an attempt to
++	   get anywhere, and a player pressed against a wall jumping to break
++	   free is exactly who should still be told. */
++	if (!trap_GetUserCmd(trap_GetCurrentCmdNumber(), &cmd))
++	{
++		ETA_NavigationSystem_ResetStuckDetection();
++		return;
++	}
++
++	trying = (cmd.forwardmove != 0 || cmd.rightmove != 0);
++
++	if (ETA_NavigationSystem_UpdateMovement(Distance(ps->origin, ops->origin) * ETA_QU_TO_METERS,
++	                                        cg.frametime / 1000.0f, trying))
++	{
++		/* What helps here is where to go, not being told what the player
++		   already knows. Same report the objectives key gives, so a player
++		   who is wedged or lost hears the way out rather than a label for
++		   their predicament. */
++		ETA_Speech_BeginReport();
++		CG_AccessibilityNarrateObjective();
++		ETA_Speech_EndReport();
++	}
+ }
+ #endif
+ 

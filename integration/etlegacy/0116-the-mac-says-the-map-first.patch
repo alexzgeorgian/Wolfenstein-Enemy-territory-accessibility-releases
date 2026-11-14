@@ -1,0 +1,88 @@
+diff --git a/src/cgame/cg_loadpanel.c b/src/cgame/cg_loadpanel.c
+index 0432447..aa6571c 100644
+--- a/src/cgame/cg_loadpanel.c
++++ b/src/cgame/cg_loadpanel.c
+@@ -814,9 +814,15 @@ static qboolean eta_loadingReadySaid = qtrue;
+    whole load without once letting the Mac's own event loop run, and
+    VoiceOver and the system voice both need it to: what was said as the
+    load began was lost, and the tester never heard which map it was. So
+-   on a Mac the briefing is kept, and said with "Loaded" once the load is
+-   over. */
++   on a Mac the map and its briefing are kept, and said once the load is
++   over: a second after it, when the Mac has done announcing the game's
++   window coming back, which cut the start of a line said at once; and as
++   lines of their own, "Loaded", the map and its type first, so the map's
++   name is never what is lost. */
++#define ETA_LOADED_WAIT_MS 1000
++static char eta_loadingTitle[256];
+ static char eta_loadingBriefing[ETA_MAX_SPEECH_TEXT_LENGTH + 1];
++static int  eta_loadedAt;                   /* in trap_Milliseconds; 0 until the load is over */
+ #endif
+ 
+ static void ETA_LoadingSay(const char *text)
+@@ -855,13 +861,14 @@ void CG_AccessibilityLoadingBegin(void)
+ 
+ 	CG_AccessibilitySpeakableText(description, briefing, sizeof(briefing));
+ 
+-	Com_sprintf(text, sizeof(text),
+ #ifdef __APPLE__
+-	            "Loaded. %s. %s. %s",
++	Com_sprintf(eta_loadingTitle, sizeof(eta_loadingTitle), "Loaded. %s. %s.",
++	            name, CG_LoadPanel_GameTypeName(cgs.gametype));
++	Q_strncpyz(text, briefing, sizeof(text));
+ #else
+-	            "Loading %s. %s. %s",
+-#endif
++	Com_sprintf(text, sizeof(text), "Loading %s. %s. %s",
+ 	            name, CG_LoadPanel_GameTypeName(cgs.gametype), briefing);
++#endif
+ 
+ 	/* Too long for one line: end at the last whole sentence that fits,
+ 	   rather than lose the lot. */
+@@ -878,6 +885,7 @@ void CG_AccessibilityLoadingBegin(void)
+ #ifdef __APPLE__
+ 	Q_strncpyz(eta_loadingBriefing, text, sizeof(eta_loadingBriefing));
+ 	eta_loadingBriefingUntil = 0;
++	eta_loadedAt             = 0;
+ #else
+ 	ETA_LoadingSay(text);
+ #endif
+@@ -942,13 +950,24 @@ void CG_AccessibilityLoadingFrame(void)
+ 		return;
+ 	}
+ 
+-	eta_loadingReadySaid = qtrue;
+-
+ #ifdef __APPLE__
+-	/* "Loaded", the map and its briefing, kept from the start of the
+-	   load; the team and class key follows as a line of its own. */
+-	if (eta_loadingBriefing[0])
++	/* A second after the load: "Loaded", the map and its type; the
++	   briefing kept from the start of the load; then the team and class
++	   key - each a line of its own. */
++	if (eta_loadingTitle[0])
+ 	{
++		if (!eta_loadedAt)
++		{
++			eta_loadedAt = trap_Milliseconds();
++			return;
++		}
++		if (trap_Milliseconds() - eta_loadedAt < ETA_LOADED_WAIT_MS)
++		{
++			return;
++		}
++		eta_loadingReadySaid = qtrue;
++		ETA_Speech_Say(eta_loadingTitle);
++		eta_loadingTitle[0] = '\0';
+ 		ETA_Speech_Say(eta_loadingBriefing);
+ 		eta_loadingBriefing[0] = '\0';
+ 		if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR)
+@@ -972,6 +991,8 @@ void CG_AccessibilityLoadingFrame(void)
+ 	}
+ #endif
+ 
++	eta_loadingReadySaid = qtrue;
++
+ 	if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR)
+ 	{
+ 		ETA_Speech_Say("Loaded");

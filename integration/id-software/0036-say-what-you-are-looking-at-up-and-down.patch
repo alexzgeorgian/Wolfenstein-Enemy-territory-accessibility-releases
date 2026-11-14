@@ -1,0 +1,76 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index f7130fe..86841eb 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -5231,6 +5231,60 @@ static void ETA_NarrateFacing( void ) {
+ 	}
+ }
+ 
++/**
++ * Says what the player is looking at when they aim up or down.
++ *
++ * The cardinal callout answers "which way am I facing", and it is a yaw
++ * report: it says north and south and says nothing at all about the
++ * other axis. A player who tips the view up gets no acknowledgement that
++ * anything happened, and no way to tell a ceiling a foot above them from
++ * open sky.
++ *
++ * Saying the angle - "forty degrees up" - would be honest and useless.
++ * Forty degrees up is the sky in a field and a ceiling in a cellar, and
++ * the player wants to know which. So the pitch is only the trigger: what
++ * gets spoken is the same trace the binoculars use, along the line the
++ * player is actually looking down.
++ *
++ * It fires when the aim settles into a new band rather than while it is
++ * moving, for the reason the facing callout does: a sweep from the floor
++ * to the sky passes through everything in between.
++ */
++static void ETA_NarrateLookAround( void ) {
++	char description[128];
++	int distance;
++
++	if ( !cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_facingCallouts.integer ) {
++		ETA_HudNarrator_ResetLookPitch();
++		return;
++	}
++
++	/* While zoomed, the zoom narration is already answering this question
++	   at the range the player chose, and it re-reads on every change
++	   rather than only when the aim settles. Two voices on one trace.
++
++	   cg.zoomedScope, not cg.zoomed, for the reason ETA_NarrateZoom
++	   spells out: this tree never assigns cg.zoomed. */
++	if ( cg.zoomedBinoc || cg.zoomedScope ) {
++		ETA_HudNarrator_ResetLookPitch();
++		return;
++	}
++
++	/* Predicted, like the yaw: the look is a local action and the
++	   snapshot lags it. */
++	if ( !ETA_HudNarrator_UpdateLookPitch( cg.predictedPlayerState.viewangles[PITCH], cg.time ) ) {
++		return;
++	}
++
++	if ( !ETA_DescribeLookAhead( description, sizeof( description ), &distance, ETA_LOOK_AHEAD_RANGE, NULL ) ) {
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakLookAhead( description, distance );
++	ETA_Speech_EndReport();
++}
++
+ #define ETA_OBSTACLE_MIN_INTERVAL 3000
+ 
+ /**
+@@ -5730,6 +5784,10 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 
+ 		ETA_NarrateFacing();
+ 
++		/* Beside the cardinal callout and for the same reason: together
++		   they are the two halves of "where am I pointing". */
++		ETA_NarrateLookAround();
++
+ 		/* Most urgent last: a frame that produces several reports leaves
+ 		   the hazard spoken rather than the heading. */
+ 		ETA_NarrateWater();

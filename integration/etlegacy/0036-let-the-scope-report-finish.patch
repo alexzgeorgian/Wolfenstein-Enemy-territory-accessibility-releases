@@ -1,0 +1,44 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 079539e..ae4c76b 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2144,6 +2144,39 @@ static void ETA_NarrateWeaponChange(void)
+ 		return;
+ 	}
+ 
++	/* Raising or lowering a rifle's scope is a weapon change in this
++	   engine - WP_FG42 and WP_FG42_SCOPE are two different weapons, each
++	   the other's weapAlts - but it is not a change of weapon to the
++	   person holding it, and announcing it does active harm.
++
++	   cg.weaponSelect flips the instant the key is pressed, so CG_Zoom
++	   sets cg.zoomed and ETA_NarrateZoom says "Scope" and describes what
++	   the view is pointed at. The playerstate's weapon only catches up
++	   when the alt-switch animation finishes, a few hundred milliseconds
++	   later - and this function then spoke a second report, which the
++	   speech backend delivers by purging the first. The scope line is the
++	   long one, so it was the one destroyed, and the name that replaced
++	   it was "FG 42" both before and after, because the scoped weapon
++	   carries the same desc.
++
++	   That is why the binoculars worked and the scope did not: +zoom sets
++	   EF_ZOOMING on the weapon in hand and changes no weapon at all, so
++	   nothing arrived afterwards to cut it off.
++
++	   Restricted to pairs where one side is actually scoped. The other
++	   weapAlts pairs - a mortar or an MG being set down, a satchel and
++	   its detonator - have no zoom narration covering them, so for those
++	   this report is the only announcement there is. */
++	if (IS_VALID_WEAPON(spoken)
++	    && GetWeaponTableData(spoken)->weapAlts == weap
++	    && GetWeaponTableData(weap)->weapAlts == spoken
++	    && ((GetWeaponTableData(weap)->type & WEAPON_TYPE_SCOPED)
++	        || (GetWeaponTableData(spoken)->type & WEAPON_TYPE_SCOPED)))
++	{
++		spoken = weap;
++		return;
++	}
++
+ 	spoken = weap;
+ 
+ 	if (!IS_VALID_WEAPON(weap))

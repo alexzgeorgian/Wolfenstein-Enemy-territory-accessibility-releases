@@ -1,0 +1,79 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 204e2d5..0d09231 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4810,9 +4810,15 @@ static void ETA_NarrateZoom( void ) {
+ 		return;
+ 	}
+ 
++	/* cg.zoomedScope, not cg.zoomed. This tree declares both in cg_local.h
++	   but writes only the first: CG_SetSniperZoom sets zoomedScope when the
++	   new weapon is WP_FG42SCOPE, WP_GARAND_SCOPE or WP_K43_SCOPE, and
++	   clears it otherwise, while cg.zoomed is assigned nowhere in the whole
++	   client. Reading it meant the scope branch here could never be taken,
++	   so this tree announced binoculars and stayed silent on every scope. */
+ 	if ( cg.zoomedBinoc ) {
+ 		zoom = ETA_ZOOM_BINOCULARS;
+-	} else if ( cg.zoomed ) {
++	} else if ( cg.zoomedScope ) {
+ 		zoom = ETA_ZOOM_SCOPE;
+ 	} else {
+ 		zoom = ETA_ZOOM_OFF;
+@@ -4978,7 +4984,7 @@ static void ETA_NarrateObstacleAhead( void ) {
+ 		return;
+ 	}
+ 
+-	if ( cg.zoomed || cg.zoomedBinoc ) {
++	if ( cg.zoomedScope || cg.zoomedBinoc ) {
+ 		lastDescription[0] = '\0';
+ 		return;
+ 	}
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 5efe891..0932567 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -604,6 +604,35 @@ CG_TransitionPlayerState
+ 
+ ===============
+ */
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * Is this weapon change just a rifle's scope going up or down?
++ *
++ * Scoping is a weapon change in this engine, but it is not a change of
++ * weapon to the person holding it, and announcing it destroys the report
++ * that matters. ETA_NarrateZoom says "Scope" and describes what the view
++ * is pointed at the moment cg.zoomedScope flips; the playerstate's weapon
++ * catches up a few hundred milliseconds later, and a second report here
++ * is delivered by purging the first - the long one, describing the view.
++ *
++ * The three scoped weapons are the ones CG_SetSniperZoom itself switches
++ * on, rather than a list invented here.
++ */
++static qboolean ETA_IsScopeToggle( int from, int to ) {
++	int i;
++	static const int scoped[] = { WP_FG42SCOPE, WP_GARAND_SCOPE, WP_K43_SCOPE };
++
++	for ( i = 0; i < (int)( sizeof( scoped ) / sizeof( scoped[0] ) ); i++ ) {
++		if ( ( from == scoped[i] && to == weapAlts[scoped[i]] ) ||
++			 ( to == scoped[i] && from == weapAlts[scoped[i]] ) ) {
++			return qtrue;
++		}
++	}
++
++	return qfalse;
++}
++#endif
++
+ void CG_TransitionPlayerState( playerState_t *ps, playerState_t *ops ) {
+ 	// OSP - MV client handling
+ 	if ( cg.mvTotalClients > 0 ) {
+@@ -654,7 +683,7 @@ void CG_TransitionPlayerState( playerState_t *ps, playerState_t *ops ) {
+ 	}
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+-	if ( ps->weapon != ops->weapon ) {
++	if ( ps->weapon != ops->weapon && !ETA_IsScopeToggle( ops->weapon, ps->weapon ) ) {
+ 		ETA_HudNarrator_SpeakWeapon( CG_AccessibilityWeaponName( (weapon_t)ps->weapon ) );
+ 	}
+ #endif

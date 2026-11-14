@@ -1,0 +1,169 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 7cb6bf4..5bf9014 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -36,6 +36,10 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#endif
++
+ void CG_TargetCommand_f( void ) {
+ 	int targetNum;
+ 	char test[4];
+@@ -938,6 +942,36 @@ static void CG_CPM_f( void ) {
+ 	CG_AddPMItem( PM_MESSAGE, CG_Argv( 1 ), cgs.media.voiceChatShader );
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * On-demand "query basic match state" command for the accessibility HUD
++ * narrator (Milestone 4's exit condition). Bindable to a key; narrates
++ * health, the active weapon, and its ammo in one status report rather
++ * than announcing every stat change automatically, since health/ammo
++ * change too often during combat for that to be anything but noise.
++ */
++static void CG_AccessibilityStatus_f( void ) {
++	playerState_t *ps = &cg.snap->ps;
++	gitem_t *item;
++
++	ETA_HudNarrator_SpeakHealth( ps->stats[STAT_HEALTH] );
++
++	item = BG_FindItemForWeaponSafe( (weapon_t)ps->weapon );
++
++	if ( item ) {
++		int ammo, clips, akimboammo;
++
++		ETA_HudNarrator_SpeakWeapon( item->pickup_name );
++
++		CG_PlayerAmmoValue( &ammo, &clips, &akimboammo );
++
++		if ( ammo >= 0 ) {
++			ETA_HudNarrator_SpeakAmmo( ammo );
++		}
++	}
++}
++#endif
++
+ typedef struct {
+ 	char    *cmd;
+ 	void ( *function )( void );
+@@ -996,6 +1030,10 @@ static consoleCommand_t commands[] =
+ 
+ 	{ "openlimbomenu",   CG_LimboMenu_f },
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	{ "accessibilityStatus", CG_AccessibilityStatus_f },
++#endif
++
+ 	{ "+stats",          CG_StatsDown_f },
+ 	{ "-stats",          CG_StatsUp_f },
+ 	{ "+topshots",       CG_topshotsDown_f },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 60e7d90..908664e 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3724,7 +3724,7 @@ static void CG_DrawNewCompass( void ) {
+ //	}
+ }
+ 
+-static int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo ) {
++int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo ) {
+ 	centity_t       *cent;
+ 	playerState_t   *ps;
+ 	int weap;
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 0510d60..0cc6a50 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2374,6 +2374,9 @@ void CG_StatsDebugAddText( const char *text );
+ 
+ void CG_AddLagometerFrameInfo( void );
+ void CG_AddLagometerSnapshotInfo( snapshot_t *snap );
++#ifdef FEATURE_ACCESSIBILITY
++int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo );
++#endif
+ void CG_CenterPrint( const char *str, int y, int charWidth );
+ void CG_PriorityCenterPrint( const char *str, int y, int charWidth, int priority );     // NERVE - SMF
+ void CG_ObjectivePrint( const char *str, int charWidth );                       // NERVE - SMF
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index a8ee113..f1f7f53 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -35,6 +35,10 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#endif
++
+ /*
+ ==============
+ CG_CheckAmmo
+@@ -524,6 +528,16 @@ void CG_TransitionPlayerState( playerState_t *ps, playerState_t *ops ) {
+ 		CG_DamageFeedback( ps->damageYaw, ps->damagePitch, ps->damageCount );
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	if ( ps->weapon != ops->weapon ) {
++		gitem_t *item = BG_FindItemForWeaponSafe( (weapon_t)ps->weapon );
++
++		if ( item ) {
++			ETA_HudNarrator_SpeakWeapon( item->pickup_name );
++		}
++	}
++#endif
++
+ 	// respawning
+ 	if ( ps->persistant[PERS_SPAWN_COUNT] != ops->persistant[PERS_SPAWN_COUNT] ) {
+ 		CG_Respawn( ps->persistant[PERS_REVIVE_COUNT] != ops->persistant[PERS_REVIVE_COUNT] ? qtrue : qfalse );
+diff --git a/src/game/bg_misc.c b/src/game/bg_misc.c
+index 4d83436..d0b0490 100644
+--- a/src/game/bg_misc.c
++++ b/src/game/bg_misc.c
+@@ -2594,6 +2594,28 @@ gitem_t *BG_FindItemForWeapon( weapon_t weapon ) {
+ 	return NULL;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Same lookup as BG_FindItemForWeapon, but returns NULL instead of
++ * Com_Error(ERR_DROP, ...) when weapon has no matching IT_WEAPON entry in
++ * bg_itemlist. Needed because ps->weapon isn't guaranteed to only ever be
++ * a value BG_FindItemForWeapon can resolve - narration code calling it
++ * with an unresolvable value would otherwise fatally drop the client,
++ * an unacceptable failure mode for an accessibility feature.
++ */
++gitem_t *BG_FindItemForWeaponSafe( weapon_t weapon ) {
++	gitem_t *it;
++
++	for ( it = bg_itemlist + 1 ; it->classname ; it++ ) {
++		if ( it->giType == IT_WEAPON && it->giTag == weapon ) {
++			return it;
++		}
++	}
++
++	return NULL;
++}
++#endif
++
+ //----(SA) added
+ 
+ #define DEATHMATCH_SHARED_AMMO 0
+diff --git a/src/game/bg_public.h b/src/game/bg_public.h
+index 779fbc1..5546a55 100644
+--- a/src/game/bg_public.h
++++ b/src/game/bg_public.h
+@@ -1543,6 +1543,9 @@ extern int bg_numItems;
+ gitem_t *BG_FindItem( const char *pickupName );
+ gitem_t *BG_FindItemForClassName( const char *className );
+ gitem_t *BG_FindItemForWeapon( weapon_t weapon );
++#ifdef FEATURE_ACCESSIBILITY
++gitem_t *BG_FindItemForWeaponSafe( weapon_t weapon );
++#endif
+ gitem_t *BG_FindItemForPowerup( powerup_t pw );
+ gitem_t *BG_FindItemForHoldable( holdable_t pw );
+ gitem_t *BG_FindItemForAmmo( int weapon );

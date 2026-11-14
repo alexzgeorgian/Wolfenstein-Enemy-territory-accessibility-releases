@@ -1,0 +1,235 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 62d1d60..f0cf9ae 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -34,6 +34,7 @@ If you have questions concerning this license or the applicable additional terms
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ #define STATUSBARHEIGHT 452
+@@ -4644,6 +4645,214 @@ static void ETA_NarrateObjectiveApproach( void ) {
+ 	ETA_NavigationSystem_UpdateApproach( (int)( Distance( ps->origin, objective.origin ) * ETA_QU_TO_METERS ) );
+ }
+ 
++#define ETA_LOOK_AHEAD_RANGE 8192.0f
++#define ETA_LOOK_AHEAD_MIN_INTERVAL 500
++#define ETA_LOOK_AHEAD_DISTANCE_STEP 5
++
++/**
++ * Names the material of a surface, from the engine's own flags - the same
++ * ones it uses to pick footstep and impact sounds, so this is the game's
++ * idea of what a surface is made of rather than a guess of ours. Returns
++ * NULL when the engine does not say.
++ */
++static const char *ETA_SurfaceMaterial( int surfaceFlags ) {
++	if ( surfaceFlags & SURF_METAL ) {
++		return "Metal";
++	}
++	if ( surfaceFlags & SURF_WOOD ) {
++		return "Wooden";
++	}
++	if ( surfaceFlags & SURF_GLASS ) {
++		return "Glass";
++	}
++	if ( surfaceFlags & SURF_GRASS ) {
++		return "Grass";
++	}
++	if ( surfaceFlags & SURF_GRAVEL ) {
++		return "Gravel";
++	}
++	if ( surfaceFlags & SURF_SNOW ) {
++		return "Snow";
++	}
++	if ( surfaceFlags & SURF_CARPET ) {
++		return "Carpet";
++	}
++	if ( surfaceFlags & SURF_RUBBLE ) {
++		return "Rubble";
++	}
++
++	return NULL;
++}
++
++/**
++ * Describes whatever the player's view runs into.
++ *
++ * The binoculars and the scope are for looking at something specific and
++ * finding out what it is. A trace along the view is the only honest way
++ * to answer that: it reports what the engine says is there.
++ *
++ * Orientation comes from the impact plane rather than the surface, which
++ * is what makes "wooden wall" and "gravel ground" come out right without
++ * a table of special cases.
++ */
++static qboolean ETA_DescribeLookAhead( char *out, size_t outSize, int *distanceMeters ) {
++	trace_t trace;
++	vec3_t start, end, forward;
++	int entityNum;
++
++	if ( !cg.snap ) {
++		return qfalse;
++	}
++
++	VectorCopy( cg.refdef.vieworg, start );
++	AngleVectors( cg.refdefViewAngles, forward, NULL, NULL );
++	VectorMA( start, ETA_LOOK_AHEAD_RANGE, forward, end );
++
++	CG_Trace( &trace, start, NULL, NULL, end, cg.snap->ps.clientNum, MASK_SHOT );
++
++	if ( trace.fraction == 1.0f ) {
++		Q_strncpyz( out, "Nothing in range", outSize );
++		*distanceMeters = -1;
++		return qtrue;
++	}
++
++	*distanceMeters = (int)( Distance( start, trace.endpos ) * ETA_QU_TO_METERS );
++
++	/* The skybox is not a thing you can walk into. */
++	if ( trace.surfaceFlags & SURF_SKY ) {
++		Q_strncpyz( out, "Open sky", outSize );
++		*distanceMeters = -1;
++		return qtrue;
++	}
++
++	entityNum = trace.entityNum;
++
++	if ( entityNum < MAX_CLIENTS ) {
++		clientInfo_t *ci = &cgs.clientinfo[entityNum];
++
++		Q_strncpyz( out, ci->infoValid && ci->name[0] ? ci->name : "Player", outSize );
++		Q_strcat( out, outSize,
++				  ci->team == cgs.clientinfo[cg.clientNum].team ? ", teammate" : ", enemy" );
++		return qtrue;
++	}
++
++	if ( entityNum != ENTITYNUM_WORLD ) {
++		switch ( cg_entities[entityNum].currentState.eType ) {
++		case ET_MOVER:
++			Q_strncpyz( out, "Door", outSize );
++			return qtrue;
++		case ET_EXPLOSIVE:
++			Q_strncpyz( out, "Explosive", outSize );
++			return qtrue;
++		case ET_ITEM:
++			Q_strncpyz( out, "Item", outSize );
++			return qtrue;
++		default:
++			Q_strncpyz( out, "Object", outSize );
++			return qtrue;
++		}
++	}
++
++	{
++		const char *material = ETA_SurfaceMaterial( trace.surfaceFlags );
++		const char *kind;
++
++		if ( trace.surfaceFlags & SURF_LADDER ) {
++			kind = "ladder";
++		} else if ( trace.plane.normal[2] > 0.7f ) {
++			kind = "ground";
++		} else if ( trace.plane.normal[2] < -0.7f ) {
++			kind = "ceiling";
++		} else {
++			kind = "wall";
++		}
++
++		if ( material ) {
++			Com_sprintf( out, outSize, "%s %s", material, kind );
++		} else {
++			Com_sprintf( out, outSize, "%c%s", toupper( kind[0] ), kind + 1 );
++		}
++	}
++
++	return qtrue;
++}
++
++/**
++ * Announces the binoculars and the scope, and what they are aimed at.
++ * Saying the zoom engaged is worth it on its own: a scope does not always
++ * come up when asked, so silence after pressing the key is otherwise
++ * indistinguishable from a scope that did.
++ */
++static void ETA_NarrateZoom( void ) {
++	static ETA_Zoom spoken = ETA_ZOOM_OFF;
++	static char lastDescription[128];
++	static int lastDistance;
++	static int lastTime;
++	ETA_Zoom zoom;
++	char description[128];
++	int distance;
++	qboolean zoomChanged;
++
++	if ( !cg.snap || cg.snap->ps.pm_type != PM_NORMAL ) {
++		spoken = ETA_ZOOM_OFF;
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	if ( cg.zoomedBinoc ) {
++		zoom = ETA_ZOOM_BINOCULARS;
++	} else if ( cg.zoomed ) {
++		zoom = ETA_ZOOM_SCOPE;
++	} else {
++		zoom = ETA_ZOOM_OFF;
++	}
++
++	zoomChanged = ( zoom != spoken );
++
++	if ( zoomChanged ) {
++		spoken = zoom;
++		lastDescription[0] = '\0';
++
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakZoom( zoom );
++
++		if ( zoom == ETA_ZOOM_OFF ) {
++			ETA_Speech_EndReport();
++			return;
++		}
++	} else if ( zoom == ETA_ZOOM_OFF ) {
++		return;
++	}
++
++	if ( !ETA_DescribeLookAhead( description, sizeof( description ), &distance ) ) {
++		if ( zoomChanged ) {
++			ETA_Speech_EndReport();
++		}
++		return;
++	}
++
++	if ( !zoomChanged ) {
++		if ( !Q_stricmp( description, lastDescription )
++			 && abs( distance - lastDistance ) < ETA_LOOK_AHEAD_DISTANCE_STEP ) {
++			return;
++		}
++
++		if ( cg.time - lastTime < ETA_LOOK_AHEAD_MIN_INTERVAL ) {
++			return;
++		}
++
++		ETA_Speech_BeginReport();
++	}
++
++	Q_strncpyz( lastDescription, description, sizeof( lastDescription ) );
++	lastDistance = distance;
++	lastTime = cg.time;
++
++	ETA_HudNarrator_SpeakLookAhead( description, distance );
++
++	ETA_Speech_EndReport();
++}
++
+ static void ETA_NarrateStanceChange( void ) {
+ 	static ETA_Stance spoken = (ETA_Stance)-1;
+ 	const playerState_t *ps;
+@@ -4785,6 +4994,7 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 
+ 	/* Last, so everything above still sees the previous frame's totals. */
+ 	CG_AccessibilitySampleTotals();
++	ETA_NarrateZoom();
+ #endif
+ 
+ 	if ( !cg.showGameView ) {

@@ -1,0 +1,167 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 4c1f8ea..964e9c6 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -263,19 +263,20 @@ static void CG_topshotsUp_f(void)
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ /**
+- * @brief CG_MainObjectiveNameForTeam
+- * Looks up the display name of a team's current main objective. The
+- * server publishes the objective's entity number in CS_MAIN_AXIS_OBJECTIVE
+- * / CS_MAIN_ALLIES_OBJECTIVE (see cg_draw_hud.c's ET_EXPLOSIVE_INDICATOR /
+- * ET_CONSTRUCTIBLE_INDICATOR handling, which resolves the same pair the
+- * same way for the on-screen objective icons); cgs.oidInfo[] is the
+- * matching array of parsed objective entities, populated from configstrings
+- * in cg_servercmds.c. Returns NULL if there's no current main objective or
+- * its oidInfo entry hasn't arrived yet.
++ * @brief CG_MainObjectiveForTeam
++ * Looks up a team's current main objective. The server publishes the
++ * objective's entity number in CS_MAIN_AXIS_OBJECTIVE / CS_MAIN_ALLIES_OBJECTIVE
++ * (see cg_draw_hud.c's ET_EXPLOSIVE_INDICATOR / ET_CONSTRUCTIBLE_INDICATOR
++ * handling, which resolves the same pair the same way for the on-screen
++ * objective icons); cgs.oidInfo[] is the matching array of parsed objective
++ * entities, populated from configstrings in cg_servercmds.c. Returns NULL if
++ * there's no current main objective or its oidInfo entry hasn't arrived yet.
++ * Not static - also used by cg_playerstate.c's ambient objective audio cue
++ * (see cg_local.h), which needs the objective's origin as well as its name.
+  * @param[in] team
+  * @return
+  */
+-static const char *CG_MainObjectiveNameForTeam(team_t team)
++oidInfo_t *CG_MainObjectiveForTeam(team_t team)
+ {
+ 	int entNum = Q_atoi(CG_ConfigString(team == TEAM_AXIS ? CS_MAIN_AXIS_OBJECTIVE : CS_MAIN_ALLIES_OBJECTIVE));
+ 	int i;
+@@ -284,7 +285,7 @@ static const char *CG_MainObjectiveNameForTeam(team_t team)
+ 	{
+ 		if (cgs.oidInfo[i].name[0] && cgs.oidInfo[i].entityNum == entNum)
+ 		{
+-			return cgs.oidInfo[i].name;
++			return &cgs.oidInfo[i];
+ 		}
+ 	}
+ 
+@@ -304,7 +305,7 @@ static void CG_AccessibilityStatus_f(void)
+ {
+ 	playerState_t *ps = &cg.snap->ps;
+ 	weapon_t      weap;
+-	const char    *objectiveName;
++	oidInfo_t     *objective;
+ 
+ 	ETA_HudNarrator_SpeakHealth(ps->stats[STAT_HEALTH]);
+ 
+@@ -324,11 +325,11 @@ static void CG_AccessibilityStatus_f(void)
+ 		}
+ 	}
+ 
+-	objectiveName = CG_MainObjectiveNameForTeam(cgs.clientinfo[cg.clientNum].team);
++	objective = CG_MainObjectiveForTeam(cgs.clientinfo[cg.clientNum].team);
+ 
+-	if (objectiveName)
++	if (objective)
+ 	{
+-		ETA_HudNarrator_SpeakObjective(objectiveName);
++		ETA_HudNarrator_SpeakObjective(objective->name);
+ 	}
+ }
+ #endif
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index c71728b..048d221 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3386,6 +3386,10 @@ void CG_dumpStats_f(void);
+ void CG_AddGameConsoleCommand(void);
+ void CG_RemoveGameConsoleCommand(void);
+ 
++#ifdef FEATURE_ACCESSIBILITY
++oidInfo_t *CG_MainObjectiveForTeam(team_t team);
++#endif
++
+ void CG_ForceTapOut_f(void);
+ 
+ // MAPVOTE
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 81edc0e..75d2106 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -369,6 +369,68 @@ void CG_CheckLocalSounds(playerState_t *ps, playerState_t *ops)
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Narrates the objective and objective-direction audio cues when the
++ * player's team's current main objective changes.
++ *
++ * CG_MainObjectiveForTeam (cg_consolecmds.c) resolves the same
++ * CS_MAIN_AXIS_OBJECTIVE / CS_MAIN_ALLIES_OBJECTIVE + cgs.oidInfo[] lookup
++ * the on-demand /accessibilityStatus command already uses, so "changed"
++ * here means exactly what that command would report differently: a new
++ * objective entity replacing the old one (destroyed/captured and
++ * reassigned), or the player joining/switching to a playing team and
++ * picking up that team's current objective for the first time. This is
++ * the "ambient event, not manual query" trigger the follow-up needed -
++ * unlike the on-demand status command, it only speaks on a real change,
++ * not on every call.
++ *
++ * The direction cue mirrors 0005's damage-direction cue: a world-space
++ * vector (here, objective origin minus the player's own predicted origin)
++ * run through the engine's own vec3_to_angles, then normalized relative to
++ * the player's current view yaw via AngleNormalize360, giving the same
++ * 0 = front / 90 = right / 180 = behind / 270 = left convention.
++ * @param[in] ps
++ */
++static void ETA_NarrateObjectiveChange(playerState_t *ps)
++{
++	static team_t lastTeam   = TEAM_SPECTATOR;
++	static int    lastEntNum = -1;
++	team_t        team       = (team_t)ps->persistant[PERS_TEAM];
++	oidInfo_t     *objective;
++
++	if (team != TEAM_AXIS && team != TEAM_ALLIES)
++	{
++		lastTeam   = team;
++		lastEntNum = -1;
++		return;
++	}
++
++	objective = CG_MainObjectiveForTeam(team);
++
++	if (!objective)
++	{
++		lastTeam   = team;
++		lastEntNum = -1;
++		return;
++	}
++
++	if (team != lastTeam || objective->entityNum != lastEntNum)
++	{
++		vec3_t delta, angles;
++
++		ETA_AudioCueSystem_PlayObjectiveCue();
++
++		VectorSubtract(objective->origin, ps->origin, delta);
++		vectoangles(delta, angles);
++		ETA_AudioCueSystem_PlayObjectiveDirectionCue((int)AngleNormalize360(ps->viewangles[YAW] - angles[YAW]));
++	}
++
++	lastTeam   = team;
++	lastEntNum = objective->entityNum;
++}
++#endif
++
+ /**
+  * @brief CG_TransitionPlayerState
+  * @param[in] ps
+@@ -585,6 +647,10 @@ void CG_TransitionPlayerState(playerState_t *ps, playerState_t *ops)
+ 		cg.wasProne   = ops->eFlags & EF_PRONE;
+ 		VectorSubtract(ops->origin, ps->origin, cg.deltaProne);
+ 	}
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NarrateObjectiveChange(ps);
++#endif
+ }
+ 
+ /**

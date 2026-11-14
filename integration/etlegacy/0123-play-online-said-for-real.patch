@@ -1,0 +1,19 @@
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 06f0edb..3b9d5d0 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -304,8 +304,12 @@ const char *ETA_MenuItem_Label(itemDef_t *item)
+ 	if (item->text && item->text[0])
+ 	{
+ 		/* The main menu's button reads "PLAY", and opens Play Online:
+-		   the tester knows it by that name. */
+-		if (item->action && Q_stristr(item->action, "open playonline"))
++		   the tester knows it by that name. The action is kept as the
++		   parser rebuilt it, each word in quotes - "open" "playonline" -
++		   so the menu's name is looked for alone. */
++		if (item->action && item->parent
++		    && !Q_stricmp(((menuDef_t *)item->parent)->window.name, "main")
++		    && Q_stristr(item->action, "playonline"))
+ 		{
+ 			return "Play online";
+ 		}

@@ -1,0 +1,22 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 0f4073a..f2027de 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -3156,8 +3156,16 @@ qboolean Item_HandleKey( itemDef_t *item, int key, qboolean down ) {
+ 		return qfalse;
+ 		break;
+ 	case ITEM_TYPE_TRICHECKBOX:
+-		return Item_CheckBox_HandleKey( item, key );
++	{
++		qboolean changed = Item_CheckBox_HandleKey( item, key );
++#ifdef FEATURE_ACCESSIBILITY
++		if ( changed ) {
++			ETA_MenuNarrator_OnValueChanged( item->text, Item_Multi_Setting( item ) );
++		}
++#endif
++		return changed;
+ 		break;
++	}
+ 	case ITEM_TYPE_CHECKBOX:
+ 	{
+ 		qboolean changed = Item_CheckBox_HandleKey( item, key );

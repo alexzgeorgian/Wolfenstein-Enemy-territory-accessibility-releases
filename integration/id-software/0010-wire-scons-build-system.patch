@@ -1,0 +1,151 @@
+diff --git a/src/SConscript.cgame b/src/SConscript.cgame
+index 2a4a73c..b3be88b 100644
+--- a/src/SConscript.cgame
++++ b/src/SConscript.cgame
+@@ -64,6 +64,27 @@ cg_window.c
+ ../ui/ui_shared.c
+ """
+ 
++# accessibility layer, compiled in when ACCESSIBILITY=1. Listed as sources
++# rather than linked from the accessibility-mode project's own CMake static
++# library so it always builds with this module's exact flags and target
++# architecture - a separately built library would have to be matched to
++# 'gcc -m32' by hand.
++accessibility_string = """
++audio/audio_cue_system.c
++core/accessibility_runtime.c
++core/debug_log.c
++core/error_handler.c
++core/event_router.c
++core/runtime_guard.c
++hud/hud_narrator.c
++menu/menu_narrator.c
++navigation/navigation_system.c
++platform/windows/windows_audio_cue.c
++platform/windows/windows_nvda.c
++platform/windows/windows_speech.c
++speech/speech_manager.c
++"""
++
+ cgame_list = scons_utils.BuildList( 'cgame', cgame_string )
+ 
+ local_env = g_env.Clone()
+@@ -81,5 +102,19 @@ try:
+ except:
+ 	pass
+ 
++# accessibility-mode lives outside this source tree (alongside it, not under
++# it), so its paths are resolved to absolutes up front: SCons is running from
++# the directory holding SConstruct, and absolute paths are not subject to the
++# BuildDir remapping the relative entries above go through.
++# ACCESSIBILITY isn't exported in all usage paths, same as GAMERANGER above.
++try:
++	if ( ACCESSIBILITY == '1' ):
++		accessibility_root = os.path.abspath( os.path.join( os.getcwd(), '..', 'accessibility-mode', 'src', 'accessibility' ) )
++		local_env.Append( CPPDEFINES = [ 'FEATURE_ACCESSIBILITY' ] )
++		local_env.Append( CPPPATH = [ accessibility_root ] )
++		source_list = source_list + scons_utils.BuildList( accessibility_root, accessibility_string )
++except:
++	pass
++
+ ret = local_env.SharedLibrary( target = 'cgame', source = source_list )
+ Return( 'ret' )
+diff --git a/src/SConscript.ui b/src/SConscript.ui
+index 5142d24..69ca785 100644
+--- a/src/SConscript.ui
++++ b/src/SConscript.ui
+@@ -25,6 +25,27 @@ ui_util.c
+ ../game/q_shared.c
+ """
+ 
++# accessibility layer, compiled in when ACCESSIBILITY=1. Listed as sources
++# rather than linked from the accessibility-mode project's own CMake static
++# library so it always builds with this module's exact flags and target
++# architecture - a separately built library would have to be matched to
++# 'gcc -m32' by hand.
++accessibility_string = """
++audio/audio_cue_system.c
++core/accessibility_runtime.c
++core/debug_log.c
++core/error_handler.c
++core/event_router.c
++core/runtime_guard.c
++hud/hud_narrator.c
++menu/menu_narrator.c
++navigation/navigation_system.c
++platform/windows/windows_audio_cue.c
++platform/windows/windows_nvda.c
++platform/windows/windows_speech.c
++speech/speech_manager.c
++"""
++
+ ui_list = scons_utils.BuildList( 'ui', ui_string )
+ 
+ local_env = g_env.Clone()
+@@ -35,5 +56,20 @@ source_list = ui_list
+ 
+ local_env['LINK'] = local_env['CC']
+ 
++# accessibility-mode lives outside this source tree (alongside it, not under
++# it), so its paths are resolved to absolutes up front: SCons is running from
++# the directory holding SConstruct, and absolute paths are not subject to the
++# BuildDir remapping the relative entries above go through.
++# ACCESSIBILITY isn't exported in all usage paths, same as GAMERANGER in
++# SConscript.cgame.
++try:
++	if ( ACCESSIBILITY == '1' ):
++		accessibility_root = os.path.abspath( os.path.join( os.getcwd(), '..', 'accessibility-mode', 'src', 'accessibility' ) )
++		local_env.Append( CPPDEFINES = [ 'FEATURE_ACCESSIBILITY' ] )
++		local_env.Append( CPPPATH = [ accessibility_root ] )
++		source_list = source_list + scons_utils.BuildList( accessibility_root, accessibility_string )
++except:
++	pass
++
+ ret = local_env.SharedLibrary( target = 'ui', source = source_list )
+ Return( 'ret' )
+diff --git a/src/SConstruct b/src/SConstruct
+index dc69c93..0419f9f 100644
+--- a/src/SConstruct
++++ b/src/SConstruct
+@@ -11,7 +11,7 @@ import scons_utils
+ conf_filename='site.conf'
+ # choose configuration variables which should be saved between runs
+ # ( we handle all those as strings )
+-serialized=[ 'CC', 'CXX', 'JOBS', 'BUILD', 'BUILD_ROOT', 'DEDICATED', 'TARGET_CORE', 'TARGET_BSPC', 'TARGET_CGAME', 'TARGET_GAME', 'TARGET_UI', 'MASTER' ]
++serialized=[ 'CC', 'CXX', 'JOBS', 'BUILD', 'BUILD_ROOT', 'DEDICATED', 'TARGET_CORE', 'TARGET_BSPC', 'TARGET_CGAME', 'TARGET_GAME', 'TARGET_UI', 'MASTER', 'ACCESSIBILITY' ]
+ 
+ # help -------------------------------------------
+ 
+@@ -62,6 +62,15 @@ TARGET_CGAME (default 1)
+ TARGET_UI (default 1)
+ 	Build ui module
+ 
++ACCESSIBILITY (default 0)
++	Build the cgame and ui modules with the accessibility layer
++	(speech narration, audio cues, navigation assistance) compiled in.
++	Requires the accessibility-mode sources to be present at
++	../accessibility-mode/src/accessibility relative to this directory -
++	see integration/id-software/README.md in that repository.
++	0 - off, the modules build exactly as they did before
++	1 - on, defines FEATURE_ACCESSIBILITY and links the layer in
++
+ BUILD_ROOT (default 'build')
+ 	change the build root directory
+ 	
+@@ -127,6 +136,7 @@ TARGET_GAME = '1'
+ TARGET_CGAME = '1'
+ TARGET_UI = '1'
+ TARGET_BSPC = '0'
++ACCESSIBILITY = '0'
+ BUILD_ROOT = 'build'
+ NOCONF = '0'
+ MASTER = ''
+@@ -292,7 +302,7 @@ local_dedicated = 0
+ local_curl = 0	# config selection
+ curl_lib = []
+ 
+-GLOBALS = 'g_env OS g_os BUILD local_dedicated curl_lib local_curl MASTER gcc3 cpu'
++GLOBALS = 'g_env OS g_os BUILD local_dedicated curl_lib local_curl MASTER gcc3 cpu ACCESSIBILITY'
+ 
+ # end general configuration ----------------------
+ 

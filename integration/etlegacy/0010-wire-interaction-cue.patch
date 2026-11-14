@@ -1,0 +1,71 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index c8c5b25..1907244 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -36,6 +36,10 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "audio/audio_cue_system.h"
++#endif
++
+ char *Binding_FromName(const char *cvar);
+ void Controls_GetConfig(void);
+ void CG_DrawOverlays(void);
+@@ -2102,6 +2106,44 @@ static void CG_ScanForCrosshairEntity()
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Narrates a newly shown (or newly different) interaction hint icon
++ * for the accessibility audio cue system.
++ *
++ * cg.cursorHintIcon has no explicit "cleared" state: CG_CheckForCursorHints
++ * below never resets it back to HINT_NONE, and CG_DrawCursorhint
++ * (cg_newDraw.c) instead treats a hint as currently shown purely from the
++ * cg.cursorHintTime / cg.cursorHintFade timing window it sets alongside the
++ * icon - this reuses that exact same window so a cue fires exactly when the
++ * on-screen hint icon would be visible, and stays silent while it's faded
++ * out, matching CG_DrawCursorhint's own gate:
++ * `!cg.cursorHintTime || cg.cursorHintFade <= 0 || (cg.time -
++ * cg.cursorHintTime) >= cg.cursorHintFade`.
++ *
++ * HINT_COMPLETED is excluded from counting as a new icon: CG_DrawCursorhint
++ * deliberately keeps the previously selected shader for it ("keep the last
++ * used hint icon shader"), so it never represents a newly discovered
++ * interaction on its own.
++ */
++static void ETA_NarrateInteractionHint(void)
++{
++	static qboolean wasActive = qfalse;
++	static int      lastIcon  = HINT_NONE;
++	qboolean        active    = (qboolean)(cg.cursorHintTime != 0 && cg.cursorHintFade > 0 &&
++	                                        (cg.time - cg.cursorHintTime) < cg.cursorHintFade);
++
++	if (active && cg.cursorHintIcon != HINT_COMPLETED &&
++	    (!wasActive || cg.cursorHintIcon != lastIcon))
++	{
++		ETA_AudioCueSystem_PlayInteractionCue();
++		lastIcon = cg.cursorHintIcon;
++	}
++
++	wasActive = active;
++}
++#endif
++
+ /**
+  * @brief CG_CheckForCursorHints
+  * @note Concept in progress...
+@@ -4331,6 +4373,10 @@ static void CG_Draw2D(void)
+ 			CG_ScanForCrosshairEntity();
+ 			CG_CheckForCursorHints();
+ 
++#ifdef FEATURE_ACCESSIBILITY
++			ETA_NarrateInteractionHint();
++#endif
++
+ 			// force drawing binoc & scope mask even if crosshair is invisible
+ 			if (!CG_GetActiveHUD()->crosshair.visible
+ 			    && (cg.zoomedBinoc || (cg.zoomed && !BG_PlayerMounted(cg.snap->ps.eFlags))))

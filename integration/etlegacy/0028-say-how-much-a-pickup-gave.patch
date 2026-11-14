@@ -1,0 +1,145 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 2188a75..088d6fd 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -5054,6 +5054,10 @@ void CG_DrawActive()
+ 	/* Cheap per frame - a scan of a few dozen command map entries - and
+ 	   the library speaks only on a milestone crossing. */
+ 	ETA_NarrateObjectiveApproach();
++
++	/* Last, so everything above still sees the previous frame's totals:
++	   this is what a pickup next frame will be measured against. */
++	CG_AccessibilitySampleTotals();
+ #endif
+ 
+ 	if (!cg.showGameView)
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index a78a8a6..9d50a35 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -499,6 +499,77 @@ extern int CG_WeaponIndex(int weapnum, int *bank, int *cycle);
+  * @param[in] itemNum
+  * @param[in] item
+  */
++/**
++ * @brief Reserve ammo and health as of the frame before this one.
++ *
++ * A pickup arrives with a new snapshot, and by the time the event is
++ * dispatched cg.snap->ps already holds what the server granted - the
++ * "before" is gone. The engine's own before/after pair
++ * (CG_TransitionPlayerState) is no help: in the ordinary predicted case
++ * it runs from the prediction pass, not from the snapshot transition, so
++ * it is not a fixed distance either side of this event. Sampling the two
++ * numbers ourselves once a frame sidesteps the ordering question rather
++ * than trying to answer it, which is the same lesson 0022 had to learn
++ * about the weapon ammo report.
++ */
++static int      eta_previousReserve[MAX_WEAPONS];
++static int      eta_previousHealth;
++static qboolean eta_havePrevious = qfalse;
++
++/**
++ * @brief Records this frame's totals, to compare the next pickup against.
++ *
++ * Called once a frame from CG_DrawActive, after the narration has had its
++ * look at the old values.
++ */
++void CG_AccessibilitySampleTotals(void)
++{
++	int i;
++
++	if (!cg.snap)
++	{
++		eta_havePrevious = qfalse;
++		return;
++	}
++
++	for (i = 0; i < MAX_WEAPONS; i++)
++	{
++		eta_previousReserve[i] = cg.snap->ps.ammo[i];
++	}
++
++	eta_previousHealth = cg.snap->ps.stats[STAT_HEALTH];
++	eta_havePrevious   = qtrue;
++}
++
++/**
++ * @brief Rounds added to the player's reserve since the last frame.
++ *
++ * Only increases count. Firing spends reserve and reloading moves it into
++ * the clip, both of which show up here as decreases, and neither is a
++ * pickup. A pack tops up every weapon the player carries at once
++ * (BG_AddMagicAmmo), so the increases are summed: the answer is what the
++ * pack actually gave, across the whole kit.
++ */
++static int ETA_ReserveGained(void)
++{
++	int i, gained = 0;
++
++	if (!eta_havePrevious)
++	{
++		return 0;
++	}
++
++	for (i = 0; i < MAX_WEAPONS; i++)
++	{
++		if (cg.snap->ps.ammo[i] > eta_previousReserve[i])
++		{
++			gained += cg.snap->ps.ammo[i] - eta_previousReserve[i];
++		}
++	}
++
++	return gained;
++}
++
+ static void ETA_NarrateItemPickup(int itemNum, const gitem_t *item)
+ {
+ 	char text[256];
+@@ -519,11 +590,35 @@ static void ETA_NarrateItemPickup(int itemNum, const gitem_t *item)
+ 
+ 	if (item->giType == IT_HEALTH)
+ 	{
++		int gained = eta_havePrevious ? cg.snap->ps.stats[STAT_HEALTH] - eta_previousHealth : 0;
++
++		/* Walking over a pack at full health is worth knowing about: it
++		   otherwise sounds exactly like one that healed you, and the pack
++		   is gone either way. */
++		if (gained > 0)
++		{
++			ETA_HudNarrator_SpeakGain(gained, qfalse);
++		}
++		else
++		{
++			ETA_HudNarrator_SpeakAlreadyFull();
++		}
++
+ 		ETA_HudNarrator_SpeakHealth(cg.snap->ps.stats[STAT_HEALTH]);
+ 	}
+ 	else if (item->giType == IT_AMMO || (item->giType == IT_WEAPON && item->giWeapon == WP_AMMO))
+ 	{
+ 		int ammo, clips, akimboammo, maxammo;
++		int gained = ETA_ReserveGained();
++
++		if (gained > 0)
++		{
++			ETA_HudNarrator_SpeakGain(gained, qtrue);
++		}
++		else
++		{
++			ETA_HudNarrator_SpeakAlreadyFull();
++		}
+ 
+ 		CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1475495..7700d93 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3410,6 +3410,7 @@ qboolean CG_AccessibilityNearestObjective(team_t team, const vec3_t from, etaObj
+ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObjective_t *out);
+ void CG_AccessibilityNarrateObjective(void);
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
++void CG_AccessibilitySampleTotals(void);
+ 
+ extern vmCvar_t eta_objectiveCallouts;
+ 

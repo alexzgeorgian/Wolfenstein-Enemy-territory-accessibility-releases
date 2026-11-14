@@ -1,0 +1,567 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 8df00f5..7642621 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -40,6 +40,7 @@
+ #include "navigation/navigation_system.h"
+ #include "navigation/place_classifier.h"
+ #include "navigation/sniper_spots.h"
++#include "navigation/rooms.h"
+ #include "speech/speech_manager.h"
+ #endif
+ 
+@@ -2597,6 +2598,7 @@ static ETA_MapCursor eta_mapCursor;
+  * found themselves on the map.
+  */
+ static void ETA_MapCellPlaces(int column, int row, int layer, char *out, size_t outSize);
++static int  ETA_RoomsInCell(int column, int row);
+ 
+ static void ETA_MapSpeakCell(void)
+ {
+@@ -2629,6 +2631,18 @@ static void ETA_MapSpeakCell(void)
+ 			Com_sprintf(contents + used, (int)(sizeof(contents) - used), "%s%s",
+ 			            used ? ", " : "", places);
+ 		}
++
++		/* And how many rooms there are in it to walk to. */
++		{
++			int rooms = ETA_RoomsInCell(eta_mapCursor.column, eta_mapCursor.row);
++
++			if (rooms > 0)
++			{
++				used = strlen(contents);
++				Com_sprintf(contents + used, (int)(sizeof(contents) - used), "%s%s",
++				            used ? ", " : "", rooms == 1 ? "one room" : va("%d rooms", rooms));
++			}
++		}
+ 	}
+ 
+ 	ETA_MapCellFor(cg.predictedPlayerState.origin[0],
+@@ -4227,7 +4241,8 @@ static struct
+ 	int          count, index, lastPress;
+ 	int          marked;      /* the spot under the marker, or -1 */
+ 	qboolean     judged;      /* whether the way there has been looked at */
+-	int          checking;    /* the spot whose way down is being looked for, or -1 */
++	int          checking;    /* the spot or room whose way down is being looked for, or -1 */
++	qboolean     checkingRoom;
+ 	int          checkSteps;
+ } eta_spots;
+ 
+@@ -4299,8 +4314,100 @@ static void ETA_SpotLook(const vec3_t floor, ETA_SpotView *view)
+ 	}
+ }
+ 
+-/* One point of the map: its floors, and any spot among them. */
+-static void ETA_SpotScanPoint(float x, float y)
++/**
++ * @brief Rooms: the indoor places of the map, found on the same look over
++ * it (navigation/rooms.c groups them).
++ *
++ * The tester asked for the rooms to be trackable on the map. At each
++ * floor of each point looked at, a roof straight overhead - not sky - is
++ * indoors, and the point is kept. Once the whole map has been looked
++ * over, points next to each other at the same height that a player
++ * could walk straight between are one room; a wall between them makes
++ * two. Each room takes the map's own name for the place, where it has
++ * one.
++ */
++static struct
++{
++	ETA_RoomSample samples[ETA_ROOM_MAX_SAMPLES];
++	int            sampleCount;
++	qboolean       built;
++	ETA_RoomList   list;
++	int            order[ETA_ROOM_MAX];
++	int            count, index, lastPress;
++	int            marked;   /* the room under the marker, or -1 */
++	qboolean       judged;
++} eta_rooms;
++
++static void ETA_RoomSamplePoint(const vec3_t floor, qboolean upper, int column, int row)
++{
++	trace_t         trace;
++	vec3_t          start, end;
++	ETA_RoomSample *sample;
++
++	if (eta_rooms.sampleCount >= ETA_ROOM_MAX_SAMPLES)
++	{
++		return;
++	}
++
++	VectorSet(start, floor[0], floor[1], floor[2] + ETA_SPOT_EYE);
++	VectorSet(end, floor[0], floor[1], floor[2] + 2048.0f);
++	trap_CM_BoxTrace(&trace, start, end, NULL, NULL, 0, MASK_SOLID);
++
++	if (trace.startsolid || trace.fraction >= 1.0f || (trace.surfaceFlags & SURF_SKY))
++	{
++		return;   /* open sky: not a room */
++	}
++
++	sample            = &eta_rooms.samples[eta_rooms.sampleCount++];
++	sample->column    = column;
++	sample->row       = row;
++	sample->origin[0] = floor[0];
++	sample->origin[1] = floor[1];
++	sample->origin[2] = floor[2] + 24.0f;
++	sample->upper     = upper ? 1 : 0;
++}
++
++/* Whether a player could walk straight from one point to the next, at
++   the route probe's size: a wall between them, or a step too high, and
++   they are not the same room. */
++static int ETA_RoomLink(void *context, const float from[3], const float to[3])
++{
++	static const vec3_t mins = { -ETA_ROUTE_HALF_WIDTH, -ETA_ROUTE_HALF_WIDTH, -24.0f + 18.0f };
++	static const vec3_t maxs = { ETA_ROUTE_HALF_WIDTH, ETA_ROUTE_HALF_WIDTH, 24.0f };
++	trace_t trace;
++	vec3_t  a, b;
++
++	(void)context;
++	VectorSet(a, from[0], from[1], from[2]);
++	VectorSet(b, to[0], to[1], from[2]);
++	trap_CM_BoxTrace(&trace, a, b, mins, maxs, 0, MASK_PLAYERSOLID);
++	return !trace.startsolid && trace.fraction >= 1.0f;
++}
++
++static void ETA_RoomsBuild(void)
++{
++	int i;
++
++	ETA_Rooms_Build(eta_rooms.samples, eta_rooms.sampleCount, ETA_SPOT_SPACING,
++	                ETA_RoomLink, NULL, &eta_rooms.list);
++
++	for (i = 0; i < eta_rooms.list.count; i++)
++	{
++		ETA_Room   *room = &eta_rooms.list.rooms[i];
++		const char *name = CG_GetLocationMsg(-1, room->origin);
++
++		if (name && Q_stricmp(name, "Unknown"))
++		{
++			Q_strncpyz(room->name, name, sizeof(room->name));
++			Q_CleanStr(room->name);
++		}
++	}
++
++	eta_rooms.built = qtrue;
++}
++
++/* One point of the map: its floors, any spot among them, and any room. */
++static void ETA_SpotScanPoint(float x, float y, int column, int row)
+ {
+ 	vec3_t floors[ETA_PLACE_SURVEY_FLOORS];
+ 	int    count = ETA_SurveyFloors(x, y, floors, ETA_PLACE_SURVEY_FLOORS);
+@@ -4312,6 +4419,8 @@ static void ETA_SpotScanPoint(float x, float y)
+ 		ETA_Place place;
+ 		vec3_t    origin;
+ 
++		ETA_RoomSamplePoint(floors[k], raised, column, row);
++
+ 		/* The lowest floor is up off the ground only at the edge of a
+ 		   drop - a terrace, the top of a wall. */
+ 		if (!raised)
+@@ -4359,13 +4468,15 @@ static void ETA_SpotScanFrame(void)
+ 		eta_spots.started  = qtrue;
+ 		eta_spots.marked   = -1;
+ 		eta_spots.checking = -1;
++		eta_rooms.marked   = -1;
+ 		eta_spots.columns = (int)((cg.mapcoordsMaxs[0] - cg.mapcoordsMins[0]) / ETA_SPOT_SPACING);
+ 		eta_spots.rows    = (int)((cg.mapcoordsMins[1] - cg.mapcoordsMaxs[1]) / ETA_SPOT_SPACING);
+ 		ETA_SpotList_Clear(&eta_spots.list);
+ 
+ 		if (!cg.mapcoordsValid || eta_spots.columns <= 0 || eta_spots.rows <= 0)
+ 		{
+-			eta_spots.done = qtrue;
++			eta_spots.done  = qtrue;
++			eta_rooms.built = qtrue;
+ 			return;
+ 		}
+ 	}
+@@ -4376,7 +4487,8 @@ static void ETA_SpotScanFrame(void)
+ 	{
+ 		/* mapcoordsMins[1] is the north edge; rows run south from it. */
+ 		ETA_SpotScanPoint(cg.mapcoordsMins[0] + ((float)eta_spots.column + 0.5f) * ETA_SPOT_SPACING,
+-		                  cg.mapcoordsMins[1] - ((float)eta_spots.row + 0.5f) * ETA_SPOT_SPACING);
++		                  cg.mapcoordsMins[1] - ((float)eta_spots.row + 0.5f) * ETA_SPOT_SPACING,
++		                  eta_spots.column, eta_spots.row);
+ 
+ 		if (++eta_spots.column >= eta_spots.columns)
+ 		{
+@@ -4384,6 +4496,7 @@ static void ETA_SpotScanFrame(void)
+ 			if (++eta_spots.row >= eta_spots.rows)
+ 			{
+ 				eta_spots.done = qtrue;
++				ETA_RoomsBuild();
+ 				return;
+ 			}
+ 		}
+@@ -4492,19 +4605,39 @@ static void ETA_SpotCheckFrame(void)
+ 		return;
+ 	}
+ 
++	/* The spots first, then the rooms: a room shut in on its own is a
++	   space the map's builder sealed off, not one to send a player to. */
+ 	if (eta_spots.checking < 0)
+ 	{
++		const float *origin = NULL;
++
+ 		for (i = 0; i < eta_spots.list.count && eta_spots.list.spots[i].checked; i++)
+ 		{
+ 		}
+-		if (i >= eta_spots.list.count)
++		if (i < eta_spots.list.count)
++		{
++			eta_spots.checkingRoom = qfalse;
++			origin                 = eta_spots.list.spots[i].origin;
++		}
++		else if (eta_rooms.built)
++		{
++			for (i = 0; i < eta_rooms.list.count && eta_rooms.list.rooms[i].checked; i++)
++			{
++			}
++			if (i < eta_rooms.list.count)
++			{
++				eta_spots.checkingRoom = qtrue;
++				origin                 = eta_rooms.list.rooms[i].origin;
++			}
++		}
++		if (!origin)
+ 		{
+ 			return;
+ 		}
+ 
+ 		eta_spots.checking   = i;
+ 		eta_spots.checkSteps = 0;
+-		ETA_PathFinder_Begin(eta_spots.list.spots[i].origin, cg.predictedPlayerState.origin, ETA_ROUTE_CELL,
++		ETA_PathFinder_Begin(origin, cg.predictedPlayerState.origin, ETA_ROUTE_CELL,
+ 		                     ETA_MARKER_ARRIVE_METERS / ETA_QU_TO_METERS, 0);
+ 	}
+ 
+@@ -4512,8 +4645,8 @@ static void ETA_SpotCheckFrame(void)
+ 
+ 	while (trap_Milliseconds() - began < ETA_SPOT_BUDGET_MS)
+ 	{
+-		ETA_Spot      *spot  = &eta_spots.list.spots[eta_spots.checking];
+-		ETA_PathState  state = ETA_PathFinder_Step(ETA_ROUTE_BUDGET_STEP, ETA_RouteMoveBack, NULL);
++		ETA_PathState state = ETA_PathFinder_Step(ETA_ROUTE_BUDGET_STEP, ETA_RouteMoveBack, NULL);
++		int           shut;
+ 
+ 		eta_spots.checkSteps += ETA_ROUTE_BUDGET_STEP;
+ 
+@@ -4525,8 +4658,17 @@ static void ETA_SpotCheckFrame(void)
+ 		/* Found the player, or still spreading: on the map at large.
+ 		   Everywhere reachable from it tried, and the player not among
+ 		   it: shut in. */
+-		spot->checked     = 1;
+-		spot->unreachable = (state == ETA_PATH_PARTIAL || state == ETA_PATH_FAILED) ? 1 : 0;
++		shut = (state == ETA_PATH_PARTIAL || state == ETA_PATH_FAILED) ? 1 : 0;
++		if (eta_spots.checkingRoom)
++		{
++			eta_rooms.list.rooms[eta_spots.checking].checked     = 1;
++			eta_rooms.list.rooms[eta_spots.checking].unreachable = shut;
++		}
++		else
++		{
++			eta_spots.list.spots[eta_spots.checking].checked     = 1;
++			eta_spots.list.spots[eta_spots.checking].unreachable = shut;
++		}
+ 		eta_spots.checking = -1;
+ 		ETA_PathFinder_Reset();
+ 		return;
+@@ -4980,6 +5122,104 @@ void CG_AccessibilitySniperSpot(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief Puts the marker on the nearest room, or the next one.
++ *
++ * As the sniper spot key does: pressed again within a few seconds, the
++ * next room further off. Each is said with the map's own name for the
++ * place, which floor it is on and its size - "Room 2 of 12: Water Pump,
++ * ground floor, 8 by 6 meters" - and the marker's sound leads the way
++ * there, through the door. Arriving says "inside" it.
++ */
++void CG_AccessibilityRoom(void)
++{
++	const ETA_Room *room;
++	char            text[128];
++	int             distance;
++	qboolean        cycling;
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++
++	if (cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		ETA_Speech_Say("Only in play: spawn first, then ask for a room");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	cycling = (qboolean)(eta_rooms.lastPress && cg.time >= eta_rooms.lastPress
++	                     && cg.time - eta_rooms.lastPress < ETA_MARKER_CYCLE_MS);
++
++	if (!cycling || eta_rooms.count <= 0)
++	{
++		eta_rooms.count = eta_rooms.built
++		                  ? ETA_RoomList_Nearest(&eta_rooms.list, cg.predictedPlayerState.origin,
++		                                         eta_rooms.order, ETA_ROOM_MAX)
++		                  : 0;
++		eta_rooms.index = 0;
++	}
++	else
++	{
++		eta_rooms.index = (eta_rooms.index + 1) % eta_rooms.count;
++	}
++
++	if (eta_rooms.count <= 0)
++	{
++		eta_rooms.lastPress = 0;
++		ETA_Speech_Say(eta_rooms.built ? "No rooms found on this map"
++		                               : "Still looking over the map for rooms. Ask again in a moment");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	eta_rooms.lastPress = cg.time;
++	eta_rooms.marked    = eta_rooms.order[eta_rooms.index];
++	eta_rooms.judged    = qfalse;
++	room                = &eta_rooms.list.rooms[eta_rooms.marked];
++
++	memset(&eta_marker, 0, sizeof(eta_marker));
++	eta_marker.objective = qtrue;
++	eta_marker.leftIt    = qtrue;
++	VectorCopy(room->origin, eta_marker.origin);
++	Q_strncpyz(eta_marker.name, room->name[0] ? va("inside %s", room->name) : "inside the room",
++	           sizeof(eta_marker.name));
++	eta_marker.active = qtrue;
++	ETA_RouteForget();
++	distance = ETA_MarkerDistance();
++	ETA_NavigationSystem_StartMarkerApproach(distance);
++
++	ETA_Room_Text(room, ETA_SPOT_SPACING, text, sizeof(text));
++	ETA_Speech_Say(va("Room %d of %d: %s", eta_rooms.index + 1, eta_rooms.count, text));
++	ETA_NavigationSystem_AnnounceMarkerDistance(distance);
++	ETA_NavigationSystem_AnnounceHeight((eta_marker.origin[2] - cg.predictedPlayerState.origin[2]) * ETA_QU_TO_METERS);
++	ETA_MarkerSpeakWay();
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief How many rooms the map has in a square of the command map, for
++ * the survey.
++ */
++static int ETA_RoomsInCell(int column, int row)
++{
++	vec2_t start, step;
++	int    columns, rows;
++
++	if (!eta_rooms.built || !ETA_MapGrid(start, step, &columns, &rows))
++	{
++		return 0;
++	}
++
++	return ETA_RoomList_CountIn(&eta_rooms.list,
++	                            start[0] + (float)column * step[0], start[1] - (float)(row + 1) * step[1],
++	                            start[0] + (float)(column + 1) * step[0], start[1] - (float)row * step[1]);
++}
++
+ /**
+  * @brief Whether the way up to the sniper spot under the marker was found.
+  *
+@@ -4993,52 +5233,83 @@ void CG_AccessibilitySniperSpot(void)
+  */
+ #define ETA_SPOT_UNDER_UNITS 320.0f   /* given up this close to it, flat: underneath */
+ 
+-static void ETA_SpotJudgeWay(void)
++/* Whether the search for the way to a spot or room under the marker
++   gave up right underneath it: then there is no way up from here. */
++static qboolean ETA_WayStopsUnder(const float origin[3])
+ {
+-	ETA_Spot *spot;
+-	float     end[3];
+-	int       points;
++	float end[3];
++	int   points = ETA_PathFinder_PointCount();
+ 
+-	if (eta_spots.judged || eta_spots.marked < 0 || eta_spots.marked >= eta_spots.list.count
+-	    || !eta_marker.active || !eta_route.jumps)
++	if (ETA_PathFinder_State() != ETA_PATH_PARTIAL || points <= 0)
+ 	{
+-		return;
++		return qfalse;
+ 	}
+ 
+-	spot = &eta_spots.list.spots[eta_spots.marked];
+-	if (!VectorCompare(spot->origin, eta_marker.origin))
+-	{
+-		eta_spots.marked = -1;   /* the marker was put somewhere else */
+-		return;
+-	}
++	ETA_PathFinder_Point(points - 1, end);
++	return (qboolean)((end[0] - origin[0]) * (end[0] - origin[0])
++	                  + (end[1] - origin[1]) * (end[1] - origin[1]) < ETA_SPOT_UNDER_UNITS * ETA_SPOT_UNDER_UNITS
++	                  && origin[2] - end[2] > 64.0f);
++}
+ 
+-	if (ETA_PathFinder_State() == ETA_PATH_FOUND)
++static void ETA_SpotJudgeWay(void)
++{
++	ETA_PathState state;
++
++	if (!eta_marker.active || !eta_route.jumps)
+ 	{
+-		eta_spots.judged = qtrue;
+ 		return;
+ 	}
++	state = ETA_PathFinder_State();
+ 
+-	points = ETA_PathFinder_PointCount();
+-	if (ETA_PathFinder_State() != ETA_PATH_PARTIAL || points <= 0)
++	if (!eta_spots.judged && eta_spots.marked >= 0 && eta_spots.marked < eta_spots.list.count)
+ 	{
+-		return;
+-	}
++		ETA_Spot *spot = &eta_spots.list.spots[eta_spots.marked];
+ 
+-	eta_spots.judged = qtrue;
+-	ETA_PathFinder_Point(points - 1, end);
++		if (!VectorCompare(spot->origin, eta_marker.origin))
++		{
++			eta_spots.marked = -1;   /* the marker was put somewhere else */
++		}
++		else if (state == ETA_PATH_FOUND || state == ETA_PATH_PARTIAL)
++		{
++			eta_spots.judged = qtrue;
++			if (ETA_WayStopsUnder(spot->origin))
++			{
++				spot->unreachable   = 1;
++				eta_marker.active   = qfalse;
++				eta_spots.lastPress = 0;
++				ETA_RouteForget();
++
++				ETA_Speech_BeginReport();
++				ETA_Speech_Say("No way up to that sniper spot from here. It is left off the list; ask for the next");
++				ETA_Speech_EndReport();
++				return;
++			}
++		}
++	}
+ 
+-	if ((end[0] - spot->origin[0]) * (end[0] - spot->origin[0])
+-	    + (end[1] - spot->origin[1]) * (end[1] - spot->origin[1]) < ETA_SPOT_UNDER_UNITS * ETA_SPOT_UNDER_UNITS
+-	    && spot->origin[2] - end[2] > 64.0f)
++	if (!eta_rooms.judged && eta_rooms.marked >= 0 && eta_rooms.marked < eta_rooms.list.count)
+ 	{
+-		spot->unreachable = 1;
+-		eta_marker.active = qfalse;
+-		ETA_RouteForget();
+-		eta_spots.lastPress = 0;
++		ETA_Room *room = &eta_rooms.list.rooms[eta_rooms.marked];
+ 
+-		ETA_Speech_BeginReport();
+-		ETA_Speech_Say("No way up to that sniper spot from here. It is left off the list; ask for the next");
+-		ETA_Speech_EndReport();
++		if (!VectorCompare(room->origin, eta_marker.origin))
++		{
++			eta_rooms.marked = -1;
++		}
++		else if (state == ETA_PATH_FOUND || state == ETA_PATH_PARTIAL)
++		{
++			eta_rooms.judged = qtrue;
++			if (ETA_WayStopsUnder(room->origin))
++			{
++				room->unreachable   = 1;
++				eta_marker.active   = qfalse;
++				eta_rooms.lastPress = 0;
++				ETA_RouteForget();
++
++				ETA_Speech_BeginReport();
++				ETA_Speech_Say("No way into that room from here. It is left off the list; ask for the next");
++				ETA_Speech_EndReport();
++			}
++		}
+ 	}
+ }
+ 
+@@ -5105,6 +5376,10 @@ void CG_AccessibilityMarkerReset(void)
+ 	memset(&eta_spots, 0, sizeof(eta_spots));
+ 	eta_spots.marked   = -1;
+ 	eta_spots.checking = -1;
++
++	/* And the rooms, found on the same look over the map. */
++	memset(&eta_rooms, 0, sizeof(eta_rooms));
++	eta_rooms.marked = -1;
+ }
+ 
+ 
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 659f92c..9028893 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1609,6 +1609,13 @@ static void CG_AccessibilitySniperSpot_f(void)
+ 	CG_AccessibilitySniperSpot();
+ }
+ 
++/* The marker on the nearest room, or the next one. */
++static void CG_AccessibilityRoom_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	CG_AccessibilityRoom();
++}
++
+ /**
+  * @brief "What is around me" - see cg_draw.c.
+  */
+@@ -5768,6 +5775,7 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityUseNext",     CG_AccessibilityUseNext_f },
+ 	{ "accessibilityUsePrev",     CG_AccessibilityUsePrev_f },
+ 	{ "accessibilitySniperSpot",  CG_AccessibilitySniperSpot_f },
++	{ "accessibilityRoom",        CG_AccessibilityRoom_f },
+ 	{ "accessibilitySurroundings", CG_AccessibilitySurroundings_f },
+ 	{ "+accessibilityTurnLeft",   CG_AccessibilityTurnLeftDown_f },
+ 	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index e4b77f5..508de72 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3446,6 +3446,7 @@ void CG_AccessibilityMarkerWhere(void);
+ void CG_AccessibilityMarkerClear(void);
+ void CG_AccessibilityMarkerObjective(void);
+ void CG_AccessibilitySniperSpot(void);
++void CG_AccessibilityRoom(void);
+ void CG_AccessibilityMarkerReset(void);
+ void CG_AccessibilityMarkerFrame(void);
+ void CG_AccessibilityMarkerApproach(void);
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index d5b0493..4f7eaca 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9438,7 +9438,11 @@ void UI_AccessibilityInstallBinds(void)
+ 		/* The marker on a sniper spot. The slash is bound in neither
+ 		   stock config; it sits under the right hand beside the
+ 		   brackets, and on a laptop without a number pad. */
+-		{ '/',            "accessibilitySniperSpot",   NULL,         13 }
++		{ '/',            "accessibilitySniperSpot",   NULL,         13 },
++		/* The marker on a room. The apostrophe is free in the stock
++		   right-handed layout, beside the semicolon under the right
++		   hand; the left-handed one expands the map on it, and keeps it. */
++		{ '\'',           "accessibilityRoom",         NULL,         14 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index ae73e21..5bf3d97 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -875,6 +875,7 @@ static bind_t g_bindings[] =
+ 	{ "accessibilityusenext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilityuseprev",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitysniperspot",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilityroom",                         -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },

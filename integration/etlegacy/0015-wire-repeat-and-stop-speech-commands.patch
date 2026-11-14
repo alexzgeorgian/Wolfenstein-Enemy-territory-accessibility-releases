@@ -1,0 +1,171 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 38d98a6..c9e7ec6 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -39,6 +39,7 @@
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ char *Binding_FromName(const char *cvar);
+@@ -293,6 +294,77 @@ oidInfo_t *CG_MainObjectiveForTeam(team_t team)
+ 	return NULL;
+ }
+ 
++/**
++ * @brief Which module should answer a repeat or stop request.
++ *
++ * Both modules link their own copy of the accessibility library and
++ * neither can see the other's state: the menu narrator's "current item"
++ * lives in ui, the last HUD announcement lives here. So the command has
++ * to be answered by whichever module is actually in front of the player.
++ *
++ * The engine decides that for us in the wrong order. Cmd_ExecuteString
++ * (qcommon/cmd.c) tries CL_GameCommand before UI_GameCommand, so once a
++ * snapshot exists cgame is offered every command first and answering it
++ * here is final - CG_ConsoleCommand returns qtrue on any name in its
++ * table and the ui module never sees it. Opening the options menu
++ * mid-match would then repeat the last health report instead of the
++ * focused menu item.
++ *
++ * The key catcher is what distinguishes the two. When KEYCATCH_UI is
++ * set, a menu owns the keyboard and the request belongs to ui; the
++ * command is pushed back through the buffer under a name only ui
++ * registers, which reaches it on the next Cbuf_Execute. Before a
++ * snapshot exists CG_ConsoleCommand declines everything outright, so the
++ * main menu never gets here at all and ui is offered the original name
++ * directly.
++ *
++ * @return qtrue when the request was handed to the ui module.
++ */
++static qboolean CG_AccessibilityForwardToUI(const char *uiCommand)
++{
++	if (!(trap_Key_GetCatcher() & KEYCATCH_UI))
++	{
++		return qfalse;
++	}
++
++	/* Queued, not executed here, so this cannot re-enter itself: the
++	   name below is registered by ui and by nothing in this module. */
++	trap_SendConsoleCommand(va("%s\n", uiCommand));
++	return qtrue;
++}
++
++/**
++ * @brief CG_AccessibilityRepeat_f
++ * Says the last thing that was spoken again, for the word that was
++ * missed because a gunshot landed on top of it.
++ */
++static void CG_AccessibilityRepeat_f(void)
++{
++	if (CG_AccessibilityForwardToUI("accessibilityRepeatMenuItem"))
++	{
++		return;
++	}
++
++	ETA_Speech_RepeatLast();
++}
++
++/**
++ * @brief CG_AccessibilityStopSpeech_f
++ * Cuts off whatever is being spoken. Worth having on a key of its own:
++ * an objective report is several seconds of speech that cannot otherwise
++ * be interrupted, and a player who needs to hear the match instead
++ * should not have to wait it out.
++ */
++static void CG_AccessibilityStopSpeech_f(void)
++{
++	if (CG_AccessibilityForwardToUI("accessibilityStopSpeechMenu"))
++	{
++		return;
++	}
++
++	ETA_Speech_Stop();
++}
++
+ /**
+  * @brief CG_AccessibilityStatus_f
+  * On-demand "query basic match state" command for the accessibility HUD
+@@ -3663,6 +3735,8 @@ static consoleCommand_t commands[] =
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	{ "accessibilityStatus",    CG_AccessibilityStatus_f     },
++	{ "accessibilityRepeat",    CG_AccessibilityRepeat_f     },
++	{ "accessibilityStopSpeech",CG_AccessibilityStopSpeech_f },
+ #endif
+ 
+ 	{ "autoRecord",             CG_autoRecord_f              },
+diff --git a/src/ui/ui_atoms.c b/src/ui/ui_atoms.c
+index 763152a..3be689c 100644
+--- a/src/ui/ui_atoms.c
++++ b/src/ui/ui_atoms.c
+@@ -35,6 +35,10 @@
+ 
+ #include "ui_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "menu/menu_narrator.h"
++#endif
++
+ /**
+  * @brief Com_DPrintf
+  * @param[in] fmt
+@@ -154,6 +158,37 @@ static void UI_ShowMenu_f(void)
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief UI_AccessibilityRepeat_f
++ * Speaks the focused menu item again. Menu narration is a single pass -
++ * the item is spoken when focus lands on it and never again - so
++ * without this the only way back to a name you missed is to move focus
++ * away and return, which on a list of one item is not possible at all.
++ *
++ * Reached two ways. In the main menu no snapshot exists, so
++ * CG_ConsoleCommand declines every command and the engine offers ui the
++ * name the player bound. In a menu opened mid-match cgame is offered it
++ * first and pushes it back under the second name below, which only this
++ * module registers. Both land here.
++ */
++static void UI_AccessibilityRepeat_f(void)
++{
++	ETA_MenuNarrator_RepeatCurrentItem();
++}
++
++/**
++ * @brief UI_AccessibilityStopSpeech_f
++ * Cuts off whatever is being spoken, for the same reason cgame has its
++ * own copy of this: a long setting description is not worth sitting
++ * through twice.
++ */
++static void UI_AccessibilityStopSpeech_f(void)
++{
++	ETA_MenuNarrator_Stop();
++}
++#endif
++
+ static uiConsoleCommand_t commands[] =
+ {
+ 	{ "ui_test",       UI_ShowPostGame          },
+@@ -165,6 +200,18 @@ static uiConsoleCommand_t commands[] =
+ 	{ "show_menu",     UI_ShowMenu_f            },
+ 	{ "campaign",      UI_Campaign_f            },
+ 	{ "listcampaigns", UI_ListCampaigns_f       },
++
++#ifdef FEATURE_ACCESSIBILITY
++	/* The first name of each pair is what a player binds. The second is
++	   how cgame hands the request over when a menu is open mid-match;
++	   it is deliberately not the same name, because a command cgame also
++	   answers would come straight back to cgame and loop. */
++	{ "accessibilityRepeat",          UI_AccessibilityRepeat_f     },
++	{ "accessibilityRepeatMenuItem",  UI_AccessibilityRepeat_f     },
++	{ "accessibilityStopSpeech",      UI_AccessibilityStopSpeech_f },
++	{ "accessibilityStopSpeechMenu",  UI_AccessibilityStopSpeech_f },
++#endif
++
+ 	{ NULL,            NULL,                    },
+ };
+ 

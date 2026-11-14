@@ -1,0 +1,300 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 5a25de4..24db51c 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -371,18 +371,26 @@ static void CG_AccessibilityStopSpeech_f(void)
+  * @param[out] ammo
+  * @return qtrue when ammo was written.
+  */
+-static qboolean CG_AccessibilityAmmoValue(int *ammo)
++static qboolean CG_AccessibilityAmmoValue(int *loaded, int *reserve)
+ {
+-	int clips, akimboammo, maxammo;
++	int ammo, clips, akimboammo, maxammo;
+ 
+ 	if (!cg.snap || !IS_VALID_WEAPON((weapon_t)cg.snap->ps.weapon))
+ 	{
+ 		return qfalse;
+ 	}
+ 
+-	CG_PlayerAmmoValue(ammo, &clips, &akimboammo, &maxammo, NULL);
++	CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
+ 
+-	return (qboolean)(*ammo >= 0);
++	if (ammo < 0)
++	{
++		return qfalse;
++	}
++
++	/* An akimbo pair carries two clips and the HUD counts both. */
++	*loaded  = ammo + (akimboammo > 0 ? akimboammo : 0);
++	*reserve = clips;
++	return qtrue;
+ }
+ 
+ /**
+@@ -418,6 +426,11 @@ static void CG_AccessibilityNarrateObjective(void)
+ 
+ 	if (!objective)
+ 	{
++		/* Not every map or mode publishes a main objective, and returning
++		   quietly made "this map has none" indistinguishable from "the mod
++		   is broken" - which is the whole failure mode this project keeps
++		   having to design out. */
++		ETA_Speech_Say("No current objective");
+ 		return;
+ 	}
+ 
+@@ -443,6 +456,70 @@ static void CG_AccessibilityNarrateObjective(void)
+ 	}
+ }
+ 
++/**
++ * @brief Speaks the map's objective description for the player's team.
++ *
++ * This is the text the objectives panel itself draws (cg_info.c's
++ * CG_ObjectivesDraw reads the same three fields), parsed out of the map's
++ * configstrings in cg_main.c. It is what the player pressing the
++ * objectives key is actually asking for: what am I meant to be doing on
++ * this map.
++ *
++ * Deliberately separate from the main-objective lookup used by the status
++ * report. That one answers "which objective, how far, which way" and
++ * depends on a configstring plenty of maps never set - which is why the
++ * objectives key said nothing at all in testing. This reads the
++ * description, which maps do set, and says so plainly when they have not.
++ *
++ * '*' is the separator the map text uses for a line break; the panel turns
++ * each into a newline, and speech turns each into a pause.
++ */
++static void CG_AccessibilityNarrateObjectiveText(void)
++{
++	char       text[384];
++	const char *source;
++	team_t     team;
++	int        i;
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	team = cgs.clientinfo[cg.snap->ps.clientNum].team;
++
++	if (team == TEAM_AXIS)
++	{
++		source = cg.objMapDescription_Axis;
++	}
++	else if (team == TEAM_ALLIES)
++	{
++		source = cg.objMapDescription_Allied;
++	}
++	else
++	{
++		source = cg.objMapDescription_Neutral;
++	}
++
++	Q_strncpyz(text, source, sizeof(text));
++
++	for (i = 0; text[i]; i++)
++	{
++		if (text[i] == '*')
++		{
++			text[i] = ',';
++		}
++	}
++
++	if (!text[0])
++	{
++		ETA_Speech_Say("This map has no objective description");
++		return;
++	}
++
++	ETA_HudNarrator_SpeakObjective(text);
++}
++
+ /**
+  * @brief CG_AccessibilityHealth_f
+  * Health alone, for a key the player can reach without leaving the
+@@ -466,15 +543,17 @@ static void CG_AccessibilityHealth_f(void)
+  */
+ static void CG_AccessibilityAmmo_f(void)
+ {
+-	int ammo;
++	int loaded, reserve;
+ 
+-	if (CG_AccessibilityAmmoValue(&ammo))
++	if (CG_AccessibilityAmmoValue(&loaded, &reserve))
+ 	{
+-		ETA_HudNarrator_SpeakAmmo(ammo);
++		ETA_HudNarrator_SpeakAmmoDetail(loaded, reserve);
+ 	}
+ 	else
+ 	{
+-		ETA_Speech_Say("No ammo");
++		/* Never silence: a weapon with no ammo to report and a mod that has
++		   stopped working sound exactly the same otherwise. */
++		ETA_Speech_Say("This weapon has no ammo count");
+ 	}
+ }
+ 
+@@ -516,15 +595,13 @@ static void CG_AccessibilityStatus_f(void)
+ 
+ 	if (IS_VALID_WEAPON(weap))
+ 	{
+-		int ammo, clips, akimboammo, maxammo;
++		int loaded, reserve;
+ 
+ 		ETA_HudNarrator_SpeakWeapon(GetWeaponTableData(weap)->desc);
+ 
+-		CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
+-
+-		if (ammo >= 0)
++		if (CG_AccessibilityAmmoValue(&loaded, &reserve))
+ 		{
+-			ETA_HudNarrator_SpeakAmmo(ammo);
++			ETA_HudNarrator_SpeakAmmoDetail(loaded, reserve);
+ 		}
+ 	}
+ 
+@@ -547,6 +624,7 @@ static void CG_objectivesDown_f(void)
+ 	if (!cg.demoPlayback && cgs.objectives.show != SHOW_ON)
+ 	{
+ 		ETA_Speech_BeginReport();
++		CG_AccessibilityNarrateObjectiveText();
+ 		CG_AccessibilityNarrateObjective();
+ 		ETA_Speech_EndReport();
+ 	}
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 1907244..03a395b 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -38,6 +38,8 @@
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "audio/audio_cue_system.h"
++#include "hud/hud_narrator.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ char *Binding_FromName(const char *cvar);
+@@ -2107,6 +2109,64 @@ static void CG_ScanForCrosshairEntity()
+ }
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Narrates the weapon in hand, and what is in it, when it changes.
++ *
++ * Driven off cg.predictedPlayerEntity.currentState.weapon rather than off
++ * the playerstate transition, and that is the whole point of where this
++ * lives. CG_PlayerAmmoValue reads the weapon out of that same entity
++ * state; asking it for ammo from CG_TransitionPlayerState, where the
++ * playerstate has changed but prediction has not yet caught up, answers
++ * for the weapon being put away or for no weapon at all. That is why the
++ * first version of this spoke the new weapon's name with no ammo after
++ * it - the name came from the playerstate and was right, the ammo came
++ * from the entity and was not there yet.
++ *
++ * Reading both from the same source removes the timing question rather
++ * than trying to get the timing right.
++ */
++static void ETA_NarrateWeaponChange(void)
++{
++	static weapon_t spoken = WP_NONE;
++	weapon_t        weap;
++	int             ammo, clips, akimboammo, maxammo;
++
++	if (!cg.snap || cg.snap->ps.pm_type == PM_INTERMISSION)
++	{
++		return;
++	}
++
++	weap = (weapon_t)cg.predictedPlayerEntity.currentState.weapon;
++
++	if (weap == spoken)
++	{
++		return;
++	}
++
++	spoken = weap;
++
++	if (!IS_VALID_WEAPON(weap))
++	{
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++
++	ETA_HudNarrator_SpeakWeapon(GetWeaponTableData(weap)->desc);
++
++	CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
++
++	if (ammo >= 0)
++	{
++		/* Loaded rounds and what is left to reload from, because "8" on its
++		   own does not say whether the next reload is coming. A weapon with
++		   no reserve to speak of - a grenade, a knife - reports neither. */
++		ETA_HudNarrator_SpeakAmmoDetail(ammo + (akimboammo > 0 ? akimboammo : 0), clips);
++	}
++
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Narrates a newly shown (or newly different) interaction hint icon
+  * for the accessibility audio cue system.
+@@ -4861,6 +4921,13 @@ void CG_DrawActive()
+ 		trap_R_RenderScene(cg.refdef_current);
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Every active frame, so a weapon change is caught wherever it came
++	   from - a number key, the mouse wheel, running dry, or being handed a
++	   weapon on spawn. */
++	ETA_NarrateWeaponChange();
++#endif
++
+ 	if (!cg.showGameView)
+ 	{
+ 		// draw status bar and other floating elements
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 38741fb..3715fe5 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -540,30 +540,12 @@ void CG_TransitionPlayerState(playerState_t *ps, playerState_t *ops)
+ 	{
+ 		cg.predictedPlayerEntity.firedTime = 0; // reset smoke generation
+ 
+-#ifdef FEATURE_ACCESSIBILITY
+-		if (IS_VALID_WEAPON((weapon_t)ps->weapon))
+-		{
+-			int ammo, clips, akimboammo, maxammo;
+-
+-			/* The name alone does not answer the question the player is
+-			   actually asking when they press a weapon key mid-match, which
+-			   is whether the thing they just drew is loaded. Both in one
+-			   line, because two lines would cut each other off. */
+-			ETA_Speech_BeginReport();
+-
+-			ETA_HudNarrator_SpeakWeapon(GetWeaponTableData((weapon_t)ps->weapon)->desc);
+-
+-			CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
+-
+-			/* A knife has no ammo value; saying nothing is right there. */
+-			if (ammo >= 0)
+-			{
+-				ETA_HudNarrator_SpeakAmmo(ammo);
+-			}
+-
+-			ETA_Speech_EndReport();
+-		}
+-#endif
++/* The weapon change is narrated a frame later, from CG_DrawActive, not
++		   here. CG_PlayerAmmoValue reads the weapon out of the player
++		   *entity's* current state, which prediction has not updated yet at
++		   this point - so asking it for ammo here answers for the weapon
++		   being put away, or for nothing at all. See ETA_NarrateWeaponChange
++		   in cg_draw.c. */
+ 
+ 		// ensure the weapon we ask for is aligned with the one selected by the server
+ 		// otherwise, check if the status side arm is the correct one

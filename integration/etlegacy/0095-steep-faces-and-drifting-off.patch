@@ -1,0 +1,54 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 7642621..feb3528 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -3115,7 +3115,11 @@ static int ETA_RouteMoveExact(void *context, const float from[3], float to[3])
+ 		   one square, but its face leans back. A face that stands
+ 		   straight up is the edge of a ledge, which no amount of walking
+ 		   gets onto - it is jumped. */
+-		ledge = (qboolean)(!trace.startsolid && trace.plane.normal[2] < 0.3f);
++		/* Anything steeper than the game lets a player walk up - its
++		   MIN_WALK_NORMAL, 0.7 - is a face, not a slope: a rock leaning
++		   back a little was taken for a ramp beside the Axis command
++		   post on Oasis, and the way said to walk up it. */
++		ledge = (qboolean)(!trace.startsolid && trace.plane.normal[2] < 0.7f);
+ 
+ 		/* Again a little higher, and then as high as a jump reaches, if
+ 		   there is headroom to get there. ET's jump lifts the feet about
+@@ -3301,7 +3305,11 @@ static float ETA_RouteWalkable(const vec3_t from, const vec3_t to)
+ 			return 0.0f;
+ 		}
+ 
+-		if (trace.fraction < 1.0f && trace.plane.normal[2] < 0.3f)
++		/* Steeper than the game lets a player walk up - MIN_WALK_NORMAL,
++		   0.7 - is as good as a wall: the face of a rock leans back a
++		   little, and near the Allied camp on Oasis the ping pointed at
++		   one, over the top of it, and held a player against it. */
++		if (trace.fraction < 1.0f && trace.plane.normal[2] < 0.7f)
+ 		{
+ 			return trace.fraction;
+ 		}
+@@ -3780,6 +3788,23 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 		return;
+ 	}
+ 
++	/* Off to the side of the way, with not even its nearest point in a
++	   straight line - round the corner of a rock, a step too high: the
++	   way is no longer from here. Near the Allied camp on Oasis the ping
++	   pointed on through a rock to the next point of a way the player
++	   had drifted off, and held them against it until the way was next
++	   looked for. Look for it again now, from where they are. */
++	if (best == nearest && nearestDistance > ETA_ROUTE_ON_WAY)
++	{
++		ETA_PathFinder_Point(nearest, point);
++
++		if (!ETA_RouteClear(here, point))
++		{
++			ETA_RoutePlan();
++			return;
++		}
++	}
++
+ 	if (best == nearest && best + 1 < count)
+ 	{
+ 		/* Nothing ahead is in a straight line - the player is past a

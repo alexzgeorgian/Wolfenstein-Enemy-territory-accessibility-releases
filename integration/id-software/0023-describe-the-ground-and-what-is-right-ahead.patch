@@ -1,0 +1,259 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index f0cf9ae..5acbb2a 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4646,6 +4646,13 @@ static void ETA_NarrateObjectiveApproach( void ) {
+ }
+ 
+ #define ETA_LOOK_AHEAD_RANGE 8192.0f
++/*
++ * On foot the same question has a much shorter useful answer. Seeing
++ * further is the whole point of the binoculars and the scope, and a
++ * player without either should not be told about a wall fifty metres
++ * off as though they could see it.
++ */
++#define ETA_LOOK_AHEAD_RANGE_ON_FOOT 100.0f
+ #define ETA_LOOK_AHEAD_MIN_INTERVAL 500
+ #define ETA_LOOK_AHEAD_DISTANCE_STEP 5
+ 
+@@ -4695,7 +4702,7 @@ static const char *ETA_SurfaceMaterial( int surfaceFlags ) {
+  * is what makes "wooden wall" and "gravel ground" come out right without
+  * a table of special cases.
+  */
+-static qboolean ETA_DescribeLookAhead( char *out, size_t outSize, int *distanceMeters ) {
++static qboolean ETA_DescribeLookAhead( char *out, size_t outSize, int *distanceMeters, float range, trace_t *outTrace ) {
+ 	trace_t trace;
+ 	vec3_t start, end, forward;
+ 	int entityNum;
+@@ -4706,10 +4713,14 @@ static qboolean ETA_DescribeLookAhead( char *out, size_t outSize, int *distanceM
+ 
+ 	VectorCopy( cg.refdef.vieworg, start );
+ 	AngleVectors( cg.refdefViewAngles, forward, NULL, NULL );
+-	VectorMA( start, ETA_LOOK_AHEAD_RANGE, forward, end );
++	VectorMA( start, range, forward, end );
+ 
+ 	CG_Trace( &trace, start, NULL, NULL, end, cg.snap->ps.clientNum, MASK_SHOT );
+ 
++	if ( outTrace ) {
++		*outTrace = trace;
++	}
++
+ 	if ( trace.fraction == 1.0f ) {
+ 		Q_strncpyz( out, "Nothing in range", outSize );
+ 		*distanceMeters = -1;
+@@ -4824,7 +4835,7 @@ static void ETA_NarrateZoom( void ) {
+ 		return;
+ 	}
+ 
+-	if ( !ETA_DescribeLookAhead( description, sizeof( description ), &distance ) ) {
++	if ( !ETA_DescribeLookAhead( description, sizeof( description ), &distance, ETA_LOOK_AHEAD_RANGE, NULL ) ) {
+ 		if ( zoomChanged ) {
+ 			ETA_Speech_EndReport();
+ 		}
+@@ -4853,6 +4864,68 @@ static void ETA_NarrateZoom( void ) {
+ 	ETA_Speech_EndReport();
+ }
+ 
++#define ETA_OBSTACLE_MIN_INTERVAL 3000
++
++/**
++ * Says when the player is about to walk into something.
++ *
++ * The binoculars and the scope answer "what is in front of me" at range,
++ * which is what they are for. Most classes, most of the time, have no
++ * such key, and for them the question is smaller and more urgent: is
++ * there a wall right there.
++ *
++ * The same probe as the zoomed one, at arm's length, and it stands down
++ * while zoomed - that narration is already answering the same question
++ * at the range the player asked for.
++ */
++static void ETA_NarrateObstacleAhead( void ) {
++	static char lastDescription[128];
++	static int lastTime;
++	char description[128];
++	trace_t trace;
++	int distance;
++
++	if ( !cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer ) {
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	if ( cg.zoomed || cg.zoomedBinoc ) {
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	if ( !ETA_DescribeLookAhead( description, sizeof( description ), &distance, ETA_LOOK_AHEAD_RANGE_ON_FOOT, &trace ) ) {
++		return;
++	}
++
++	/* Looking down at the floor is not an obstacle, and at this range it
++	   is what the view meets every time the player glances at their feet.
++	   What is underfoot is the footstep narration's job. */
++	if ( trace.plane.normal[2] > 0.7f ) {
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	/* Nothing close enough to bump into. Clearing the memory here is what
++	   makes stepping away and back a fresh announcement. */
++	if ( distance < 0 ) {
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	if ( !Q_stricmp( description, lastDescription ) && cg.time - lastTime < ETA_OBSTACLE_MIN_INTERVAL ) {
++		return;
++	}
++
++	Q_strncpyz( lastDescription, description, sizeof( lastDescription ) );
++	lastTime = cg.time;
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakLookAhead( description, distance );
++	ETA_Speech_EndReport();
++}
++
+ static void ETA_NarrateStanceChange( void ) {
+ 	static ETA_Stance spoken = (ETA_Stance)-1;
+ 	const playerState_t *ps;
+@@ -4995,6 +5068,10 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 	/* Last, so everything above still sees the previous frame's totals. */
+ 	CG_AccessibilitySampleTotals();
+ 	ETA_NarrateZoom();
++
++	/* After the zoom narration, which stands down for it rather than the
++	   other way round. */
++	ETA_NarrateObstacleAhead();
+ #endif
+ 
+ 	if ( !cg.showGameView ) {
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index 61a72de..6cd1a28 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -503,6 +503,65 @@ static int ETA_ReserveGained( void ) {
+ 	return gained;
+ }
+ 
++/**
++ * What to call each of the engine's footstep types out loud.
++ *
++ * Indexed by the footstep type itself, so the word and the sound cannot
++ * drift apart: these are the values BG_FootstepForSurface derives from
++ * the surface flags and the ones cgs.media.footsteps is indexed by,
++ * which is why FOOTSTEP_NORMAL is "Stone" - the engine loads stone1.wav
++ * through stone4.wav for it.
++ *
++ * FOOTSTEP_TOTAL is not here and never reaches this: it is the engine's
++ * marker for a surface that makes no footstep sound at all, and a
++ * surface a sighted player cannot hear is not one to announce.
++ */
++static const char *const eta_footstepNames[FOOTSTEP_TOTAL] = {
++	"Stone",    // FOOTSTEP_NORMAL
++	"Metal",    // FOOTSTEP_METAL
++	"Wood",     // FOOTSTEP_WOOD
++	"Grass",    // FOOTSTEP_GRASS
++	"Gravel",   // FOOTSTEP_GRAVEL
++	"Water",    // FOOTSTEP_SPLASH
++	"Roof",     // FOOTSTEP_ROOF
++	"Snow",     // FOOTSTEP_SNOW
++	"Carpet"    // FOOTSTEP_CARPET
++};
++
++/**
++ * Says what the player is walking on, when it changes.
++ *
++ * Without binoculars or a scoped weapon - which is most classes, most of
++ * the time - the mod had nothing at all to say about the surroundings,
++ * and the ground is the part of them that is always underfoot.
++ *
++ * Driven by the footstep event rather than a trace of our own, so the
++ * word spoken is the surface the engine just played a footstep sound
++ * for. They cannot disagree.
++ */
++static void ETA_NarrateFooting( int footstep ) {
++	static int spoken = -1;
++
++	if ( !eta_environmentCallouts.integer ) {
++		spoken = -1;
++		return;
++	}
++
++	if ( footstep < 0 || footstep >= FOOTSTEP_TOTAL ) {
++		return;
++	}
++
++	if ( footstep == spoken ) {
++		return;
++	}
++
++	spoken = footstep;
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakFooting( eta_footstepNames[footstep] );
++	ETA_Speech_EndReport();
++}
++
+ static void ETA_NarrateItemPickup( int itemNum ) {
+ 	gitem_t *item = &bg_itemlist[itemNum];
+ 	char text[256];
+@@ -1917,8 +1976,24 @@ void CG_EntityEvent( centity_t *cent, vec3_t position ) {
+ 		DEBUGNAME( "EV_FOOTSTEP" );
+ 		if ( es->eventParm != FOOTSTEP_TOTAL ) {
+ 			if ( es->eventParm ) {
++#ifdef FEATURE_ACCESSIBILITY
++				/* Inside each branch rather than above them, so the type
++				   narrated is the one indexing the sound that plays - the
++				   engine resolves a zero parm to the character's own
++				   default, and reading the parm alone would call every
++				   such step stone. Other players' footsteps are heard,
++				   not walked on, so only the local player's are spoken. */
++				if ( es->number == cg.snap->ps.clientNum ) {
++					ETA_NarrateFooting( es->eventParm );
++				}
++#endif
+ 				CG_StartFootStepSound( classInfo, es, cgs.media.footsteps[ es->eventParm ][footstepcnt] );
+ 			} else {
++#ifdef FEATURE_ACCESSIBILITY
++				if ( es->number == cg.snap->ps.clientNum ) {
++					ETA_NarrateFooting( character->animModelInfo->footsteps );
++				}
++#endif
+ 				CG_StartFootStepSound( classInfo, es, cgs.media.footsteps[ character->animModelInfo->footsteps ][footstepcnt] );
+ 			}
+ 		}
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index f2df972..d84c166 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2406,6 +2406,7 @@ void CG_AccessibilityNarrateObjective( void );
+ const char *CG_AccessibilityWeaponName( weapon_t weap );
+ void CG_AccessibilitySampleTotals( void );
+ extern vmCvar_t eta_objectiveCallouts;
++extern vmCvar_t eta_environmentCallouts;
+ 
+ qboolean ETA_MapObjectiveAt( const mapEntityData_t *mEnt, vec3_t origin, int *oidIndex );
+ qboolean ETA_CurrentObjective( team_t team, const vec3_t from, etaObjective_t *out );
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 58a2afe..3644849 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -321,6 +321,7 @@ vmCvar_t cl_wavefilename;
+ vmCvar_t cl_waveoffset;
+ #ifdef FEATURE_ACCESSIBILITY
+ vmCvar_t eta_objectiveCallouts;
++vmCvar_t eta_environmentCallouts;
+ #endif
+ vmCvar_t cg_recording_statusline;
+ 
+@@ -548,6 +549,7 @@ cvarTable_t cvarTable[] = {
+ 	{ &cg_recording_statusline, "cg_recording_statusline", "9", CVAR_ARCHIVE },
+ #ifdef FEATURE_ACCESSIBILITY
+ 	{ &eta_objectiveCallouts, "eta_objectiveCallouts", "1", CVAR_ARCHIVE },
++	{ &eta_environmentCallouts, "eta_environmentCallouts", "1", CVAR_ARCHIVE },
+ #endif
+ };
+ 

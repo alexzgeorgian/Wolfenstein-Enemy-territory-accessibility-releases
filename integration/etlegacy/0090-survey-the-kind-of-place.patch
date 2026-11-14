@@ -1,0 +1,174 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 27440ec..ca1daab 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2084,6 +2084,7 @@ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObj
+  * will listen to anyway.
+  */
+ #define ETA_MAP_CONTENTS_MAX 256
++#define ETA_MAP_PLACES_MAX   180   /* with the things, a spoken line still fits */
+ 
+ static qboolean ETA_MapGrid(vec2_t start, vec2_t step, int *columns, int *rows)
+ {
+@@ -2594,9 +2595,11 @@ static ETA_MapCursor eta_mapCursor;
+  * no direction to turn - which is also how they hear that they have
+  * found themselves on the map.
+  */
++static void ETA_MapCellPlaces(int column, int row, int layer, char *out, size_t outSize);
++
+ static void ETA_MapSpeakCell(void)
+ {
+-	char   contents[ETA_MAP_CONTENTS_MAX];
++	char   contents[ETA_MAP_CONTENTS_MAX + ETA_MAP_PLACES_MAX];
+ 	vec2_t centre;
+ 	vec3_t to;
+ 	int    playerColumn, playerRow;
+@@ -2608,7 +2611,24 @@ static void ETA_MapSpeakCell(void)
+ 	}
+ 
+ 	ETA_MapCellContents(eta_mapCursor.column, eta_mapCursor.row,
+-	                    eta_mapCursor.layer, contents, sizeof(contents));
++	                    eta_mapCursor.layer, contents, ETA_MAP_CONTENTS_MAX);
++
++	/* Then what kind of places it holds - after the things, which move
++	   and can end the run, and before nothing: a square with no things
++	   in it is described rather than called empty. */
++	{
++		char   places[ETA_MAP_PLACES_MAX];
++		size_t used = strlen(contents);
++
++		ETA_MapCellPlaces(eta_mapCursor.column, eta_mapCursor.row, eta_mapCursor.layer,
++		                  places, sizeof(places));
++
++		if (places[0])
++		{
++			Com_sprintf(contents + used, (int)(sizeof(contents) - used), "%s%s",
++			            used ? ", " : "", places);
++		}
++	}
+ 
+ 	ETA_MapCellFor(cg.predictedPlayerState.origin[0],
+ 	               cg.predictedPlayerState.origin[1],
+@@ -3813,6 +3833,122 @@ static int ETA_MarkerDistance(void)
+ 	return (int)(VectorLength(delta) * ETA_QU_TO_METERS);
+ }
+ 
++/**
++ * @brief The floors a player could stand on, straight down through one
++ * point of the map, highest first.
++ *
++ * Found the way a dropped stone would find them, again and again: down
++ * from far above, through the sky over the map, to the first surface
++ * that faces up; then on down from just under it, the trace starting
++ * inside that floor and so passing out of it, to the next. A floor with
++ * no room for a body over it is the top of something solid, not a floor.
++ * The sealed space under the map is lined with surfaces nobody sees, and
++ * the tops of the buildings that cannot be entered are sky: neither is a
++ * floor anyone stands on.
++ *
++ * @return how many were found, at most max
++ */
++#define ETA_SURVEY_HIGH 16384.0f
++
++static int ETA_SurveyFloors(float x, float y, vec3_t *out, int max)
++{
++	static const vec3_t mins = { -15.0f, -15.0f, 0.0f };
++	static const vec3_t maxs = { 15.0f, 15.0f, 56.0f };
++	trace_t trace;
++	vec3_t  start, end;
++	float   z     = ETA_SURVEY_HIGH;
++	int     count = 0, guard;
++
++	for (guard = 0; guard < 32 && count < max; guard++)
++	{
++		trace_t room;
++		vec3_t  body;
++
++		VectorSet(start, x, y, z);
++		VectorSet(end, x, y, -ETA_SURVEY_HIGH);
++		trap_CM_BoxTrace(&trace, start, end, NULL, NULL, 0, MASK_PLAYERSOLID);
++
++		if (trace.allsolid || trace.fraction >= 1.0f)
++		{
++			break;
++		}
++
++		z = trace.endpos[2] - 1.0f;
++
++		if (guard == 0 || trace.plane.normal[2] < 0.7f
++		    || (trace.surfaceFlags & (SURF_NODRAW | SURF_SKY)))
++		{
++			continue;   /* the first is the outside of the sky over the map */
++		}
++
++		/* Lifted a little, so a sloping floor does not catch the box. */
++		VectorSet(body, x, y, trace.endpos[2] + 12.0f);
++		trap_CM_BoxTrace(&room, body, body, mins, maxs, 0, MASK_PLAYERSOLID);
++
++		if (!room.startsolid)
++		{
++			VectorCopy(trace.endpos, out[count]);
++			count++;
++		}
++	}
++
++	return count;
++}
++
++/**
++ * @brief What kind of places a square of the command map holds, in words.
++ *
++ * A grid of points across the square, ten to a side, and at each the
++ * same probe the walking callouts use stood on every floor there is -
++ * navigation/place_classifier.c then reads the grid as a whole. On a
++ * map built in layers only the floors of the layer being surveyed count.
++ */
++static void ETA_MapCellPlaces(int column, int row, int layer, char *out, size_t outSize)
++{
++	static ETA_PlaceSurvey survey;
++	vec2_t                 start, step;
++	int                    columns, rows, i, j;
++
++	out[0] = '\0';
++
++	if (!ETA_MapGrid(start, step, &columns, &rows))
++	{
++		return;
++	}
++
++	ETA_PlaceSurvey_Clear(&survey);
++
++	for (j = 0; j < ETA_PLACE_SURVEY_SIDE; j++)
++	{
++		for (i = 0; i < ETA_PLACE_SURVEY_SIDE; i++)
++		{
++			float  x = start[0] + ((float)column + ((float)i + 0.5f) / ETA_PLACE_SURVEY_SIDE) * step[0];
++			float  y = start[1] - ((float)row + ((float)j + 0.5f) / ETA_PLACE_SURVEY_SIDE) * step[1];
++			vec3_t floors[ETA_PLACE_SURVEY_FLOORS];
++			int    count = ETA_SurveyFloors(x, y, floors, ETA_PLACE_SURVEY_FLOORS);
++			int    k;
++
++			/* Lowest first. */
++			for (k = count - 1; k >= 0; k--)
++			{
++				ETA_Place place;
++				vec3_t    origin;
++
++				if (cgs.ccLayers && CG_CurLayerForZ((int)floors[k][2]) != layer)
++				{
++					continue;
++				}
++
++				VectorSet(origin, floors[k][0], floors[k][1], floors[k][2] + 24.0f);
++				CG_AccessibilityPlace(origin, &place);
++				ETA_PlaceSurvey_Add(&survey, j, i, &place);
++			}
++		}
++	}
++
++	ETA_PlaceSurvey_Describe(&survey, out, outSize);
++}
++
+ /**
+  * @brief Whether the player is in the marked square right now.
+  */

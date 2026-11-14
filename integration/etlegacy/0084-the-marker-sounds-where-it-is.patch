@@ -1,0 +1,110 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 0d63ffa..168fdc3 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -4097,6 +4097,50 @@ void CG_AccessibilityMarkerReset(void)
+ 	ETA_RouteForget();
+ }
+ 
++
++/**
++ * @brief Which of the marker's three sounds to play, by where it is.
++ *
++ * Left and right the game's own stereo already says; in front and
++ * behind it cannot, and a marker behind the player sounded just like one
++ * ahead - with gunfire ahead as well. The tester asked for the marker to
++ * sound different by where it is, so it does: the high ping ahead, a
++ * lower one off to either side, and a low double ping behind - turn
++ * round. A few degrees either side of each change is held, so walking
++ * along the edge between two does not swap them back and forth.
++ */
++#define ETA_MARKER_AHEAD_DEGREES  50.0f
++#define ETA_MARKER_BEHIND_DEGREES 130.0f
++#define ETA_MARKER_HOLD_DEGREES   10.0f
++
++static eta_loopSoundType_t ETA_MarkerSoundFor(const vec3_t direction)
++{
++	static eta_loopSoundType_t playing = ETA_LOOP_MARKER;
++	float                      off;
++	float                      hold;
++
++	off  = fabsf(AngleSubtract(vectoyaw(direction), cg.predictedPlayerState.viewangles[YAW]));
++	hold = ETA_MARKER_HOLD_DEGREES;
++
++	if (playing == ETA_LOOP_MARKER)
++	{
++		playing = off <= ETA_MARKER_AHEAD_DEGREES + hold ? ETA_LOOP_MARKER
++		          : off <= ETA_MARKER_BEHIND_DEGREES ? ETA_LOOP_MARKER_SIDE : ETA_LOOP_MARKER_BEHIND;
++	}
++	else if (playing == ETA_LOOP_MARKER_BEHIND)
++	{
++		playing = off >= ETA_MARKER_BEHIND_DEGREES - hold ? ETA_LOOP_MARKER_BEHIND
++		          : off > ETA_MARKER_AHEAD_DEGREES ? ETA_LOOP_MARKER_SIDE : ETA_LOOP_MARKER;
++	}
++	else
++	{
++		playing = off <= ETA_MARKER_AHEAD_DEGREES - hold ? ETA_LOOP_MARKER
++		          : off >= ETA_MARKER_BEHIND_DEGREES + hold ? ETA_LOOP_MARKER_BEHIND : ETA_LOOP_MARKER_SIDE;
++	}
++
++	return playing;
++}
++
+ /**
+  * @brief Every frame: the marker's sound, and arriving at it.
+  *
+@@ -4163,16 +4207,17 @@ void CG_AccessibilityMarkerFrame(void)
+ 
+ 	if (eta_markerCues.integer)
+ 	{
+-		sfxHandle_t sfx = CG_AccessibilityLoopSound(ETA_LOOP_MARKER);
++		vec3_t      eye, direction, origin, target;
++		sfxHandle_t sfx;
++
++		ETA_MarkerEye(eye);
++		ETA_MarkerTarget(target);
++		VectorSubtract(target, eye, direction);
++		sfx = CG_AccessibilityLoopSound(ETA_MarkerSoundFor(direction));
+ 
+ 		if (sfx)
+ 		{
+-			vec3_t eye, direction, origin, target;
+-			float  length;
+-
+-			ETA_MarkerEye(eye);
+-			ETA_MarkerTarget(target);
+-			VectorSubtract(target, eye, direction);
++			float length;
+ 
+ 			/* A square has no height to point at; the sound stays level
+ 			   with the player's ears so it only ever says left or right. */
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 8e00e93..1ade9eb 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3534,7 +3534,9 @@ typedef enum
+ 	ETA_LOOP_BUILD_SITE,
+ 	ETA_LOOP_DEMOLITION_TARGET,
+ 	ETA_LOOP_FLAG,
+-	ETA_LOOP_LADDER
++	ETA_LOOP_LADDER,
++	ETA_LOOP_MARKER_SIDE,     /* the marker, off to one side */
++	ETA_LOOP_MARKER_BEHIND    /* the marker, behind */
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index b728f11..6274782 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2236,7 +2236,9 @@ static eta_cueSound_t eta_loopSounds[] =
+ 	{ "eta_cueBuildSite",         "sound/accessibility/build_site.wav",         { 0 }, 0, { 0 } },
+ 	{ "eta_cueDemolitionTarget",  "sound/accessibility/demolition_target.wav",  { 0 }, 0, { 0 } },
+ 	{ "eta_cueFlag",              "sound/accessibility/flag_capture.wav",       { 0 }, 0, { 0 } },
+-	{ "eta_cueLadder",            "sound/accessibility/ladder.wav",             { 0 }, 0, { 0 } }
++	{ "eta_cueLadder",            "sound/accessibility/ladder.wav",             { 0 }, 0, { 0 } },
++	{ "eta_cueMarkerSide",        "sound/accessibility/marker_side.wav",        { 0 }, 0, { 0 } },
++	{ "eta_cueMarkerBehind",      "sound/accessibility/marker_behind.wav",      { 0 }, 0, { 0 } }
+ };
+ 
+ static eta_cueSound_t eta_cueSounds[] =

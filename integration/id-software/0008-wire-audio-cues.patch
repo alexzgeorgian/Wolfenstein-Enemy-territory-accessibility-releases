@@ -1,0 +1,137 @@
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index f1f7f53..88293ba 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -36,6 +36,7 @@ If you have questions concerning this li
+ #include "cg_local.h"
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++#include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
+ #endif
+ 
+@@ -188,6 +189,25 @@ void CG_DamageFeedback( int yawByte, int pitchByte, int damage ) {
+ 		left = DotProduct( dir, cg.refdef.viewaxis[1] );
+ 		up = DotProduct( dir, cg.refdef.viewaxis[2] );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		/**
++		 * front/left here are the same view-relative components the
++		 * on-screen damage blood-blob (CG_DamageBlendBlob, cg_view.c) uses
++		 * for its screen-space offset (vd->damageX/damageY below) - front
++		 * and left are already resolved through cg.refdef.viewaxis, so this
++		 * is the player's current view rotation baked in, not the raw
++		 * network-decoded world yaw. atan2(-left, front) turns that same
++		 * pair into a compass bearing using the same convention as the
++		 * navigation/objective cues elsewhere in this integration: 0 =
++		 * front, 90 = right, 180 = behind, 270 = left (left is positive
++		 * toward the left, so -left is positive toward the right).
++		 */
++		{
++			int directionDegrees = (int)AngleNormalize360( RAD2DEG( atan2( -left, front ) ) );
++			ETA_AudioCueSystem_PlayDamageDirectionCue( directionDegrees );
++		}
++#endif
++
+ 		dir[0] = front;
+ 		dir[1] = left;
+ 		dir[2] = 0;
+@@ -410,6 +430,14 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
+ 			CG_PainEvent( &cg.predictedPlayerEntity, ps->stats[STAT_HEALTH], qfalse );
+ 
+ 			cg.painTime = cg.time;
++
++#ifdef FEATURE_ACCESSIBILITY
++			// same trigger as the pain sound above, but only while
++			// critically low, so routine chip damage doesn't cue every hit
++			if ( ps->stats[STAT_HEALTH] <= 25 ) {
++				ETA_AudioCueSystem_PlayLowHealthCue();
++			}
++#endif
+ 		}
+ 	}
+ 
+diff --git a/src/cgame/cg_newDraw.c b/src/cgame/cg_newDraw.c
+index 608deb0..9eabae4 100644
+--- a/src/cgame/cg_newDraw.c
++++ b/src/cgame/cg_newDraw.c
+@@ -29,6 +29,10 @@ If you have questions concerning this li
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "audio/audio_cue_system.h"
++#endif
++
+ int CG_DrawField( int x, int y, int width, int value, int charWidth, int charHeight, qboolean dodrawpic, qboolean leftAlign );      // NERVE - SMF
+ 
+ /*void CG_FitTextToWidth( char* instr, int w, int size) {
+@@ -369,6 +373,31 @@ void CG_DrawPlayerWeaponIcon( rectDef_t *rect, qboolean drawHighlighted, int align, vec4_t *refcolor ) {
+ 
+ #define CURSORHINT_SCALE    10
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Plays the interaction audio cue when a real, currently-visible cursor
++ * hint icon first appears or changes to a different icon, and resets that
++ * tracking once the hint stops being visible. "Currently visible" here
++ * means exactly what CG_DrawCursorhint itself just resolved a few lines
++ * above each call site - a non-zero icon (HINT_NONE/HINT_FORCENONE both
++ * resolve to icon 0, as does a hint whose shader failed to load) and a
++ * non-NULL CG_FadeColor(cg.cursorHintTime, cg.cursorHintFade) (the same
++ * fade window the icon itself is drawn with) - so the cue never fires for
++ * a hint the player can't actually see.
++ */
++static void ETA_NarrateInteractionHint( qboolean active ) {
++	static qboolean wasActive = qfalse;
++	static int lastIcon = HINT_NONE;
++
++	if ( active && ( !wasActive || cg.cursorHintIcon != lastIcon ) ) {
++		ETA_AudioCueSystem_PlayInteractionCue();
++		lastIcon = cg.cursorHintIcon;
++	}
++
++	wasActive = active;
++}
++#endif
++
+ /*
+ ==============
+ CG_DrawCursorHints
+@@ -390,6 +419,9 @@ void CG_DrawCursorhint( rectDef_t *rect ) {
+ 	qboolean yellowbar = qfalse;
+ 
+ 	if ( !cg_cursorHints.integer ) {
++#ifdef FEATURE_ACCESSIBILITY
++		ETA_NarrateInteractionHint( qfalse );
++#endif
+ 		return;
+ 	}
+ 
+@@ -555,6 +587,9 @@ void CG_DrawCursorhint( rectDef_t *rect ) {
+ 
+ 
+ 	if ( !icon ) {
++#ifdef FEATURE_ACCESSIBILITY
++		ETA_NarrateInteractionHint( qfalse );
++#endif
+ 		return;
+ 	}
+ 
+@@ -563,9 +598,16 @@ void CG_DrawCursorhint( rectDef_t *rect ) {
+ 	color = CG_FadeColor( cg.cursorHintTime, cg.cursorHintFade );
+ 	if ( !color ) {
+ 		trap_R_SetColor( NULL );
++#ifdef FEATURE_ACCESSIBILITY
++		ETA_NarrateInteractionHint( qfalse );
++#endif
+ 		return;
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NarrateInteractionHint( qtrue );
++#endif
++
+ 	if ( cg_cursorHints.integer == 3 ) {
+ 		color[3] *= 0.5 + 0.5 * sin( (float)cg.time / 150.0 );
+ 	}

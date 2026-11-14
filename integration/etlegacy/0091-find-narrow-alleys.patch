@@ -1,0 +1,129 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index ca1daab..7e47e65 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -3019,6 +3019,8 @@ static qboolean ETA_RouteRoom(const float from[3], float to[3], float lift)
+ {
+ 	static const vec3_t mins = { -ETA_ROUTE_BODY_HALF, -ETA_ROUTE_BODY_HALF, -24.0f + 18.0f };
+ 	static const vec3_t maxs = { ETA_ROUTE_BODY_HALF, ETA_ROUTE_BODY_HALF, ETA_ROUTE_BODY_TOP };
++	static const vec3_t snugMins = { -ETA_ROUTE_BODY_HALF + 1.0f, -ETA_ROUTE_BODY_HALF + 1.0f, -24.0f + 18.0f };
++	static const vec3_t snugMaxs = { ETA_ROUTE_BODY_HALF - 1.0f, ETA_ROUTE_BODY_HALF - 1.0f, ETA_ROUTE_BODY_TOP };
+ 	static const float  nudges[5][2] =
+ 	{
+ 		{ 0.0f, 0.0f },
+@@ -3036,6 +3038,23 @@ static qboolean ETA_RouteRoom(const float from[3], float to[3], float lift)
+ 		VectorSet(end, to[0] + nudges[i][0], to[1] + nudges[i][1], from[2] + lift);
+ 		trap_CM_BoxTrace(&trace, start, end, mins, maxs, 0, MASK_PLAYERSOLID);
+ 
++		/* A player pressed against a wall touches it, and a box the
++		   player's own size set down there touches it too: the way out
++		   of a gap the player is standing in is tried a hair narrower,
++		   and only where they end up has to take their whole width. */
++		if (trace.startsolid)
++		{
++			trap_CM_BoxTrace(&trace, start, end, snugMins, snugMaxs, 0, MASK_PLAYERSOLID);
++			if (!trace.startsolid && trace.fraction >= 1.0f)
++			{
++				trap_CM_BoxTrace(&trace, end, end, mins, maxs, 0, MASK_PLAYERSOLID);
++			}
++			else
++			{
++				continue;
++			}
++		}
++
+ 		if (!trace.startsolid && trace.fraction >= 1.0f)
+ 		{
+ 			to[0] = end[0];
+@@ -3050,7 +3069,7 @@ static qboolean ETA_RouteRoom(const float from[3], float to[3], float lift)
+ /**
+  * @brief Can a player walk one square, and at what height do they land.
+  */
+-static int ETA_RouteMove(void *context, const float from[3], float to[3])
++static int ETA_RouteMoveExact(void *context, const float from[3], float to[3])
+ {
+ 	static const vec3_t mins = { -ETA_ROUTE_HALF_WIDTH, -ETA_ROUTE_HALF_WIDTH, -24.0f + 18.0f };
+ 	static const vec3_t maxs = { ETA_ROUTE_HALF_WIDTH, ETA_ROUTE_HALF_WIDTH, 24.0f };
+@@ -3154,6 +3173,82 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ 	return ledge ? ETA_PATH_JUMP : ETA_PATH_WALK;
+ }
+ 
++/**
++ * @brief A step to the next square, or to a point a little to either
++ * side of it.
++ *
++ * The squares are laid out from wherever the player stood when the way
++ * was asked for, so a gap narrower than a square is on the way only when
++ * the squares happen to fall inside it. On Oasis the short way to the
++ * Allied command post goes through such a gap, a narrow alley a little
++ * over a body wide: from some places the squares fell in it and the way
++ * went straight there, from others they fell on its walls and the way
++ * went right round through the excavation below. So a step that does not
++ * fit is tried again shifted across the way it goes - a quarter and a
++ * half of a square either side, which no gap a body fits through falls
++ * between - and the way keeps to wherever it fitted. A walk is taken
++ * over a jump wherever one fits.
++ */
++#define ETA_ROUTE_SHIFT 8.0f
++
++static int ETA_RouteMove(void *context, const float from[3], float to[3])
++{
++	static const float shifts[5] = { 0.0f, ETA_ROUTE_SHIFT, -ETA_ROUTE_SHIFT,
++		                             2.0f * ETA_ROUTE_SHIFT, -2.0f * ETA_ROUTE_SHIFT };
++	float dx    = to[0] - from[0], dy = to[1] - from[1];
++	float ax    = dx < 0.0f ? -dx : dx, ay = dy < 0.0f ? -dy : dy;
++	int   across, count, i, found = ETA_PATH_NONE;
++	float jumpTo[3];
++
++	/* Across the step: y for a step east or west, x for one north or
++	   south. A diagonal step is taken as it is. */
++	if (ax > 2.0f * ay)
++	{
++		across = 1;
++	}
++	else if (ay > 2.0f * ax)
++	{
++		across = 0;
++	}
++	else
++	{
++		across = -1;
++	}
++	count = across < 0 ? 1 : 5;
++
++	for (i = 0; i < count; i++)
++	{
++		float tried[3];
++		int   kind;
++
++		VectorCopy(to, tried);
++		if (across >= 0)
++		{
++			tried[across] += shifts[i];
++		}
++
++		kind = ETA_RouteMoveExact(context, from, tried);
++
++		if (kind == ETA_PATH_WALK)
++		{
++			VectorCopy(tried, to);
++			return kind;
++		}
++
++		if (kind != ETA_PATH_NONE && found == ETA_PATH_NONE)
++		{
++			found = kind;
++			VectorCopy(tried, jumpTo);
++		}
++	}
++
++	if (found != ETA_PATH_NONE)
++	{
++		VectorCopy(jumpTo, to);
++	}
++	return found;
++}
++
+ /**
+  * @brief How far a player could walk straight from one place toward
+  * another, up to the whole way: the fraction of it that is walkable.

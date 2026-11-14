@@ -1,0 +1,464 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index d86bcaf..dc0bf17 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2217,13 +2217,18 @@ static void ETA_MapAppendCount(char *out, size_t outSize, int count,
+ /**
+  * @brief What is standing in one square of the map.
+  *
+- * Everything here comes out of the command map's own entity list, which
+- * is what the server chose to send this player's team: teammates,
+- * enemies their team has actually spotted, mines their team has
+- * detected, the objectives, the spawn points. Nothing is looked up
++ * Who is where comes out of the command map's own entity list, which is
++ * what the server chose to send this player's team: teammates, enemies
++ * their team has actually spotted, mines their team has detected, the
++ * objectives, the spawn points. Nothing about a person is looked up
+  * anywhere else, and the filters a player has set on their map are
+  * honoured - so this says what is on their screen and never more.
+  *
++ * Two things are added that the command map leaves out, and both are
++ * fixtures rather than people: the capturable flags and the doors, from
++ * the map's own entity list. A sighted player sees a flagpole and a
++ * doorway by looking; a blind one had no way to find either.
++ *
+  * The order is deliberate and is not the order the list happens to be
+  * in. Enemies first, because an enemy is the thing that ends the run
+  * and a long sentence can be cut off by the next keypress. Objectives
+@@ -2243,6 +2248,7 @@ static qboolean ETA_MapCellContents(int column, int row, int layer, char *out, s
+ 	char   spawns[ETA_MAP_CONTENTS_MAX];
+ 	int    i;
+ 	int    teammates = 0, enemies = 0, mines = 0, revives = 0;
++	int    doors = 0, lockedDoors = 0;
+ 	team_t team      = cgs.clientinfo[cg.clientNum].team;
+ 
+ 	out[0]        = '\0';
+@@ -2332,6 +2338,87 @@ static qboolean ETA_MapCellContents(int column, int row, int layer, char *out, s
+ 		}
+ 	}
+ 
++	/* The flags and the doors are not on the command map's list at all:
++	   they come from the map's own entity list, which says where each
++	   flagpole and door stands (cg_spawn.c). Neither is anything a
++	   sighted player lacks - a flagpole and a door are there to be seen,
++	   and who holds a flag is announced to the whole server when it
++	   changes hands. */
++	for (i = 0; i < CG_AccessibilityFlagCount(); i++)
++	{
++		vec3_t     origin;
++		int        holder, flagColumn, flagRow;
++		qboolean   takeable;
++		const char *phrase;
++
++		if (!CG_AccessibilityFlag(i, origin, &holder, &takeable))
++		{
++			continue;
++		}
++
++		if (cgs.ccLayers && CG_CurLayerForZ((int)origin[2]) != layer)
++		{
++			continue;
++		}
++
++		ETA_MapCellFor(origin[0], origin[1], &flagColumn, &flagRow);
++
++		if (flagColumn != column || flagRow != row)
++		{
++			continue;
++		}
++
++		if (holder < 0)
++		{
++			phrase = "flag";
++		}
++		else if (holder == team)
++		{
++			phrase = "your team's flag";
++		}
++		else if (holder == TEAM_FREE)
++		{
++			phrase = takeable ? "flag to capture, nobody holds it" : "flag, nobody holds it";
++		}
++		else
++		{
++			phrase = takeable ? "enemy flag to capture" : "enemy flag";
++		}
++
++		ETA_MapAppend(objectives, sizeof(objectives), phrase);
++	}
++
++	for (i = 1; i < MAX_MODELS; i++)
++	{
++		vec3_t   origin;
++		qboolean opens;
++		int      doorColumn, doorRow;
++
++		if (!CG_AccessibilityDoorAt(i, origin, &opens))
++		{
++			continue;
++		}
++
++		if (cgs.ccLayers && CG_CurLayerForZ((int)origin[2]) != layer)
++		{
++			continue;
++		}
++
++		ETA_MapCellFor(origin[0], origin[1], &doorColumn, &doorRow);
++
++		if (doorColumn == column && doorRow == row)
++		{
++			if (opens)
++			{
++				doors++;
++			}
++			else
++			{
++				lockedDoors++;
++			}
++		}
++	}
++
+ 	/* Spawn points are their own list, not part of the entity one. */
+ 	if (!(cgs.ccFilter & CC_FILTER_SPAWNS))
+ 	{
+@@ -2398,6 +2485,11 @@ static qboolean ETA_MapCellContents(int column, int row, int layer, char *out, s
+ 	ETA_MapAppendCount(out, outSize, mines, "landmine", "landmines");
+ 	ETA_MapAppendCount(out, outSize, teammates, "teammate", "teammates");
+ 
++	/* A door is the way into a building, which is why it is here at all;
++	   but it never moves, so it is said last. */
++	ETA_MapAppendCount(out, outSize, doors, "door", "doors");
++	ETA_MapAppendCount(out, outSize, lockedDoors, "locked door", "locked doors");
++
+ 	return (qboolean)(out[0] != '\0');
+ }
+ 
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 3b58eed..961b47d 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3377,6 +3377,30 @@ static void ETA_BeaconDoors(void)
+  */
+ #define ETA_SITE_CUE_RANGE 1000.0f
+ 
++/**
++ * @brief Keeps the map survey's record of who holds each flag, from the
++ *        flagpoles in view - whatever the sounds are set to.
++ */
++static void ETA_WatchFlags(void)
++{
++	int i;
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++
++		if (es->eType == ET_TRAP && es->teamNum == 1)
++		{
++			CG_AccessibilityFlagSeen(cg_entities[es->number].lerpOrigin, es->frame);
++		}
++	}
++}
++
+ /**
+  * @brief Puts a sound on every construction site the player's team can
+  *        build, and every enemy objective they can blow up, within
+@@ -3400,9 +3424,15 @@ static void ETA_BeaconDoors(void)
+  *   that cannot be destroyed never gets one, so it is never heard as a
+  *   target.
+  *
+- * The player's own team's targets are left silent: they are there to
+- * be defended, and a beacon on every one would fill the base with
+- * sound. The game's own ticking already marks armed dynamite for
++ * - A flagpole that can be captured rings a chime while it is not the
++ *   player's team's to hold - nobody's flag, or the enemy's - and the
++ *   map lets the player's side raise it. A flag is not a marker the
++ *   server broadcasts: it is heard while it is in view of where the
++ *   player is, which for a flag in the open is most of the way there.
++ *
++ * The player's own team's targets and flags are left silent: they are
++ * there to be defended, and a beacon on every one would fill the base
++ * with sound. The game's own ticking already marks armed dynamite for
+  * everybody.
+  *
+  * The markers are sent to every client wherever they are, walls or
+@@ -3443,14 +3473,36 @@ static void ETA_BeaconSites(void)
+ 		{
+ 			which = ETA_LOOP_DEMOLITION_TARGET;
+ 		}
++		else if (es->eType == ET_TRAP && es->teamNum == 1)
++		{
++			vec3_t   unused;
++			int      holder, flag;
++			qboolean takeable;
++
++			flag = CG_AccessibilityFlagSeen(cg_entities[es->number].lerpOrigin, es->frame);
++
++			if (flag < 0 || !CG_AccessibilityFlag(flag, unused, &holder, &takeable)
++			    || !takeable || holder == team)
++			{
++				continue;
++			}
++
++			which = ETA_LOOP_FLAG;
++		}
+ 		else
+ 		{
+ 			continue;
+ 		}
+ 
+ 		/* A point entity, placed by the server at the middle of the
+-		   objective's trigger - the spot the command map's icon marks. */
++		   objective's trigger - the spot the command map's icon marks.
++		   A flagpole stands on its base, so its chime is lifted to the
++		   flag. */
+ 		VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++		if (which == ETA_LOOP_FLAG)
++		{
++			origin[2] += 64.0f;
++		}
+ 
+ 		if (Distance(cg.predictedPlayerState.origin, origin) > ETA_SITE_CUE_RANGE)
+ 		{
+@@ -8561,6 +8613,7 @@ void CG_DrawActive()
+ 	/* These are continuous sounds rather than speech, so they do not
+ 	   compete for the one voice and are not held back by anything. */
+ 	ETA_BeaconDoors();
++	ETA_WatchFlags();
+ 	ETA_BeaconSites();
+ 
+ 	ETA_NarrateCrosshair();
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 786f2fc..c5aaca2 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3461,6 +3461,11 @@ void CG_AccessibilityTopshotsPressed(qboolean requested);
+ 
+ /* The map's doors, read from its entity list. See cg_spawn.c. */
+ qboolean CG_AccessibilityDoorModel(int modelindex, qboolean *opens);
++qboolean CG_AccessibilityDoorAt(int modelindex, vec3_t origin, qboolean *opens);
++int CG_AccessibilityFlagCount(void);
++qboolean CG_AccessibilityFlag(int index, vec3_t origin, int *holder, qboolean *takeable);
++int CG_AccessibilityFlagHolderFromFrame(int frame);
++int CG_AccessibilityFlagSeen(const vec3_t origin, int frame);
+ const char *CG_AccessibilityGameModelPath(int index);
+ 
+ /* "What is around me". See cg_draw.c. */
+@@ -3502,7 +3507,8 @@ typedef enum
+ 	ETA_LOOP_CROSSHAIR_TEAMMATE,
+ 	ETA_LOOP_MARKER,
+ 	ETA_LOOP_BUILD_SITE,
+-	ETA_LOOP_DEMOLITION_TARGET
++	ETA_LOOP_DEMOLITION_TARGET,
++	ETA_LOOP_FLAG
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index fe3ed5e..3bf03b1 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2233,7 +2233,8 @@ static eta_cueSound_t eta_loopSounds[] =
+ 	{ "eta_cueCrosshairTeammate", "sound/accessibility/crosshair_teammate.wav", { 0 }, 0, { 0 } },
+ 	{ "eta_cueMarker",            "sound/accessibility/marker_beacon.wav",      { 0 }, 0, { 0 } },
+ 	{ "eta_cueBuildSite",         "sound/accessibility/build_site.wav",         { 0 }, 0, { 0 } },
+-	{ "eta_cueDemolitionTarget",  "sound/accessibility/demolition_target.wav",  { 0 }, 0, { 0 } }
++	{ "eta_cueDemolitionTarget",  "sound/accessibility/demolition_target.wav",  { 0 }, 0, { 0 } },
++	{ "eta_cueFlag",              "sound/accessibility/flag_capture.wav",       { 0 }, 0, { 0 } }
+ };
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+diff --git a/src/cgame/cg_spawn.c b/src/cgame/cg_spawn.c
+index c9dd9d7..99f2772 100644
+--- a/src/cgame/cg_spawn.c
++++ b/src/cgame/cg_spawn.c
+@@ -446,6 +446,31 @@ const char *CG_AccessibilityGameModelPath(int index)
+  */
+ static int eta_doorAllowTeams[MAX_MODELS];
+ 
++/* A door's "origin" key. A rotating door is built around an origin
++   brush, so its inline model is laid out relative to that point and its
++   midpoint alone is not where it stands in the world. */
++static vec3_t eta_doorOrigins[MAX_MODELS];
++
++/**
++ * @brief The capturable flags, read from the map's own entity list.
++ *
++ * A flag (team_WOLF_checkpoint) is an ordinary entity, sent only while
++ * it is in view, so neither the command map's list nor the snapshot can
++ * say where every flag on the map stands. The map's entity list can,
++ * and the cgame reads it anyway - the same way it learns the doors.
++ * Where a flag stands is no secret: it is a flagpole in plain sight.
++ */
++#define ETA_MAX_FLAGS 16
++
++static struct
++{
++	vec3_t origin;
++	int    spawnflags;
++	int    holder;          /* TEAM_AXIS, TEAM_ALLIES, TEAM_FREE, or -1 not yet known */
++} eta_flags[ETA_MAX_FLAGS];
++
++static int eta_flagCount;
++
+ static void ETA_DoorsReset(void)
+ {
+ 	int i;
+@@ -453,9 +478,113 @@ static void ETA_DoorsReset(void)
+ 	for (i = 0; i < MAX_MODELS; i++)
+ 	{
+ 		eta_doorAllowTeams[i] = -1;
++		VectorClear(eta_doorOrigins[i]);
++	}
++
++	eta_flagCount = 0;
++}
++
++/**
++ * @brief team_WOLF_checkpoint: where a flag stands and who may take it.
++ */
++static void SP_ETA_flag(void)
++{
++	if (eta_flagCount >= ETA_MAX_FLAGS)
++	{
++		return;
++	}
++
++	CG_SpawnVector("origin", "0 0 0", eta_flags[eta_flagCount].origin);
++	CG_SpawnInt("spawnflags", "0", &eta_flags[eta_flagCount].spawnflags);
++	eta_flags[eta_flagCount].holder = -1;
++	eta_flagCount++;
++}
++
++int CG_AccessibilityFlagCount(void)
++{
++	return eta_flagCount;
++}
++
++/**
++ * @brief One flag: where it stands, who holds it, and whether the
++ *        player's team may take it.
++ *
++ * @param[out] holder  TEAM_AXIS, TEAM_ALLIES, TEAM_FREE for nobody, or -1
++ *                     while it has not been in view yet
++ * @param[out] ours    qtrue when the player's team may raise it - the
++ *                     map can keep a flag to one side (AXIS_ONLY 4,
++ *                     ALLIED_ONLY 8, the server's own spawnflags)
++ */
++qboolean CG_AccessibilityFlag(int index, vec3_t origin, int *holder, qboolean *takeable)
++{
++	team_t team = cgs.clientinfo[cg.clientNum].team;
++	int    flags;
++
++	if (index < 0 || index >= eta_flagCount)
++	{
++		return qfalse;
++	}
++
++	VectorCopy(eta_flags[index].origin, origin);
++	*holder = eta_flags[index].holder;
++
++	flags     = eta_flags[index].spawnflags;
++	*takeable = (qboolean)((team == TEAM_AXIS && !(flags & 8))
++	                       || (team == TEAM_ALLIES && !(flags & 4)));
++	return qtrue;
++}
++
++/**
++ * @brief Who holds a flagpole, from its animation frame.
++ *
++ * The frame is the server's own record (g_team.c, WCP_ANIM_*): 0 no
++ * flag, 1 rising Axis, 2 rising Allied, 3 Axis up, 4 Allied up, 5 Axis
++ * turning to Allied, 6 Allied turning to Axis, 7 and 8 coming down. A
++ * flag on its way up or over already belongs to the side raising it.
++ */
++int CG_AccessibilityFlagHolderFromFrame(int frame)
++{
++	switch (frame)
++	{
++	case 1:
++	case 3:
++	case 6:
++		return TEAM_AXIS;
++	case 2:
++	case 4:
++	case 5:
++		return TEAM_ALLIES;
++	default:
++		return TEAM_FREE;
++	}
++}
++
++/**
++ * @brief Notes who holds the flag standing at origin, as it is seen.
++ *
++ * A capture is announced to every player on the server, so who holds a
++ * flag is nobody's secret; this keeps the last state seen so the map
++ * survey can say it after the flag has gone out of view.
++ *
++ * @return which of the map's flags it is, or -1 when it is none of them
++ */
++int CG_AccessibilityFlagSeen(const vec3_t origin, int frame)
++{
++	int i;
++
++	for (i = 0; i < eta_flagCount; i++)
++	{
++		if (DistanceSquared(origin, eta_flags[i].origin) < 64.0f * 64.0f)
++		{
++			eta_flags[i].holder = CG_AccessibilityFlagHolderFromFrame(frame);
++			return i;
++		}
+ 	}
++
++	return -1;
+ }
+ 
++
+ /**
+  * @brief func_door and func_door_rotating, noted by their brush model.
+  *
+@@ -502,6 +631,7 @@ static void SP_ETA_door(void)
+ 	}
+ 
+ 	eta_doorAllowTeams[index] = allow;
++	CG_SpawnVector("origin", "0 0 0", eta_doorOrigins[index]);
+ }
+ 
+ /**
+@@ -553,6 +683,22 @@ qboolean CG_AccessibilityDoorModel(int modelindex, qboolean *opens)
+ 
+ 	return qtrue;
+ }
++
++/**
++ * @brief Where a door stands in the world, for the map survey.
++ *
++ * @return qfalse when the model is not a door
++ */
++qboolean CG_AccessibilityDoorAt(int modelindex, vec3_t origin, qboolean *opens)
++{
++	if (!CG_AccessibilityDoorModel(modelindex, opens))
++	{
++		return qfalse;
++	}
++
++	VectorAdd(eta_doorOrigins[modelindex], cgs.inlineModelMidpoints[modelindex], origin);
++	return qtrue;
++}
+ #endif
+ 
+ typedef struct
+@@ -577,6 +723,7 @@ spawn_t spawns[] =
+ #ifdef FEATURE_ACCESSIBILITY
+ 	{ "func_door",                 SP_ETA_door               },
+ 	{ "func_door_rotating",        SP_ETA_door               },
++	{ "team_WOLF_checkpoint",      SP_ETA_flag               },
+ #endif
+ };
+ 

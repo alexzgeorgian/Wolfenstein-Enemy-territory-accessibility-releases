@@ -1,0 +1,664 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 7d07957..40f4cf2 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1457,6 +1457,9 @@ static void CG_AutomapZoomOut_f(void)
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ static void CG_AutomapCollapse(void);
++#ifdef FEATURE_ACCESSIBILITY
++static void ETA_MapCatchKeys(qboolean on);
++#endif
+ #endif
+ 
+ /**
+@@ -1481,6 +1484,9 @@ static void CG_AutomapExpandDown_f(void)
+ 	if (eta_mapToggle.integer && !cgs.autoMapExpanded)
+ 	{
+ 		ETA_Speech_Say("Map open");
++
++		/* The keys are the map's while it is open: see ETA_MapCatchKeys. */
++		ETA_MapCatchKeys(qtrue);
+ 	}
+ #endif
+ 
+@@ -1755,6 +1761,16 @@ static void ETA_TurnStopStep(qboolean arrived)
+  *     followed for as long as the key is down. Lose them and the next one
+  *     in sight is taken; when there is none, "Lock lost". It runs only
+  *     where aim assistance is fair - see CG_AccessibilityAimAssistAllowed.
++ *   - The lock by itself (eta_autoLock): the tester found holding a key
++ *     too slow - by the time it was down the enemy had the first shot. So
++ *     where the lock may run at all, an enemy coming into sight is locked
++ *     on to without a key, silently - the callout has already said where
++ *     they are, and the crosshair tick says the sights are on them. A turn
++ *     key, a snap, the map or a build being counted out stand it down, and
++ *     a turn by hand keeps it off for ETA_AIM_MANUAL_MS.
++ *   - The use key: pressed with nothing under the crosshair to use, it
++ *     first turns to the nearest thing that can be used, and uses it if it
++ *     is within reach - the snap above, joined to the key that acts.
+  *
+  * Pitch moves too: the keys look up and down as well as turn. The two
+  * key numbers for looking are the turn keys' neighbours, so the player's
+@@ -1766,6 +1782,10 @@ static void ETA_TurnStopStep(qboolean arrived)
+ #define ETA_AIM_CYCLE_MS    4000
+ #define ETA_AIM_LOST_MS     400
+ #define ETA_AIM_MAX_TARGETS 16
++#define ETA_AIM_MANUAL_MS   2000
++#define ETA_AIM_AUTO_METERS 40.0f
++#define ETA_USE_KEY         "994"
++#define ETA_USE_REACH_METERS 2.5f
+ 
+ typedef enum
+ {
+@@ -1786,10 +1806,34 @@ typedef struct
+ 	qboolean      saidLost;
+ 	int           cycleIndex;
+ 	int           cycleAt;
++	qboolean      automatic;    /* the lock took this by itself */
++	int           manualUntil;  /* no lock by itself before this */
++	int           nextSearch;
+ } eta_aim_t;
+ 
+ static eta_aim_t eta_aim;
+ 
++/* The use key, pressed on the player's behalf. */
++static struct
++{
++	qboolean pressed;   /* +activate is down under ETA_USE_KEY */
++	qboolean pending;   /* use it on arriving */
++	qboolean held;      /* the player's key is still down */
++	int      releaseAt;
++} eta_use;
++
++static void ETA_UseKey(qboolean down)
++{
++	if (down == eta_use.pressed)
++	{
++		return;
++	}
++
++	trap_SendConsoleCommand(va("%sactivate %s\n", down ? "+" : "-", ETA_USE_KEY));
++	eta_use.pressed   = down;
++	eta_use.releaseAt = 0;
++}
++
+ static void ETA_AimKeys(int yaw, int pitch)
+ {
+ 	if (yaw != eta_aim.yaw)
+@@ -1825,7 +1869,9 @@ static void ETA_AimStop(void)
+ {
+ 	ETA_AimKeys(0, 0);
+ 	ETA_TurnBoost(qfalse);
+-	eta_aim.mode = ETA_AIM_NONE;
++	eta_aim.mode      = ETA_AIM_NONE;
++	eta_aim.automatic = qfalse;
++	eta_use.pending   = qfalse;
+ }
+ 
+ /**
+@@ -1882,12 +1928,14 @@ static void ETA_AimSay(const char *what, const vec3_t point)
+ 	ETA_Speech_EndReport();
+ }
+ 
+-/* An enemy for the lock: the nearest in sight. qfalse when there is none. */
+-static qboolean ETA_AimAcquire(void)
++/* An enemy for the lock: the nearest in sight, within maxMeters when it
++   is above zero. qfalse when there is none. */
++static qboolean ETA_AimAcquire(float maxMeters)
+ {
+ 	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
+ 
+-	if (CG_AccessibilityEnemyTargets(list, ETA_AIM_MAX_TARGETS) <= 0)
++	if (CG_AccessibilityEnemyTargets(list, ETA_AIM_MAX_TARGETS) <= 0
++	    || (maxMeters > 0.0f && list[0].meters > maxMeters))
+ 	{
+ 		return qfalse;
+ 	}
+@@ -1899,6 +1947,25 @@ static qboolean ETA_AimAcquire(void)
+ 	return qtrue;
+ }
+ 
++/* Turns to a thing to use and says what it is. */
++static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
++{
++	/* A tap turn still running would fight this for the same keys. */
++	if (eta_turn.step)
++	{
++		ETA_TurnStopStep(qfalse);
++	}
++
++	ETA_AimStop();
++	eta_aim.mode      = ETA_AIM_SNAP;
++	eta_aim.entityNum = target->entityNum;
++	eta_aim.started   = cg.time;
++	VectorCopy(target->point, eta_aim.point);
++
++	ETA_HudNarrator_HoldPassive(cg.time);
++	ETA_AimSay(label, target->point);
++}
++
+ static void CG_AccessibilityAimUse_f(void)
+ {
+ 	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
+@@ -1927,27 +1994,74 @@ static void CG_AccessibilityAimUse_f(void)
+ 	eta_aim.cycleIndex = index;
+ 	eta_aim.cycleAt    = cg.time;
+ 
+-	/* A tap turn still running would fight this for the same keys. */
+-	if (eta_turn.step)
++	ETA_AimStartSnap(&list[index],
++	                 count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : list[index].name);
++}
++
++/**
++ * @brief The use key: turn to the thing first when nothing is under the
++ * crosshair, then use it.
++ *
++ * Something already under the crosshair that the game offers to use - the
++ * use icon is showing - is used at once, as the plain key would. Otherwise
++ * the view turns to the nearest thing that can be used and names it; if it
++ * is within reach, it is used on arrival. Further off, the turn and the
++ * name are the answer, and the walk is the player's. With nothing close at
++ * all, the key does what it always did.
++ */
++static void CG_AccessibilityActivateDown_f(void)
++{
++	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
++	qboolean       hint;
++
++	if (eta_use.held)
+ 	{
+-		ETA_TurnStopStep(qfalse);
++		return;
+ 	}
+ 
+-	ETA_AimStop();
+-	eta_aim.mode      = ETA_AIM_SNAP;
+-	eta_aim.entityNum = list[index].entityNum;
+-	eta_aim.started   = cg.time;
+-	VectorCopy(list[index].point, eta_aim.point);
++	eta_use.held = qtrue;
+ 
+-	ETA_HudNarrator_HoldPassive(cg.time);
+-	ETA_AimSay(count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : list[index].name,
+-	           list[index].point);
++	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
++	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
++
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL || hint
++	    || CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) <= 0)
++	{
++		ETA_UseKey(qtrue);
++		return;
++	}
++
++	ETA_AimStartSnap(&list[0], list[0].name);
++	eta_use.pending = (qboolean)(list[0].meters <= ETA_USE_REACH_METERS);
++}
++
++static void CG_AccessibilityActivateUp_f(void)
++{
++	eta_use.held = qfalse;
++
++	/* Pressed for the player: let go with them, unless it is still to be
++	   pressed on arrival, which lets go by itself a moment later. */
++	if (eta_use.pressed && !eta_use.pending)
++	{
++		ETA_UseKey(qfalse);
++	}
+ }
+ 
+ static void CG_AccessibilityAimLockDown_f(void)
+ {
+-	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL || eta_aim.mode == ETA_AIM_LOCK)
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		return;
++	}
++
++	if (eta_aim.mode == ETA_AIM_LOCK)
+ 	{
++		/* Already on one by itself: the key makes it the player's. */
++		if (eta_aim.automatic)
++		{
++			eta_aim.automatic = qfalse;
++			ETA_AimSay("Locked, enemy", eta_aim.point);
++		}
+ 		return;
+ 	}
+ 
+@@ -1966,7 +2080,7 @@ static void CG_AccessibilityAimLockDown_f(void)
+ 	eta_aim.mode    = ETA_AIM_LOCK;
+ 	eta_aim.started = cg.time;
+ 
+-	if (ETA_AimAcquire())
++	if (ETA_AimAcquire(0.0f))
+ 	{
+ 		ETA_AimSay("Locked, enemy", eta_aim.point);
+ 	}
+@@ -1980,20 +2094,214 @@ static void CG_AccessibilityAimLockDown_f(void)
+ 
+ static void CG_AccessibilityAimLockUp_f(void)
+ {
+-	if (eta_aim.mode == ETA_AIM_LOCK)
++	if (eta_aim.mode == ETA_AIM_LOCK && !eta_aim.automatic)
+ 	{
+ 		ETA_AimStop();
+ 	}
+ }
+ 
++/**
++ * @brief The lock by itself: an enemy in sight, where the lock may run.
++ */
++static void ETA_AutoLock(void)
++{
++	if (!eta_autoLock.integer || cgs.autoMapExpanded || eta_turn.step || eta_turn.held
++	    || CG_AccessibilityBuildBusy() || !CG_AccessibilityAimAssistAllowed())
++	{
++		return;
++	}
++
++	/* A turn by hand keeps it off a moment, so the player can look away. */
++	if (cg.time < eta_aim.manualUntil && eta_aim.manualUntil - cg.time <= ETA_AIM_MANUAL_MS)
++	{
++		return;
++	}
++
++	/* Ten looks a second is plenty, and spares the traces. */
++	if (cg.time < eta_aim.nextSearch && eta_aim.nextSearch - cg.time <= 100)
++	{
++		return;
++	}
++	eta_aim.nextSearch = cg.time + 100;
++
++	if (!ETA_AimAcquire(ETA_AIM_AUTO_METERS))
++	{
++		return;
++	}
++
++	eta_aim.mode      = ETA_AIM_LOCK;
++	eta_aim.automatic = qtrue;
++	eta_aim.started   = cg.time;
++}
++
++/**
++ * @brief The keys belong to the map while it is open.
++ *
++ * With the map open, the arrow keys still turned and looked and the
++ * movement keys still walked, so walking the survey with the arrows
++ * moved the player as well. A tester put it plainly: while the map is
++ * open the arrows should walk the map, and nothing should move; close it
++ * and everything is as it was.
++ *
++ * So opening the map (as a switch - held, its release must still reach
++ * the game) gives the keys to this module: the arrow keys and the keypad
++ * arrows move the survey cursor, the map key or Escape closes it, a key
++ * on one of the mod's own commands - the reports, the marker, the
++ * survey's other keys - still does its job, and every held action -
++ * walking, firing, looking - is ignored. Letting go of a key that was
++ * already held still reaches the game, which the client guarantees for
++ * every + command, so nothing is left running.
++ */
++static qboolean eta_mapCatching;
++
++static void ETA_MapCatchKeys(qboolean on)
++{
++	if (on && !eta_mapCatching && cgs.eventHandling == CGAME_EVENT_NONE)
++	{
++		if (eta_turn.step)
++		{
++			ETA_TurnStopStep(qfalse);
++		}
++		ETA_AimStop();
++		trap_Key_SetCatcher(trap_Key_GetCatcher() | KEYCATCH_CGAME);
++		eta_mapCatching = qtrue;
++	}
++	else if (!on && eta_mapCatching)
++	{
++		if (cgs.eventHandling == CGAME_EVENT_NONE)
++		{
++			trap_Key_SetCatcher(trap_Key_GetCatcher() & ~KEYCATCH_CGAME);
++		}
++		eta_mapCatching = qfalse;
++	}
++}
++
++/* Escape is the client's: it takes the keys back without asking. Then the
++   map closes too, rather than staying open with the keys gone. */
++static void ETA_MapCatchFrame(void)
++{
++	if (!eta_mapCatching)
++	{
++		return;
++	}
++
++	if (cgs.eventHandling != CGAME_EVENT_NONE)
++	{
++		/* Another panel - the limbo menu - has the keys now. */
++		eta_mapCatching = qfalse;
++		return;
++	}
++
++	if (!(trap_Key_GetCatcher() & KEYCATCH_CGAME) || !cgs.autoMapExpanded)
++	{
++		eta_mapCatching = qfalse;
++		if (cgs.autoMapExpanded)
++		{
++			CG_AutomapCollapse();
++			ETA_Speech_Say("Map closed");
++		}
++		else if (trap_Key_GetCatcher() & KEYCATCH_CGAME)
++		{
++			trap_Key_SetCatcher(trap_Key_GetCatcher() & ~KEYCATCH_CGAME);
++		}
++	}
++}
++
++/**
++ * @brief A key while the map has them. qtrue when it was the map's.
++ */
++qboolean CG_AccessibilityMapKeyEvent(int key, qboolean down)
++{
++	char binding[256];
++
++	if (!eta_mapCatching)
++	{
++		return qfalse;
++	}
++
++	if (!cgs.autoMapExpanded || cgs.eventHandling != CGAME_EVENT_NONE)
++	{
++		ETA_MapCatchKeys(qfalse);
++		return qfalse;
++	}
++
++	/* Letting go is the client's to deliver, and it already has. */
++	if (!down)
++	{
++		return qtrue;
++	}
++
++	switch (key)
++	{
++	case K_UPARROW:
++	case K_KP_UPARROW:
++		CG_AccessibilityMapNorth_f();
++		return qtrue;
++	case K_DOWNARROW:
++	case K_KP_DOWNARROW:
++		CG_AccessibilityMapSouth_f();
++		return qtrue;
++	case K_RIGHTARROW:
++	case K_KP_RIGHTARROW:
++		CG_AccessibilityMapEast_f();
++		return qtrue;
++	case K_LEFTARROW:
++	case K_KP_LEFTARROW:
++		CG_AccessibilityMapWest_f();
++		return qtrue;
++	case K_ESCAPE:
++		CG_AutomapCollapse();
++		ETA_Speech_Say("Map closed");
++		return qtrue;
++	default:
++		break;
++	}
++
++	trap_Key_GetBindingBuf(key, binding, sizeof(binding));
++
++	if (!Q_stricmp(binding, "+mapexpand"))
++	{
++		CG_AutomapCollapse();
++		ETA_Speech_Say("Map closed");
++		return qtrue;
++	}
++
++	/* A command that does a thing once - a report, the marker, the rest
++	   of the survey, a chat line - still does it. A held action - walking,
++	   firing, looking, turning - waits until the map is closed. */
++	if (binding[0] && binding[0] != '+')
++	{
++		trap_SendConsoleCommand(va("%s\n", binding));
++	}
++
++	return qtrue;
++}
++
+ /**
+  * @brief Every frame: steers a running aim onto its target.
+  */
+ void CG_AccessibilityAimFrame(void)
+ {
++	ETA_MapCatchFrame();
++
++	/* A use pressed on arrival lets go a moment later, if the player's
++	   own key already has. */
++	if (eta_use.pressed && !eta_use.held && eta_use.releaseAt
++	    && (cg.time >= eta_use.releaseAt || eta_use.releaseAt - cg.time > 1000))
++	{
++		ETA_UseKey(qfalse);
++	}
++
+ 	if (eta_aim.mode == ETA_AIM_NONE)
+ 	{
+-		return;
++		if (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL)
++		{
++			ETA_AutoLock();
++		}
++		if (eta_aim.mode == ETA_AIM_NONE)
++		{
++			return;
++		}
+ 	}
+ 
+ 	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL || cg.time < eta_aim.started)
+@@ -2002,6 +2310,13 @@ void CG_AccessibilityAimFrame(void)
+ 		return;
+ 	}
+ 
++	/* A lock taken by itself stands down for the map and for a build. */
++	if (eta_aim.automatic && (cgs.autoMapExpanded || CG_AccessibilityBuildBusy() || !eta_autoLock.integer))
++	{
++		ETA_AimStop();
++		return;
++	}
++
+ 	if (eta_aim.mode == ETA_AIM_SNAP)
+ 	{
+ 		/* A wounded teammate or a dropped weapon can move; follow it. */
+@@ -2015,7 +2330,18 @@ void CG_AccessibilityAimFrame(void)
+ 
+ 		if (ETA_AimSteer(eta_aim.point, 2.0f) || cg.time - eta_aim.started > ETA_AIM_SNAP_MS)
+ 		{
++			qboolean use = eta_use.pending;
++
+ 			ETA_AimStop();
++
++			if (use)
++			{
++				ETA_UseKey(qtrue);
++				if (!eta_use.held)
++				{
++					eta_use.releaseAt = cg.time + 150;
++				}
++			}
+ 		}
+ 		return;
+ 	}
+@@ -2043,7 +2369,18 @@ void CG_AccessibilityAimFrame(void)
+ 		return;
+ 	}
+ 
+-	if (ETA_AimAcquire())
++	if (eta_aim.automatic)
++	{
++		/* By itself, it moves on or lets go without a word: the callouts
++		   already say who comes and goes. */
++		if (!ETA_AimAcquire(ETA_AIM_AUTO_METERS))
++		{
++			ETA_AimStop();
++		}
++		return;
++	}
++
++	if (ETA_AimAcquire(0.0f))
+ 	{
+ 		ETA_AimSay("Locked, enemy", eta_aim.point);
+ 		return;
+@@ -2069,11 +2406,13 @@ static void CG_AccessibilityTurnDown(int direction)
+ 		return;
+ 	}
+ 
+-	/* The player turning by hand takes over from any aim. */
++	/* The player turning by hand takes over from any aim, and the lock
++	   leaves them to it for a moment. */
+ 	if (eta_aim.mode != ETA_AIM_NONE)
+ 	{
+ 		ETA_AimStop();
+ 	}
++	eta_aim.manualUntil = cg.time + ETA_AIM_MANUAL_MS;
+ 
+ 	if (!eta_turnSteps.integer)
+ 	{
+@@ -2241,7 +2580,10 @@ void CG_AccessibilityTurnShutdown(void)
+ 		ETA_TurnKey(eta_turn.passthrough, qfalse);
+ 	}
+ 	ETA_AimStop();
++	ETA_UseKey(qfalse);
++	ETA_MapCatchKeys(qfalse);
+ 	memset(&eta_aim, 0, sizeof(eta_aim));
++	memset(&eta_use, 0, sizeof(eta_use));
+ 	ETA_TurnBoost(qfalse);
+ 	ETA_HudNarrator_SetFacingKeyTurn(0);
+ 	memset(&eta_turn, 0, sizeof(eta_turn));
+@@ -2278,8 +2620,9 @@ static void CG_AutomapCollapse(void)
+ 		cgs.autoMapExpanded = qfalse;
+ #ifdef FEATURE_ACCESSIBILITY
+ 		/* The survey lives only while the map is up, exactly as the map
+-		   itself does. */
++		   itself does - and so does its hold on the keys. */
+ 		CG_AccessibilityMapClosed();
++		ETA_MapCatchKeys(qfalse);
+ #endif
+ 		if (cg.time - cgs.autoMapExpandTime < cg_commandMapTime.integer)
+ 		{
+@@ -4972,6 +5315,8 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityAimUse",      CG_AccessibilityAimUse_f       },
+ 	{ "+accessibilityAimLock",    CG_AccessibilityAimLockDown_f  },
+ 	{ "-accessibilityAimLock",    CG_AccessibilityAimLockUp_f    },
++	{ "+accessibilityActivate",   CG_AccessibilityActivateDown_f },
++	{ "-accessibilityActivate",   CG_AccessibilityActivateUp_f   },
+ 	{ "accessibilityHealth",    CG_AccessibilityHealth_f     },
+ 	{ "accessibilityAmmo",      CG_AccessibilityAmmo_f       },
+ 	{ "accessibilityRepeat",    CG_AccessibilityRepeat_f     },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index bbca90d..c9a96b3 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4456,6 +4456,13 @@ static int eta_buildBusyUntil;
+ 
+ #define ETA_BUILD_BUSY_MS 2500
+ 
++/* Whether a build is being counted out right now - the enemy lock stands
++   down for it as the callouts do. */
++qboolean CG_AccessibilityBuildBusy(void)
++{
++	return (qboolean)(cg.time < eta_buildBusyUntil && eta_buildBusyUntil - cg.time <= ETA_BUILD_BUSY_MS);
++}
++
+ static void ETA_NarrateAwareness(qboolean held)
+ {
+ 	static int     lastSerial = -1;
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 8693300..284463e 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3488,6 +3488,8 @@ qboolean CG_AccessibilityEnemyAimPoint(int entityNum, vec3_t out);
+ qboolean CG_AccessibilityAimAssistAllowed(void);
+ float    CG_AccessibilityLeftOfView(const vec3_t point);
+ void     CG_AccessibilityAimFrame(void);
++qboolean CG_AccessibilityBuildBusy(void);
++qboolean CG_AccessibilityMapKeyEvent(int key, qboolean down);
+ 
+ /**
+  * @brief The mod's own looping sounds, shipped inside the pk3.
+@@ -3511,6 +3513,7 @@ extern vmCvar_t eta_openingCallouts;
+ extern vmCvar_t eta_mapToggle;
+ extern vmCvar_t eta_playerCallouts;
+ extern vmCvar_t eta_groundCallouts;
++extern vmCvar_t eta_autoLock;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index c51f8aa..9e144dc 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2206,6 +2206,7 @@ vmCvar_t eta_openingCallouts;
+ vmCvar_t eta_mapToggle;
+ vmCvar_t eta_playerCallouts;
+ vmCvar_t eta_groundCallouts;
++vmCvar_t eta_autoLock;
+ 
+ /**
+  * @brief The four sounds this mod brings with it, and why they are not
+@@ -2388,6 +2389,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_mapToggle,           "eta_mapToggle",           "1" },
+ 	{ &eta_playerCallouts,      "eta_playerCallouts",      "1" },
+ 	{ &eta_groundCallouts,      "eta_groundCallouts",      "1" },
++	{ &eta_autoLock,            "eta_autoLock",            "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },
+diff --git a/src/cgame/cg_newDraw.c b/src/cgame/cg_newDraw.c
+index 5f8ed0d..fc50669 100644
+--- a/src/cgame/cg_newDraw.c
++++ b/src/cgame/cg_newDraw.c
+@@ -1034,6 +1034,15 @@ void CG_EventHandling(int type, qboolean fForced)
+ 
+ void CG_KeyEvent(int key, qboolean down)
+ {
++#ifdef FEATURE_ACCESSIBILITY
++	/* While the command map is open the keys are its own. See
++	   ETA_MapCatchKeys in cg_consolecmds.c. */
++	if (CG_AccessibilityMapKeyEvent(key, down))
++	{
++		return;
++	}
++#endif
++
+ 	switch (cgs.eventHandling)
+ 	{
+ 	// Demos get their own keys
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index b52c9b1..a808e9e 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9000,7 +9000,13 @@ void UI_AccessibilityInstallBinds(void)
+ 		   the turn and look keys, so the right hand stays where it
+ 		   aims; neither is bound in the stock layouts. */
+ 		{ K_DEL,          "accessibilityAimUse",       NULL,         9 },
+-		{ K_INS,          "+accessibilityAimLock",     NULL,         9 }
++		{ K_INS,          "+accessibilityAimLock",     NULL,         9 },
++		/* The use key turns to the thing first when nothing is under the
++		   crosshair. Only the stock right-handed F, and only while it is
++		   still on exactly +activate: the mod's command passes a use
++		   straight through when there is something to use, so nothing
++		   the key did before is lost. */
++		{ 'f',            "+accessibilityActivate",    "+activate",  10 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 6bc72ea..57932f0 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -876,6 +876,7 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilityaimuse",                       -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityaimlock",                     -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "+accessibilityactivate",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ #endif
+ };
+ 

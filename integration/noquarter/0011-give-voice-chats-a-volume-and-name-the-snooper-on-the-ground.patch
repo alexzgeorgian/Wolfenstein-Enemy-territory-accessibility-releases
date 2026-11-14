@@ -1,0 +1,114 @@
+diff --git a/src/cgame/cg_accessibility.c b/src/cgame/cg_accessibility.c
+index d66cc64..b897db4 100644
+--- a/src/cgame/cg_accessibility.c
++++ b/src/cgame/cg_accessibility.c
+@@ -72,6 +72,7 @@ vmCvar_t eta_mineCues;
+ vmCvar_t eta_bumpCues;
+ /* How loud each kind of marking sound is, 0 to 100, and the announcer. */
+ vmCvar_t eta_announcerVolume;
++vmCvar_t eta_voiceVolume;
+ vmCvar_t eta_markerVolume;
+ vmCvar_t eta_siteVolume;
+ vmCvar_t eta_doorVolume;
+@@ -121,6 +122,7 @@ static eta_setting_t eta_settings[] = {
+ 	{ &eta_mineCues,			"eta_mineCues",				"1" },
+ 	{ &eta_bumpCues,			"eta_bumpCues",				"1" },
+ 	{ &eta_announcerVolume,		"eta_announcerVolume",		"100" },
++	{ &eta_voiceVolume,			"eta_voiceVolume",			"100" },
+ 	{ &eta_markerVolume,		"eta_markerVolume",			"100" },
+ 	{ &eta_siteVolume,			"eta_siteVolume",			"100" },
+ 	{ &eta_doorVolume,			"eta_doorVolume",			"100" },
+@@ -264,6 +266,19 @@ int CG_AccessibilityBumpVolume(void) {
+ 	return (127 * ETA_VolumePercent(&eta_bumpVolume)) / 100;
+ }
+ 
++/* Players' and bots' voice chats, 0 to 127 as a sound is played, or -1
++   at 100 to leave them alone. Asked for so that bots calling for medics
++   all match long do not drown the marker; their words are still read in
++   the chat. */
++int CG_AccessibilityVoiceVolume(void) {
++	int percent = eta_voiceVolume.integer;
++
++	if (percent >= 100) {
++		return -1;
++	}
++	return percent <= 0 ? 0 : (127 * percent) / 100;
++}
++
+ /* The announcer's volume as a percentage, or -1 to leave it alone. */
+ int CG_AccessibilityAnnouncerVolume(void) {
+ 	int percent = eta_announcerVolume.integer;
+diff --git a/src/cgame/cg_accessibility_world.c b/src/cgame/cg_accessibility_world.c
+index e1c169c..7376014 100644
+--- a/src/cgame/cg_accessibility_world.c
++++ b/src/cgame/cg_accessibility_world.c
+@@ -68,6 +68,18 @@
+  * @param[in] surfaceFlags
+  * @return the material, or NULL when the engine does not say
+  */
++/* An item as it is said: a weapon by the weapon's own name - the Snooper,
++   not "Garand" - since an item's pickup name is also what the animation
++   scripts know it by, and cannot change; anything else by its pickup name. */
++static const char *ETA_ItemName(const gitem_t *item)
++{
++	if (item->giType == IT_WEAPON && item->giTag > WP_NONE && item->giTag < WP_NUM_WEAPONS)
++	{
++		return CG_AccessibilityWeaponName((weapon_t)item->giTag);
++	}
++	return item->pickup_name;
++}
++
+ static const char *ETA_SurfaceMaterial(int surfaceFlags)
+ {
+ 	if (surfaceFlags & SURF_METAL)
+@@ -1899,7 +1911,7 @@ qboolean CG_AccessibilityObjectName(const entityState_t *es, char *out, size_t o
+ 
+ 		if (item && item->pickup_name && item->pickup_name[0])
+ 		{
+-			Q_strncpyz(out, item->pickup_name, outSize);
++			Q_strncpyz(out, ETA_ItemName(item), outSize);
+ 			return qtrue;
+ 		}
+ 		return qfalse;
+@@ -2161,7 +2173,7 @@ static int ETA_GatherAwareness(ETA_AwareThing *list, int max, qboolean players,
+ 			}
+ 
+ 			thing.kind = ETA_AWARE_ITEM;
+-			Q_strncpyz(thing.name, item->pickup_name, sizeof(thing.name));
++			Q_strncpyz(thing.name, ETA_ItemName(item), sizeof(thing.name));
+ 		}
+ 		else if (es->eType == ET_CORPSE && ground && covert)
+ 		{
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 1312752..c696fa5 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3720,6 +3720,7 @@ sfxHandle_t CG_AccessibilityLoopSound( eta_loopSoundType_t which );
+ int CG_AccessibilityLoopVolume( eta_loopSoundType_t which );
+ int CG_AccessibilityBumpVolume( void );
+ int CG_AccessibilityAnnouncerVolume( void );
++int CG_AccessibilityVoiceVolume( void );
+ 
+ extern vmCvar_t eta_objectiveCallouts;
+ extern vmCvar_t eta_interactionCallouts;
+diff --git a/src/cgame/cg_servercmds.c b/src/cgame/cg_servercmds.c
+index f1f70f6..d3c2c50 100644
+--- a/src/cgame/cg_servercmds.c
++++ b/src/cgame/cg_servercmds.c
+@@ -1773,6 +1773,16 @@ CG_PlayVoiceChat
+ */
+ void CG_PlayVoiceChat( bufferedVoiceChat_t *vchat ) {
+ 	if ( !cg_noVoiceChats.integer ) {
++#ifdef FEATURE_ACCESSIBILITY
++		int volume = CG_AccessibilityVoiceVolume();
++
++		if ( volume >= 0 ) {
++			if ( volume > 0 && cg.snap ) {
++				trap_S_StartSoundVControl( NULL, cg.snap->ps.clientNum, CHAN_VOICE, vchat->snd, volume );
++			}
++		}
++		else
++#endif
+ 		trap_S_StartLocalSound( vchat->snd, CHAN_VOICE);
+ 
+ 		// Arnout: don't show icons for the HQ (clientnum -1)

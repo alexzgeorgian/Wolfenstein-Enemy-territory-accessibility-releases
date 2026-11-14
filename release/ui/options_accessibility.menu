@@ -1,0 +1,58 @@
+#include "ui/menudef.h"
+#include "ui/menumacros.h"
+
+// Accessibility Menu //
+//
+// Shipped by the accessibility mod, not by the game. Everything the mod
+// adds is behind this one button on the Options menu, in five pages:
+//
+//   ENVIRONMENT - what it tells you about the world around you
+//   SPEECH      - how the narrator's voice sounds
+//   KEY BINDS   - which keys ask for what
+//   HOSTING     - bots, and friends joining a game you host
+//
+//   SOUND       - how loud the mod's sounds and the announcer are
+//
+// and, below them, updates: whether the game asks the release page for
+// a newer version of the mod each time it starts, and a button to ask it
+// now, which also says when there is nothing new.
+//
+// The tester's arrangement. It was one long page for a release, and
+// before that the keys lived under CONTROLS; this puts each kind of
+// thing on a page of its own, all under ACCESSIBILITY, and leaves the
+// game's own menus as the game ships them.
+//
+// Laid out like the game's own Options menu, so it reads the same way:
+// a column of buttons, arrowed through top to bottom, BACK last.
+
+#define WINDOW_X      16
+#define WINDOW_Y      16
+#define WINDOW_WIDTH  160
+#define WINDOW_HEIGHT 224
+#define GROUP_NAME    "grpOptionsAccessibility"
+
+menuDef {
+	name        "options_accessibility"
+	visible     0
+	fullscreen  0
+	rect WINDOW_X WINDOW_Y WINDOW_WIDTH WINDOW_HEIGHT
+	style WINDOW_STYLE_FILLED
+
+	onESC {
+		close options_accessibility ;
+		open  options
+	}
+
+// Window //
+	WINDOW(_("ACCESSIBILITY"), 226)
+
+// Buttons //
+	BUTTON(6, 32, WINDOW_WIDTH - 12, 18, _("ENVIRONMENT"), .3, 14, close options_accessibility ; open options_accessibility_environment)
+	BUTTON(6, 56, WINDOW_WIDTH - 12, 18, _("SPEECH"), .3, 14, close options_accessibility ; open options_accessibility_speech)
+	BUTTON(6, 80, WINDOW_WIDTH - 12, 18, _("SOUND"), .3, 14, close options_accessibility ; open options_accessibility_sound)
+	BUTTON(6, 104, WINDOW_WIDTH - 12, 18, _("KEY BINDS"), .3, 14, close options_accessibility ; open options_accessibility_keys)
+	BUTTON(6, 128, WINDOW_WIDTH - 12, 18, _("HOSTING"), .3, 14, close options_accessibility ; open options_accessibility_hosting)
+	YESNO(6, 152, WINDOW_WIDTH - 12, 18, _("Check for updates at start:"), .2, 14, "eta_updateCheck", _("Yes: a few seconds after the game starts, it asks the release page for a newer version of this mod, and offers it if there is one"))
+	BUTTON(6, 176, WINDOW_WIDTH - 12, 18, _("CHECK FOR UPDATES"), .25, 14, uiScript accessibilityUpdateCheck)
+	BUTTON(6, 200, WINDOW_WIDTH - 12, 18, _("MSGID_MENU_BACK"), .3, 14, close options_accessibility ; open options)
+}

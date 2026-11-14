@@ -1,0 +1,98 @@
+diff --git a/src/cgame/cg_newDraw.c b/src/cgame/cg_newDraw.c
+index 523155f..809bfc7 100644
+--- a/src/cgame/cg_newDraw.c
++++ b/src/cgame/cg_newDraw.c
+@@ -514,6 +514,62 @@ static ETA_Interaction ETA_InteractionForHint( int icon ) {
+    is still looking at a quarter of a second later. */
+ #define ETA_HINT_SETTLE_MS 250
+ 
++/* Says how a construction is coming along while it is being built.
++
++   The tester finished a construction and said afterwards that they had
++   known to keep holding the key only because they remembered the bar
++   filling on screen. That bar is already arriving - the game sends a
++   constructible's progress as the value beside the cursor icon, the same
++   number the HUD draws - and nothing said it out loud once the work had
++   started. The interaction report speaks the figure once, when the icon
++   settles, and then goes quiet for the whole climb.
++
++   Milestones rather than a running count, for the reason the objective
++   distance uses them: a number that changes every frame is a voice that
++   never stops.
++
++   There is deliberately no "complete". The build routine sets the
++   progress back to zero the instant a construction finishes, so a value
++   that has dropped cannot be told from a player who let go of the key,
++   and announcing "built" over something still half standing is the kind
++   of confident wrongness this mod exists to avoid. */
++static void ETA_NarrateBuildProgress( qboolean active ) {
++	static qboolean building = qfalse;
++	int percent;
++
++	if ( !cg.snap || !eta_interactionCallouts.integer ) {
++		building = qfalse;
++		ETA_HudNarrator_ResetBuildProgress();
++		return;
++	}
++
++	if ( !active
++		 || ( cg.cursorHintIcon != HINT_BUILD && cg.cursorHintIcon != HINT_CONSTRUCTIBLE )
++		 || cg.cursorHintValue <= 0 ) {
++		/* Looking away starts the climb afresh, so coming back to a
++		   part-built construction is announced rather than met with
++		   silence. */
++		if ( building ) {
++			building = qfalse;
++			ETA_HudNarrator_ResetBuildProgress();
++		}
++
++		return;
++	}
++
++	building = qtrue;
++
++	/* The same figure the status bar under the icon draws, from the same
++	   value, so the words and the bar cannot disagree. */
++	percent = (int)( ( (float)cg.cursorHintValue / 255.0f ) * 100.0f );
++
++	if ( percent > 100 ) {
++		percent = 100;
++	}
++
++	ETA_HudNarrator_UpdateBuildProgress( percent );
++}
++
+ static void ETA_NarrateInteractionHint( qboolean active ) {
+ 	static qboolean wasActive = qfalse;
+ 	static int lastIcon = HINT_NONE;
+@@ -595,6 +651,7 @@ void CG_DrawCursorhint( rectDef_t *rect ) {
+ 	if ( !cg_cursorHints.integer ) {
+ #ifdef FEATURE_ACCESSIBILITY
+ 		ETA_NarrateInteractionHint( qfalse );
++		ETA_NarrateBuildProgress( qfalse );
+ #endif
+ 		return;
+ 	}
+@@ -763,6 +820,7 @@ void CG_DrawCursorhint( rectDef_t *rect ) {
+ 	if ( !icon ) {
+ #ifdef FEATURE_ACCESSIBILITY
+ 		ETA_NarrateInteractionHint( qfalse );
++		ETA_NarrateBuildProgress( qfalse );
+ #endif
+ 		return;
+ 	}
+@@ -774,12 +832,14 @@ void CG_DrawCursorhint( rectDef_t *rect ) {
+ 		trap_R_SetColor( NULL );
+ #ifdef FEATURE_ACCESSIBILITY
+ 		ETA_NarrateInteractionHint( qfalse );
++		ETA_NarrateBuildProgress( qfalse );
+ #endif
+ 		return;
+ 	}
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	ETA_NarrateInteractionHint( qtrue );
++	ETA_NarrateBuildProgress( qtrue );
+ #endif
+ 
+ 	if ( cg_cursorHints.integer == 3 ) {

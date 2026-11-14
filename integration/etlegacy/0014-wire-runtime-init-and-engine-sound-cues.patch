@@ -1,0 +1,252 @@
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 2212fef..b681ca6 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -36,6 +36,13 @@
+ #include "cg_local.h"
+ #include "cg_cvars.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/accessibility_runtime.h"
++#include "audio/audio_cue_system.h"
++#include "hud/hud_narrator.h"
++#include "navigation/navigation_system.h"
++#endif
++
+ displayContextDef_t cgDC;
+ 
+ void CG_Init(int serverMessageNum, int serverCommandSequence, int clientNum, qboolean demoPlayback, int etLegacyClient, demoPlayInfo_t *info, int clientVersion);
+@@ -2145,6 +2152,165 @@ void CG_DemoBackwardsCompatInit()
+  * @param info
+  * @param clientVersion
+  */
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Cue sounds, taken from the game's own audio rather than synthesised.
++ *
++ * Playing the engine's sounds instead of generating tones means the cues
++ * are mixed by the engine at the player's own volume, do not fight the
++ * game for the audio device, and - for the directional pair - are placed
++ * in the world so the engine spatialises them properly instead of being
++ * merely panned left or right.
++ *
++ * Each is a cvar so a player can retune it by ear without a rebuild,
++ * which matters because nobody has yet heard whether these particular
++ * sounds read as what they are meant to mean. The defaults are all
++ * sounds the stock game registers, so they exist in pak0-2.
++ *
++ * Indexed by ETA_AudioCueType, so the order must match the enum.
++ */
++typedef struct
++{
++	const char  *cvarName;
++	const char  *defaultSound;
++	vmCvar_t    cvar;
++	sfxHandle_t handle;
++	char        registered[MAX_QPATH];
++} eta_cueSound_t;
++
++static eta_cueSound_t eta_cueSounds[] =
++{
++	{ "eta_cueLowHealth",          "sound/player/gasp.wav",           { 0 }, 0, { 0 } },
++	{ "eta_cueObjective",          "sound/misc/referee.wav",          { 0 }, 0, { 0 } },
++	{ "eta_cueInteraction",        "sound/menu/select.wav",           { 0 }, 0, { 0 } },
++	{ "eta_cueDamageDirection",    "sound/weapons/impact/flesh1.wav", { 0 }, 0, { 0 } },
++	{ "eta_cueObjectiveDirection", "sound/misc/vote.wav",             { 0 }, 0, { 0 } }
++};
++
++/**
++ * @brief How far in front of the player a directional cue is placed.
++ *
++ * Far enough that the engine gives it a clear direction, close enough
++ * that distance attenuation does not swallow it. A guess, and one of the
++ * first things worth adjusting once someone has heard it.
++ */
++#define ETA_CUE_DISTANCE 128.0f
++
++/**
++ * @brief Resolves a cue's sound, re-registering it when its cvar changed.
++ *
++ * trap_S_RegisterSound on an already-known sound is a lookup, but a new
++ * one loads from disk, so this only re-registers when the string really
++ * changed - which is what lets a player swap a cue mid-session.
++ */
++static sfxHandle_t ETA_CueSound(eta_cueSound_t *cue)
++{
++	trap_Cvar_Update(&cue->cvar);
++
++	if (!cue->handle || Q_stricmp(cue->registered, cue->cvar.string))
++	{
++		if (!cue->cvar.string[0])
++		{
++			return 0;
++		}
++
++		cue->handle = trap_S_RegisterSound(cue->cvar.string, qfalse);
++		Q_strncpyz(cue->registered, cue->cvar.string, sizeof(cue->registered));
++	}
++
++	return cue->handle;
++}
++
++/**
++ * @brief Plays an accessibility cue through the engine's sound system.
++ * @param[in] type the cue being played
++ * @param[in] directionDegrees view-relative bearing, 0 = ahead, 90 = right
++ * @param[in] hasDirection whether directionDegrees means anything
++ * @param[in] userData unused
++ */
++static void ETA_PlayCueSound(ETA_AudioCueType type, int directionDegrees, int hasDirection, void *userData)
++{
++	sfxHandle_t sfx;
++
++	(void)userData;
++
++	if ((int)type < 0 || (int)type >= (int)(sizeof(eta_cueSounds) / sizeof(eta_cueSounds[0])))
++	{
++		return;
++	}
++
++	sfx = ETA_CueSound(&eta_cueSounds[type]);
++
++	if (!sfx)
++	{
++		return;
++	}
++
++	if (!hasDirection || !cg.snap)
++	{
++		trap_S_StartLocalSound(sfx, CHAN_AUTO);
++		return;
++	}
++
++	{
++		vec3_t angles, forward, origin;
++
++		/* The bearing is view yaw minus target yaw, so the target's own
++		   yaw is the view yaw less the bearing. Placing the sound out
++		   along that yaw hands the direction to the engine, which knows
++		   far more about positioning it than a stereo pan does. */
++		VectorClear(angles);
++		angles[YAW] = AngleNormalize360(cg.snap->ps.viewangles[YAW] - (float)directionDegrees);
++
++		AngleVectors(angles, forward, NULL, NULL);
++		VectorMA(cg.snap->ps.origin, ETA_CUE_DISTANCE, forward, origin);
++
++		trap_S_StartSound(origin, -1, CHAN_AUTO, sfx);
++	}
++}
++
++/**
++ * @brief Brings the accessibility layer up for the cgame module.
++ *
++ * Without this nothing speaks: the speech backends resolve NVDA's
++ * controller client and create the SAPI voice in their Init, and both
++ * Speak entry points return immediately while those are null. The module
++ * narrated into a void until this existed.
++ */
++static void ETA_InitAccessibility(void)
++{
++	size_t i;
++
++	ETA_AccessibilityRuntime_Init();
++	ETA_AudioCueSystem_Init();
++	ETA_HudNarrator_Init();
++	ETA_NavigationSystem_Init();
++
++	for (i = 0; i < sizeof(eta_cueSounds) / sizeof(eta_cueSounds[0]); i++)
++	{
++		trap_Cvar_Register(&eta_cueSounds[i].cvar, eta_cueSounds[i].cvarName,
++		                   eta_cueSounds[i].defaultSound, CVAR_ARCHIVE);
++
++		/* Preloaded so the first cue of a match does not hitch while the
++		   sound loads from disk. */
++		ETA_CueSound(&eta_cueSounds[i]);
++	}
++
++	ETA_AudioCueSystem_SetBackend(ETA_PlayCueSound, NULL);
++}
++
++/**
++ * @brief Takes the accessibility layer down again.
++ */
++static void ETA_ShutdownAccessibility(void)
++{
++	ETA_NavigationSystem_Shutdown();
++	ETA_HudNarrator_Shutdown();
++	ETA_AudioCueSystem_Shutdown();
++	ETA_AccessibilityRuntime_Shutdown();
++}
++#endif
++
+ void CG_Init(int serverMessageNum, int serverCommandSequence, int clientNum, qboolean demoPlayback, int etLegacyClient, demoPlayInfo_t *info, int clientVersion)
+ {
+ 	const char *s;
+@@ -2445,6 +2611,10 @@ void CG_Init(int serverMessageNum, int serverCommandSequence, int clientNum, qbo
+ 	cgs.demoCamera.noclip    = qfalse;
+ 	cgs.currentMenuLevel     = ML_MAIN;
+ #endif
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_InitAccessibility();
++#endif
+ }
+ 
+ /**
+@@ -2455,6 +2625,10 @@ void CG_Shutdown(void)
+ 	// some mods may need to do cleanup work here,
+ 	// like closing files or archiving session data
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_ShutdownAccessibility();
++#endif
++
+ 	CG_EventHandling(CGAME_EVENT_NONE, qtrue);
+ 	if (cg.demoPlayback)
+ 	{
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 31ab671..d48037f 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -33,6 +33,11 @@
+  */
+ 
+ #include "ui_local.h"
++
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/accessibility_runtime.h"
++#include "menu/menu_narrator.h"
++#endif
+ #include "../qcommon/q_oss.h"
+ #include "ui_cvars.h"
+ 
+@@ -1105,6 +1110,12 @@ void UI_Refresh(int realtime)
+ void UI_Shutdown(void)
+ {
+ 	int i = 0;
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_MenuNarrator_Shutdown();
++	ETA_AccessibilityRuntime_Shutdown();
++#endif
++
+ 	for (; i < UI_FONT_COUNT; i++)
+ 	{
+ 		Q_UTF8_FreeFont(&uiInfo.uiDC.Assets.fonts[i]);
+@@ -8925,6 +8936,16 @@ void UI_Init(int etLegacyClient, int clientVersion)
+ 	Q_strncpyz(translated_no, DC->translateString("NO"), sizeof(translated_no));
+ 
+ 	UI_InitConsoleCommand();
++
++#ifdef FEATURE_ACCESSIBILITY
++	/* Without this the menus narrate into a void: both speech backends
++	   return immediately until their Init has resolved NVDA's controller
++	   client or created the SAPI voice. The ui module links its own copy
++	   of the accessibility library, so it needs its own Init rather than
++	   relying on cgame's. */
++	ETA_AccessibilityRuntime_Init();
++	ETA_MenuNarrator_Init();
++#endif
+ }
+ 
+ /**

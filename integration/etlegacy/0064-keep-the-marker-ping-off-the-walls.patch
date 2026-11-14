@@ -1,0 +1,435 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 160333b..d86bcaf 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2697,23 +2697,55 @@ static void ETA_MarkerEye(vec3_t eye)
+ 	eye[2] += cg.predictedPlayerState.viewheight;
+ }
+ 
++/**
++ * @brief How far from a square's middle still counts as being in it.
++ *
++ * A square is reached by walking into it anywhere, and its middle can be
++ * inside a building; the way there only has to get into the square.
++ */
++static float ETA_MarkerSquareRadius(void)
++{
++	vec2_t start, step;
++	int    columns, rows;
++
++	if (!ETA_MapGrid(start, step, &columns, &rows))
++	{
++		return 256.0f;
++	}
++
++	return 0.45f * MIN(step[0], step[1]);
++}
++
+ /**
+  * @brief The walkable way to the marker, around the walls.
+  *
+  * The ping used to sit straight toward the marker, and a tester reported
+  * what that does to someone who cannot see: it leads them into the wall
+  * between them and it, not to the doorway a sighted player would walk
+- * to without thinking. So the mod now searches for a way there (the
+- * search is the library's, ETA_PathFinder), and the ping and the turn
+- * words point along it: at the furthest point of the way the player can
+- * walk to in a straight line from where they stand. Round a corner, that
+- * point moves on to the next one.
++ * to without thinking. Two things now stand in the way of that.
++ *
++ * The way: the library's search (ETA_PathFinder) looks for a walkable
++ * way to the marker over a grid of half-metre squares, a little every
++ * frame, and the ping points at the furthest point of it that can be
++ * walked to in a straight line. Round a corner, that point moves on.
++ *
++ * The opening: whatever the ping is pointing at, several times a second
++ * the mod checks that the player could actually walk toward it. When a
++ * wall is in the way - because the way is not found yet, or the marker
++ * is too far for the search to reach, or it is a straight line that
++ * clips a corner - the ping moves to the nearest open way out, the one
++ * closest to where it was pointing. So it never points into a wall, from
++ * the moment the marker goes down. The first reported attempt pointed
++ * straight until a search finished, and on a real map, with the marker
++ * across the map behind a long wall, the search could run out of room
++ * first - so it pointed into the wall for good. tests/marker_route_sim
++ * _test.py walks a player to the marker by the ping through scenes like
++ * that one.
+  *
+  * The walk is judged against the map's own brushes alone. A closed door
+  * is a way through - it opens when used - and so is anything else that
+- * moves; a route that went the long way round every door would be worse
+- * than none. The probe is a little narrower than a player and stands a
+- * step high, so kerbs and stairs are walked up and a doorway is found
++ * moves. The probe is a little narrower than a player and stands a step
++ * high, so kerbs and stairs are walked up and a doorway is found
+  * wherever the squares fall; it is refused wherever the floor falls away
+  * further than a safe drop, and wherever the floor is lava or slime.
+  */
+@@ -2721,12 +2753,17 @@ static void ETA_MarkerEye(vec3_t eye)
+ #define ETA_ROUTE_HALF_WIDTH    12.0f
+ #define ETA_ROUTE_SLOPE_LIFT    20.0f   /* a second try, higher, for ramps */
+ #define ETA_ROUTE_MAX_DROP      96.0f
+-#define ETA_ROUTE_BUDGET        24      /* squares searched per frame */
+-#define ETA_ROUTE_REPLAN_MS     4000    /* the world changes: look again */
++#define ETA_ROUTE_BUDGET_MS     2       /* searching per frame, at most */
++#define ETA_ROUTE_BUDGET_STEP   4       /* squares between looks at the clock */
++#define ETA_ROUTE_REPLAN_MS     5000    /* the world changes: look again */
+ #define ETA_ROUTE_RETRY_MS      3000    /* after finding no way at all */
+-#define ETA_ROUTE_STRAY         96.0f   /* this far off the way: replan */
++#define ETA_ROUTE_STRAY         128.0f  /* this far off the way: replan */
+ #define ETA_ROUTE_STEER_MS      150
+-#define ETA_ROUTE_LOOKAHEAD     24      /* points ahead worth checking */
++#define ETA_ROUTE_LOOKAHEAD     32      /* points ahead worth checking */
++#define ETA_ROUTE_CLEAR_AHEAD   320.0f  /* how far toward the ping must be walkable */
++#define ETA_ROUTE_OPENING_REACH 512.0f  /* how far an opening is looked down */
++#define ETA_ROUTE_OPENING_MIN   192.0f  /* how far it must run to count */
++#define ETA_ROUTE_OPENING_STEP  15      /* degrees between the looks */
+ 
+ typedef struct
+ {
+@@ -2734,10 +2771,13 @@ typedef struct
+ 	int      startedAt;
+ 	qboolean done;        /* the current search has finished */
+ 	int      doneAt;
+-	vec3_t   steer;       /* where the ping and the turn words point */
++	vec3_t   steer;       /* the point along the way */
+ 	qboolean steering;    /* steer is from the way, not the straight line */
++	vec3_t   aim;         /* where the ping and the turn words point */
++	qboolean aimSet;
+ 	int      steeredAt;
+ 	int      along;       /* the point of the way the player is at */
++	int      side;        /* which way round the last opening was: -1, 1, 0 */
+ } eta_route_t;
+ 
+ static eta_route_t eta_route;
+@@ -2813,14 +2853,17 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ }
+ 
+ /**
+- * @brief Whether a player could walk straight from one place to another.
++ * @brief How far a player could walk straight from one place toward
++ * another, up to the whole way: the fraction of it that is walkable.
+  */
+-static qboolean ETA_RouteClear(const vec3_t from, const vec3_t to)
++static float ETA_RouteWalkable(const vec3_t from, const vec3_t to)
+ {
+ 	static const vec3_t mins = { -ETA_ROUTE_HALF_WIDTH, -ETA_ROUTE_HALF_WIDTH, -24.0f + 18.0f };
+ 	static const vec3_t maxs = { ETA_ROUTE_HALF_WIDTH, ETA_ROUTE_HALF_WIDTH, 24.0f };
+ 	trace_t trace;
+ 	vec3_t  a, b;
++	float   reach, length;
++	int     samples, i;
+ 
+ 	VectorCopy(from, a);
+ 	VectorCopy(to, b);
+@@ -2831,41 +2874,92 @@ static qboolean ETA_RouteClear(const vec3_t from, const vec3_t to)
+ 
+ 	trap_CM_BoxTrace(&trace, a, b, mins, maxs, 0, MASK_PLAYERSOLID);
+ 
+-	if (trace.startsolid || trace.fraction < 1.0f)
++	if (trace.startsolid)
+ 	{
+-		return qfalse;
++		return 0.0f;
+ 	}
+ 
++	reach  = trace.fraction;
++	length = Distance(from, to) * reach;
++
+ 	/* And floor all the way: a straight line across a hole the way goes
+ 	   round is not a way. Sampled every couple of squares, looking down
+ 	   as far as a safe drop. */
++	samples = (int)(length / (2.0f * ETA_ROUTE_CELL));
++
++	for (i = 1; i <= samples; i++)
+ 	{
+-		float  length = Distance(from, to);
+-		int    samples = (int)(length / (2.0f * ETA_ROUTE_CELL));
+-		int    i;
++		vec3_t point, below;
++		float  f = reach * (float)i / (float)(samples + 1);
+ 
+-		for (i = 1; i <= samples; i++)
++		point[0] = from[0] + (to[0] - from[0]) * f;
++		point[1] = from[1] + (to[1] - from[1]) * f;
++		point[2] = a[2];
++		VectorCopy(point, below);
++		below[2] -= 24.0f + ETA_ROUTE_MAX_DROP + fabsf(from[2] - to[2]);
++
++		trap_CM_BoxTrace(&trace, point, below, NULL, NULL, 0, MASK_PLAYERSOLID);
++
++		if (trace.fraction >= 1.0f
++		    || (CG_PointContents(trace.endpos, -1) & (CONTENTS_LAVA | CONTENTS_SLIME)))
+ 		{
+-			vec3_t point, below;
+-			float  f = (float)i / (float)(samples + 1);
++			return f - reach / (float)(samples + 1);
++		}
++	}
+ 
+-			point[0] = from[0] + (to[0] - from[0]) * f;
+-			point[1] = from[1] + (to[1] - from[1]) * f;
+-			point[2] = a[2];
+-			VectorCopy(point, below);
+-			below[2] -= 24.0f + ETA_ROUTE_MAX_DROP + fabsf(from[2] - to[2]);
++	return reach;
++}
+ 
+-			trap_CM_BoxTrace(&trace, point, below, NULL, NULL, 0, MASK_PLAYERSOLID);
++static qboolean ETA_RouteClear(const vec3_t from, const vec3_t to)
++{
++	return (qboolean)(ETA_RouteWalkable(from, to) >= 1.0f);
++}
+ 
+-			if (trace.fraction >= 1.0f
+-			    || (CG_PointContents(trace.endpos, -1) & (CONTENTS_LAVA | CONTENTS_SLIME)))
++/**
++ * @brief The open way out nearest to a direction, when that direction
++ * is walled off.
++ *
++ * Looks round from the direction the ping wants, a step at a time on
++ * either side, and takes the first that runs far enough to walk down.
++ * The side it found last time is looked at first, so walking along a
++ * wall the ping does not swap ends of it from one moment to the next.
++ */
++static qboolean ETA_RouteOpening(const vec3_t here, float wantYaw, vec3_t out)
++{
++	int step;
++
++	for (step = 1; step * ETA_ROUTE_OPENING_STEP <= 180; step++)
++	{
++		int turn;
++
++		for (turn = 0; turn < 2; turn++)
++		{
++			int    side = (turn == 0) ? (eta_route.side ? eta_route.side : 1) : -(eta_route.side ? eta_route.side : 1);
++			float  yaw  = wantYaw + (float)(side * step * ETA_ROUTE_OPENING_STEP);
++			vec3_t angles, forward, end;
++			float  reach;
++
++			VectorSet(angles, 0.0f, yaw, 0.0f);
++			AngleVectors(angles, forward, NULL, NULL);
++			VectorMA(here, ETA_ROUTE_OPENING_REACH, forward, end);
++
++			reach = ETA_RouteWalkable(here, end) * ETA_ROUTE_OPENING_REACH;
++
++			if (reach >= ETA_ROUTE_OPENING_MIN)
+ 			{
+-				return qfalse;
++				VectorMA(here, MIN(reach, ETA_MARKER_BEACON_DISTANCE), forward, out);
++				eta_route.side = side;
++				return qtrue;
++			}
++
++			if (step * ETA_ROUTE_OPENING_STEP == 180)
++			{
++				break;   /* straight behind: one look is enough */
+ 			}
+ 		}
+ 	}
+ 
+-	return qtrue;
++	return qfalse;
+ }
+ 
+ /**
+@@ -2883,7 +2977,8 @@ static void ETA_RoutePlan(void)
+ 	goal[2]  = eta_marker.origin[2];
+ 
+ 	ETA_PathFinder_Begin(start, goal, ETA_ROUTE_CELL,
+-	                     eta_marker.square ? ETA_ROUTE_CELL : ETA_MARKER_ARRIVE_METERS / ETA_QU_TO_METERS,
++	                     eta_marker.square ? ETA_MarkerSquareRadius()
++	                                       : ETA_MARKER_ARRIVE_METERS / ETA_QU_TO_METERS,
+ 	                     eta_marker.square);
+ 
+ 	eta_route.planned   = qtrue;
+@@ -2902,37 +2997,17 @@ static void ETA_RouteForget(void)
+ }
+ 
+ /**
+- * @brief Every frame: a little more searching, and where to point.
++ * @brief Follows the way found, if there is one: sets eta_route.steer.
+  */
+-static void ETA_RouteFrame(void)
++static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ {
+-	ETA_PathState state;
+-	int           count, i, nearest = 0, best;
+-	float         nearestDistance = 1.0e9f;
+-	vec3_t        here, point;
+-
+-	if (!eta_route.planned)
+-	{
+-		ETA_RoutePlan();
+-	}
+-
+-	state = ETA_PathFinder_Step(ETA_ROUTE_BUDGET, ETA_RouteMove, NULL);
+-
+-	if (state == ETA_PATH_FAILED)
+-	{
+-		eta_route.steering = qfalse;
+-
+-		if (cg.time - eta_route.startedAt > ETA_ROUTE_RETRY_MS || cg.time < eta_route.startedAt)
+-		{
+-			ETA_RoutePlan();
+-		}
+-		return;
+-	}
++	int    count = ETA_PathFinder_PointCount();
++	int    i, nearest = eta_route.along, best;
++	float  nearestDistance = 1.0e9f;
++	vec3_t point;
+ 
+ 	if (state != ETA_PATH_FOUND && state != ETA_PATH_PARTIAL)
+ 	{
+-		/* Still looking. Whatever was being followed stays until the new
+-		   way is ready. */
+ 		return;
+ 	}
+ 
+@@ -2945,16 +3020,6 @@ static void ETA_RouteFrame(void)
+ 		eta_route.doneAt = cg.time;
+ 	}
+ 
+-	if (cg.time - eta_route.steeredAt < ETA_ROUTE_STEER_MS && cg.time >= eta_route.steeredAt
+-	    && eta_route.steering)
+-	{
+-		return;
+-	}
+-	eta_route.steeredAt = cg.time;
+-
+-	VectorCopy(cg.predictedPlayerState.origin, here);
+-	count = ETA_PathFinder_PointCount();
+-
+ 	/* Where along the way the player is: the nearest point, from where
+ 	   they were last time onward. */
+ 	for (i = eta_route.along; i < count; i++)
+@@ -2999,23 +3064,114 @@ static void ETA_RouteFrame(void)
+ 
+ 	if (state == ETA_PATH_FOUND && best == count - 1)
+ 	{
+-		/* The marker is in a straight line from here. */
++		/* The marker is in a straight line from the end of the way. */
+ 		eta_route.steering = qfalse;
+ 		return;
+ 	}
+ 
++	if (best == nearest && best + 1 < count)
++	{
++		/* Nothing ahead is in a straight line - the player is past a
++		   corner the probe cannot see round. The next point is still
++		   the way. */
++		best++;
++	}
++
+ 	ETA_PathFinder_Point(best, point);
+ 	VectorCopy(point, eta_route.steer);
+ 	eta_route.steering = qtrue;
+ }
+ 
+ /**
+- * @brief Where the ping and the turn words point: along the way when
+- * there is one, straight at the marker when it is in plain reach.
++ * @brief Every frame: a little more searching, and where to point.
++ */
++static void ETA_RouteFrame(void)
++{
++	ETA_PathState state;
++	vec3_t        here, want, delta, angles;
++	float         distance;
++
++	if (!eta_route.planned)
++	{
++		ETA_RoutePlan();
++	}
++
++	/* By the clock, not by a count: a square costs a handful of traces,
++	   and a trace costs more on a detailed map and a slow machine. Two
++	   milliseconds a frame is searched however far that goes. */
++	{
++		int began = trap_Milliseconds();
++
++		do
++		{
++			state = ETA_PathFinder_Step(ETA_ROUTE_BUDGET_STEP, ETA_RouteMove, NULL);
++		}
++		while (state == ETA_PATH_SEARCHING
++		       && trap_Milliseconds() - began < ETA_ROUTE_BUDGET_MS);
++	}
++
++	if (state == ETA_PATH_FAILED
++	    && (cg.time - eta_route.startedAt > ETA_ROUTE_RETRY_MS || cg.time < eta_route.startedAt))
++	{
++		ETA_RoutePlan();
++	}
++
++	if (cg.time - eta_route.steeredAt < ETA_ROUTE_STEER_MS && cg.time >= eta_route.steeredAt)
++	{
++		return;
++	}
++	eta_route.steeredAt = cg.time;
++
++	VectorCopy(cg.predictedPlayerState.origin, here);
++
++	ETA_RouteFollow(state, here);
++
++	/* Where the ping wants to be: along the way, or straight at the
++	   marker. */
++	VectorCopy(eta_route.steering ? eta_route.steer : eta_marker.origin, want);
++	VectorSubtract(want, here, delta);
++	delta[2] = 0.0f;
++	distance = VectorLength(delta);
++
++	if (distance < 1.0f)
++	{
++		eta_route.aimSet = qfalse;
++		return;
++	}
++
++	/* Can the player walk that way, as far as it matters? Then that is
++	   where the ping goes. */
++	{
++		vec3_t ahead;
++
++		VectorMA(here, MIN(distance, ETA_ROUTE_CLEAR_AHEAD) / distance, delta, ahead);
++		ahead[2] = want[2];
++
++		if (ETA_RouteClear(here, ahead))
++		{
++			eta_route.aimSet = qfalse;
++			eta_route.side   = 0;
++			return;
++		}
++	}
++
++	/* A wall in the way: the nearest open way out instead. */
++	vectoangles(delta, angles);
++	eta_route.aimSet = ETA_RouteOpening(here, angles[YAW], eta_route.aim);
++}
++
++/**
++ * @brief Where the ping and the turn words point: the open way when the
++ * straight way is walled off, along the route when there is one, and
++ * straight at the marker when it is in plain reach.
+  */
+ static void ETA_MarkerTarget(vec3_t out)
+ {
+-	if (eta_route.steering)
++	if (eta_route.aimSet)
++	{
++		VectorCopy(eta_route.aim, out);
++	}
++	else if (eta_route.steering)
+ 	{
+ 		VectorCopy(eta_route.steer, out);
+ 	}
+@@ -3113,7 +3269,7 @@ static void ETA_MarkerSpeakWay(void)
+ 	straight[2] = 0.0f;
+ 	vectoangles(straight, straight);
+ 
+-	if (eta_route.steering)
++	if (eta_route.steering || eta_route.aimSet)
+ 	{
+ 		ETA_NavigationSystem_AnnounceRouteCorrection(
+ 			va("The way goes %s",

@@ -1,0 +1,71 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 1269552..4c1f8ea 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -262,18 +262,49 @@ static void CG_topshotsUp_f(void)
+ }
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief CG_MainObjectiveNameForTeam
++ * Looks up the display name of a team's current main objective. The
++ * server publishes the objective's entity number in CS_MAIN_AXIS_OBJECTIVE
++ * / CS_MAIN_ALLIES_OBJECTIVE (see cg_draw_hud.c's ET_EXPLOSIVE_INDICATOR /
++ * ET_CONSTRUCTIBLE_INDICATOR handling, which resolves the same pair the
++ * same way for the on-screen objective icons); cgs.oidInfo[] is the
++ * matching array of parsed objective entities, populated from configstrings
++ * in cg_servercmds.c. Returns NULL if there's no current main objective or
++ * its oidInfo entry hasn't arrived yet.
++ * @param[in] team
++ * @return
++ */
++static const char *CG_MainObjectiveNameForTeam(team_t team)
++{
++	int entNum = Q_atoi(CG_ConfigString(team == TEAM_AXIS ? CS_MAIN_AXIS_OBJECTIVE : CS_MAIN_ALLIES_OBJECTIVE));
++	int i;
++
++	for (i = 0; i < MAX_OID_TRIGGERS; i++)
++	{
++		if (cgs.oidInfo[i].name[0] && cgs.oidInfo[i].entityNum == entNum)
++		{
++			return cgs.oidInfo[i].name;
++		}
++	}
++
++	return NULL;
++}
++
+ /**
+  * @brief CG_AccessibilityStatus_f
+  * On-demand "query basic match state" command for the accessibility HUD
+  * narrator (Milestone 4's exit condition). Bindable to a key; narrates
+- * health, the active weapon, and its ammo in one status report rather than
+- * announcing every stat change automatically, since health/ammo change too
+- * often during combat for that to be anything but noise.
++ * health, the active weapon and its ammo, and the player's team's current
++ * main objective in one status report rather than announcing every stat
++ * change automatically, since health/ammo change too often during combat
++ * for that to be anything but noise.
+  */
+ static void CG_AccessibilityStatus_f(void)
+ {
+ 	playerState_t *ps = &cg.snap->ps;
+ 	weapon_t      weap;
++	const char    *objectiveName;
+ 
+ 	ETA_HudNarrator_SpeakHealth(ps->stats[STAT_HEALTH]);
+ 
+@@ -292,6 +323,13 @@ static void CG_AccessibilityStatus_f(void)
+ 			ETA_HudNarrator_SpeakAmmo(ammo);
+ 		}
+ 	}
++
++	objectiveName = CG_MainObjectiveNameForTeam(cgs.clientinfo[cg.clientNum].team);
++
++	if (objectiveName)
++	{
++		ETA_HudNarrator_SpeakObjective(objectiveName);
++	}
+ }
+ #endif
+ 

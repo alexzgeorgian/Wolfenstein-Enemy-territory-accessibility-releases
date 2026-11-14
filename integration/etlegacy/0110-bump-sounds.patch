@@ -1,0 +1,188 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 21bedef..be85c47 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4539,6 +4539,88 @@ static int ETA_GatherAwareness(ETA_AwareThing *list, int max, qboolean players,
+ 	return count;
+ }
+ 
++/**
++ * @brief A thud on walking into a wall, a knock on walking into a thing.
++ *
++ * The tester asked for what audio games do: a sound when the way is
++ * shut, so a wall is heard rather than found by the footsteps stopping.
++ * Each frame the player's box is pushed a little the way they are
++ * walking - lifted a step, so a stair is not a wall - and when it stops
++ * against something they are walking into, not sliding along, it
++ * sounds from where they hit: a dull thud for a wall, a hollow knock for
++ * a thing - a door, a crate, a vehicle, a player, or the furniture the
++ * map file names (a window is the wall it is in). Once as they hit, and
++ * again while they keep pushing, ETA_BUMP_REPEAT_MS apart.
++ */
++#define ETA_BUMP_REPEAT_MS 600
++#define ETA_BUMP_PROBE     8.0f    /* how far ahead the box is pushed */
++#define ETA_BUMP_FACING    0.7f    /* walking into it, not along it: within about 45 degrees */
++#define ETA_BUMP_STEP      18.0f   /* the game's own step height (STEPSIZE) */
++
++static void ETA_BeaconBump(void)
++{
++	static int           lastAt;
++	static qboolean      wasBlocked;
++	const playerState_t *ps = &cg.predictedPlayerState;
++	usercmd_t            cmd;
++	vec3_t               angles, forward, right, wish, end, mins, maxs, at;
++	trace_t              trace;
++	const char           *prop;
++	qboolean             object;
++	sfxHandle_t          sfx;
++	int                  volume;
++
++	if (!cg.snap || ps->pm_type != PM_NORMAL || !eta_bumpCues.integer || ps->groundEntityNum == ENTITYNUM_NONE
++	    || (ps->pm_flags & (PMF_LADDER | PMF_FOLLOW | PMF_LIMBO))
++	    || !trap_GetUserCmd(trap_GetCurrentCmdNumber(), &cmd) || (!cmd.forwardmove && !cmd.rightmove))
++	{
++		wasBlocked = qfalse;
++		return;
++	}
++
++	VectorSet(angles, 0.0f, ps->viewangles[YAW], 0.0f);
++	AngleVectors(angles, forward, right, NULL);
++	VectorScale(forward, (float)cmd.forwardmove, wish);
++	VectorMA(wish, (float)cmd.rightmove, right, wish);
++	wish[2] = 0.0f;
++	if (VectorNormalize(wish) < 1.0f)
++	{
++		wasBlocked = qfalse;
++		return;
++	}
++
++	VectorSet(mins, -15.0f, -15.0f, -24.0f + ETA_BUMP_STEP);
++	VectorSet(maxs, 15.0f, 15.0f, (ps->pm_flags & PMF_DUCKED) ? 16.0f : 40.0f);
++	VectorMA(ps->origin, ETA_BUMP_PROBE, wish, end);
++	CG_Trace(&trace, ps->origin, mins, maxs, end, ps->clientNum, MASK_PLAYERSOLID);
++
++	if (trace.startsolid || trace.allsolid || trace.fraction >= 1.0f || trace.plane.normal[2] >= 0.7f
++	    || -DotProduct(wish, trace.plane.normal) < ETA_BUMP_FACING)
++	{
++		wasBlocked = qfalse;
++		return;
++	}
++
++	if (wasBlocked && cg.time - lastAt < ETA_BUMP_REPEAT_MS && cg.time >= lastAt)
++	{
++		return;
++	}
++	wasBlocked = qtrue;
++	lastAt     = cg.time;
++
++	/* Where the box touched: its side, the way it was going. */
++	VectorMA(trace.endpos, 16.0f, wish, at);
++	prop   = ETA_PropAt(at);
++	object = (qboolean)(trace.entityNum != ENTITYNUM_WORLD || (prop && Q_stricmp(prop, "Window")));
++
++	sfx    = CG_AccessibilityLoopSound(object ? ETA_LOOP_BUMP_OBJECT : ETA_LOOP_BUMP_WALL);
++	volume = CG_AccessibilityBumpVolume();
++	if (sfx && volume > 0)
++	{
++		trap_S_StartSoundVControl(at, ENTITYNUM_WORLD, CHAN_AUTO, sfx, volume);
++	}
++}
++
+ /**
+  * @brief A sound on each health pack, ammo pack and weapon lying close
+  * by, from where it lies.
+@@ -10735,6 +10817,7 @@ void CG_DrawActive()
+ 	ETA_BeaconSites();
+ 	ETA_BeaconLadders();
+ 	ETA_BeaconPickups();
++	ETA_BeaconBump();
+ 
+ 	/* Enemy mines in sight: the beep, the warning, and the marker's way
+ 	   round them. A warning is worth interrupting anything for. */
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 9f1dae1..1f1e405 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3554,7 +3554,9 @@ typedef enum
+ 	ETA_LOOP_AMMO,            /* an ammo pack */
+ 	ETA_LOOP_WEAPON,          /* a weapon */
+ 	ETA_LOOP_TANK,            /* the tank to escort */
+-	ETA_LOOP_MINE             /* a landmine the player can see, close by */
++	ETA_LOOP_MINE,            /* a landmine the player can see, close by */
++	ETA_LOOP_BUMP_WALL,       /* walked into a wall - played once, not looped */
++	ETA_LOOP_BUMP_OBJECT      /* walked into a thing - played once, not looped */
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+@@ -3592,6 +3594,8 @@ extern vmCvar_t eta_cueVolume;
+ extern vmCvar_t eta_pickupVolume;
+ extern vmCvar_t eta_pickupCues;
+ extern vmCvar_t eta_mineCues;
++extern vmCvar_t eta_bumpCues;
++int CG_AccessibilityBumpVolume(void);
+ int CG_AccessibilityAnnouncerVolume(void);
+ 
+ /* Called where the game itself moves the music, so the accessibility
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 169c38c..3ad3985 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2212,6 +2212,9 @@ vmCvar_t eta_pickupVolume;
+ vmCvar_t eta_pickupCues;
+ /* The landmines the player can see, said and heard as they come near. */
+ vmCvar_t eta_mineCues;
++/* A thud on walking into a wall, a knock on walking into a thing. */
++vmCvar_t eta_bumpCues;
++vmCvar_t eta_bumpVolume;
+ vmCvar_t eta_locationCallouts;
+ vmCvar_t eta_placeCallouts;
+ vmCvar_t eta_interactionCallouts;
+@@ -2262,7 +2265,9 @@ static eta_cueSound_t eta_loopSounds[] =
+ 	{ "eta_cueAmmoPack",          "sound/accessibility/ammo_pack.wav",          { 0 }, 0, { 0 } },
+ 	{ "eta_cueWeapon",            "sound/accessibility/weapon_ground.wav",      { 0 }, 0, { 0 } },
+ 	{ "eta_cueTank",              "sound/accessibility/tank.wav",               { 0 }, 0, { 0 } },
+-	{ "eta_cueMine",              "sound/accessibility/landmine.wav",           { 0 }, 0, { 0 } }
++	{ "eta_cueMine",              "sound/accessibility/landmine.wav",           { 0 }, 0, { 0 } },
++	{ "eta_cueBumpWall",          "sound/accessibility/bump_wall.wav",          { 0 }, 0, { 0 } },
++	{ "eta_cueBumpObject",        "sound/accessibility/bump_object.wav",        { 0 }, 0, { 0 } }
+ };
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+@@ -2464,7 +2469,9 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_cueVolume,           "eta_cueVolume",           "100" },
+ 	{ &eta_pickupVolume,        "eta_pickupVolume",        "100" },
+ 	{ &eta_pickupCues,          "eta_pickupCues",          "1" },
+-	{ &eta_mineCues,            "eta_mineCues",            "1" }
++	{ &eta_mineCues,            "eta_mineCues",            "1" },
++	{ &eta_bumpCues,            "eta_bumpCues",            "1" },
++	{ &eta_bumpVolume,          "eta_bumpVolume",          "100" }
+ };
+ 
+ /**
+@@ -2502,6 +2509,10 @@ int CG_AccessibilityLoopVolume(eta_loopSoundType_t which)
+ 	case ETA_LOOP_MINE:
+ 		cvar = &eta_cueVolume;
+ 		break;
++	case ETA_LOOP_BUMP_WALL:
++	case ETA_LOOP_BUMP_OBJECT:
++		cvar = &eta_bumpVolume;
++		break;
+ 	default:
+ 		cvar = &eta_markerVolume;
+ 		break;
+@@ -2510,6 +2521,15 @@ int CG_AccessibilityLoopVolume(eta_loopSoundType_t which)
+ 	return (255 * ETA_VolumePercent(cvar)) / 100;
+ }
+ 
++/**
++ * @brief How loud the bump sounds play, played once each rather than
++ * looped: 127, the game's own level for a sound played once, at 100.
++ */
++int CG_AccessibilityBumpVolume(void)
++{
++	return (127 * ETA_VolumePercent(&eta_bumpVolume)) / 100;
++}
++
+ /**
+  * @brief The map's voice at eta_announcerVolume, as a share of full:
+  * 0 to 99 - or -1 at 100, for the game's own way of playing it.

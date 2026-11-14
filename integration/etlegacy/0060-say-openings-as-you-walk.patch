@@ -1,0 +1,155 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 1447b71..1938c52 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3131,6 +3131,107 @@ static void ETA_NarrateLocation(void)
+ 	}
+ }
+ 
++/**
++ * @brief How far the openings probe looks, and how often.
++ *
++ * Twelve metres: past the eight at which the library calls a side open,
++ * so an open side reads as open rather than as a wall at the edge of the
++ * probe. Ten times a second is enough for a walk and costs four traces.
++ */
++#define ETA_OPENING_PROBE_UNITS (12.0f / ETA_QU_TO_METERS)
++#define ETA_OPENING_SAMPLE_MS   100
++
++/**
++ * @brief Says when a side opens or closes as the player walks.
++ *
++ * A tester could hear a street but not where it began or where it ended,
++ * and asked for the corners by compass point. This measures how far the
++ * way runs to the north, east, south and west, at eye height and against
++ * what the player collides with, and the library decides when a change
++ * is news - held long enough not to be a doorway, and only while moving.
++ *
++ * The way the player is walking and the way behind them are left out:
++ * the wall ahead is the obstacle callout's, and a way opening behind is
++ * the way they came.
++ */
++static void ETA_NarrateOpenings(void)
++{
++	static int lastSample;
++
++	const playerState_t *ps;
++	vec3_t              eye, velocity;
++	int                 meters[ETA_OPENING_DIRECTIONS];
++	int                 opened, closed, d, moving, ignore = 0;
++	float               speedSq;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_openingCallouts.integer)
++	{
++		ETA_HudNarrator_ResetOpenings();
++		return;
++	}
++
++	ps = &cg.predictedPlayerState;
++
++	/* A ladder, water or the air: none of them is walking a street. The
++	   readings pause rather than reset - landing from a jump is not
++	   arriving somewhere new. */
++	if (ps->groundEntityNum == ENTITYNUM_NONE || (ps->pm_flags & PMF_LADDER) || ETA_WaterLevel() > 1)
++	{
++		return;
++	}
++
++	if (cg.time - lastSample < ETA_OPENING_SAMPLE_MS && cg.time >= lastSample)
++	{
++		return;
++	}
++	lastSample = cg.time;
++
++	VectorCopy(ps->origin, eye);
++	eye[2] += ps->viewheight;
++
++	for (d = 0; d < ETA_OPENING_DIRECTIONS; d++)
++	{
++		trace_t trace;
++		vec3_t  angles, forward, end;
++
++		/* North, east, south, west: compass bearing d * 90, and ET's yaw
++		   puts north at 90 and runs the other way. */
++		VectorSet(angles, 0.0f, 90.0f - 90.0f * (float)d, 0.0f);
++		AngleVectors(angles, forward, NULL, NULL);
++		VectorMA(eye, ETA_OPENING_PROBE_UNITS, forward, end);
++
++		CG_Trace(&trace, eye, NULL, NULL, end, ps->clientNum, MASK_PLAYERSOLID);
++
++		meters[d] = trace.fraction >= 1.0f ? -1
++		            : (int)(trace.fraction * ETA_OPENING_PROBE_UNITS * ETA_QU_TO_METERS);
++	}
++
++	VectorSet(velocity, ps->velocity[0], ps->velocity[1], 0.0f);
++	speedSq = DotProduct(velocity, velocity);
++	moving  = speedSq > 40.0f * 40.0f;
++
++	if (moving)
++	{
++		/* The compass side nearest the way of travel, and its opposite. */
++		int ahead = ((int)(ETA_HudNarrator_BearingFromYaw(vectoyaw(velocity)) / 90.0f + 0.5f)) & 3;
++
++		ignore = (1 << ahead) | (1 << ((ahead + 2) & 3));
++	}
++
++	if (ETA_HudNarrator_UpdateOpenings(meters, moving, cg.time, &opened, &closed))
++	{
++		opened &= ~ignore;
++		closed &= ~ignore;
++
++		if (opened || closed)
++		{
++			ETA_Speech_BeginReport();
++			ETA_HudNarrator_SpeakOpenings(opened, closed);
++			ETA_Speech_EndReport();
++		}
++	}
++}
++
+ /**
+  * @brief Speaks where the player is, into an already-open report.
+  *
+@@ -7627,6 +7728,10 @@ void CG_DrawActive()
+ 		ETA_NarrateWater();
+ 
+ 		ETA_NarrateLocation();
++
++		/* After the location: arriving somewhere new says where, and the
++		   corners follow from there. */
++		ETA_NarrateOpenings();
+ 	}
+ 
+ 	/* Neither of these is held back. A drop warning is the one report
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index ff96bfd..2d3b182 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3483,6 +3483,7 @@ extern vmCvar_t eta_doorCues;
+ extern vmCvar_t eta_crosshairCues;
+ extern vmCvar_t eta_markerCues;
+ extern vmCvar_t eta_turnSteps;
++extern vmCvar_t eta_openingCallouts;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index f685256..c028e20 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2202,6 +2202,7 @@ vmCvar_t eta_doorCues;
+ vmCvar_t eta_crosshairCues;
+ vmCvar_t eta_markerCues;
+ vmCvar_t eta_turnSteps;
++vmCvar_t eta_openingCallouts;
+ 
+ /**
+  * @brief The four sounds this mod brings with it, and why they are not
+@@ -2380,6 +2381,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_crosshairCues,       "eta_crosshairCues",       "1" },
+ 	{ &eta_markerCues,          "eta_markerCues",          "1" },
+ 	{ &eta_turnSteps,           "eta_turnSteps",           "1" },
++	{ &eta_openingCallouts,     "eta_openingCallouts",     "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },

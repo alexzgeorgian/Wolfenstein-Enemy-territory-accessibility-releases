@@ -1,0 +1,38 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 5860752..0868d8b 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -2628,8 +2628,17 @@ static void CG_AccessibilityActivateDown_f(void)
+ 	}
+ 
+ 	/* The game's ladder icon is not something the use key does anything
+-	   with, so it is not a hint here: the key climbs the ladder. */
++	   with, so it is not a hint here: the key climbs the ladder. Nor is
++	   the icon for anything else use does nothing with - a thing to shoot
++	   or to knife, water, a door locked to this player, a use already
++	   done: the tester, facing one, found F did nothing at all, not even
++	   turn to the thing beside it. F turns to the nearest thing instead. */
+ 	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintIcon != HINT_LADDER
++	                  && cg.cursorHintIcon != HINT_BREAKABLE && cg.cursorHintIcon != HINT_BREAKABLE_DYNAMITE
++	                  && cg.cursorHintIcon != HINT_KNIFE && cg.cursorHintIcon != HINT_WATER
++	                  && cg.cursorHintIcon != HINT_DOOR_LOCKED && cg.cursorHintIcon != HINT_DOOR_ROTATING_LOCKED
++	                  && cg.cursorHintIcon != HINT_RESTRICTED && cg.cursorHintIcon != HINT_BAD_USER
++	                  && cg.cursorHintIcon != HINT_COMPLETED && cg.cursorHintIcon != HINT_NO_DARM_FIRST_REVIVE
+ 	                  && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
+ 	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
+ 
+@@ -2734,6 +2743,14 @@ static void CG_AccessibilityActivateDown_f(void)
+ 		{
+ 			ETA_AimStop();
+ 		}
++		/* Nothing to turn to: said, never silence - the tester could not
++		   tell F finding nothing from F not working. Use is still
++		   pressed, as the plain key would. */
++		if (!hint && cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL)
++		{
++			ETA_HudNarrator_HoldPassive(cg.time);
++			ETA_Speech_Say("Nothing to use within 15 meters");
++		}
+ 		ETA_UseKey(qtrue);
+ 		return;
+ 	}

@@ -1,0 +1,371 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index f5c5278..5d435f8 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -426,6 +426,11 @@ static qboolean CG_AccessibilityForwardToUI(const char *uiCommand)
+  */
+ static void CG_AccessibilityRepeat_f(void)
+ {
++	/* The player asked. Whatever the scenery was about to say can
++	   wait - being talked over while asking a question is worse than
++	   missing a wall. */
++	ETA_HudNarrator_HoldPassive(cg.time);
++
+ 	if (CG_AccessibilityForwardToUI("accessibilityRepeatMenuItem"))
+ 	{
+ 		return;
+@@ -443,6 +448,11 @@ static void CG_AccessibilityRepeat_f(void)
+  */
+ static void CG_AccessibilityStopSpeech_f(void)
+ {
++	/* Cutting speech off also cancels any hold it was protecting:
++	   the player has said they want silence, not silence followed by
++	   four seconds of the scenery still standing down. */
++	ETA_HudNarrator_ReleasePassive();
++
+ 	if (CG_AccessibilityForwardToUI("accessibilityStopSpeechMenu"))
+ 	{
+ 		return;
+@@ -632,6 +642,11 @@ static void CG_AccessibilityNarrateObjectiveText(void)
+  */
+ static void CG_AccessibilityHealth_f(void)
+ {
++	/* The player asked. Whatever the scenery was about to say can
++	   wait - being talked over while asking a question is worse than
++	   missing a wall. */
++	ETA_HudNarrator_HoldPassive(cg.time);
++
+ 	if (!cg.snap)
+ 	{
+ 		return;
+@@ -649,6 +664,11 @@ static void CG_AccessibilityAmmo_f(void)
+ {
+ 	int loaded, reserve;
+ 
++	/* The player asked. Whatever the scenery was about to say can
++	   wait - being talked over while asking a question is worse than
++	   missing a wall. */
++	ETA_HudNarrator_HoldPassive(cg.time);
++
+ 	if (CG_AccessibilityAmmoValue(&loaded, &reserve))
+ 	{
+ 		ETA_HudNarrator_SpeakAmmoDetail(loaded, reserve);
+@@ -688,6 +708,11 @@ static void CG_AccessibilityStatus_f(void)
+ 	playerState_t *ps = &cg.snap->ps;
+ 	weapon_t      weap;
+ 
++	/* The player asked. Whatever the scenery was about to say can
++	   wait - being talked over while asking a question is worse than
++	   missing a wall. */
++	ETA_HudNarrator_HoldPassive(cg.time);
++
+ 	/* One report, one spoken line. Six separate Say calls were six separate
+ 	   utterances, and the SAPI backend purges before each one - so a player
+ 	   not running NVDA heard the last fragment and nothing before it. */
+@@ -733,6 +758,7 @@ static void CG_objectivesDown_f(void)
+ 	if (!cg.demoPlayback && cgs.objectives.show != SHOW_ON)
+ 	{
+ 		ETA_Speech_BeginReport();
++		ETA_HudNarrator_HoldPassive(cg.time);
+ 		CG_AccessibilityNarrateObjectiveText();
+ 		CG_AccessibilityNarrateObjective();
+ 		ETA_Speech_EndReport();
+@@ -1377,41 +1403,49 @@ static void CG_AutomapExpandDown_f(void)
+  */
+ static void CG_AccessibilityMapNorth_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapStep(ETA_MAP_STEP_NORTH);
+ }
+ 
+ static void CG_AccessibilityMapSouth_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapStep(ETA_MAP_STEP_SOUTH);
+ }
+ 
+ static void CG_AccessibilityMapEast_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapStep(ETA_MAP_STEP_EAST);
+ }
+ 
+ static void CG_AccessibilityMapWest_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapStep(ETA_MAP_STEP_WEST);
+ }
+ 
+ static void CG_AccessibilityMapUp_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapLayer(1);
+ }
+ 
+ static void CG_AccessibilityMapDown_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapLayer(-1);
+ }
+ 
+ static void CG_AccessibilityMapHere_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapHome();
+ }
+ 
+ static void CG_AccessibilityMapNext_f(void)
+ {
++	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMapNext();
+ }
+ #endif
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 8ef4d62..a640274 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3374,31 +3374,47 @@ static void ETA_NarrateFacing(void)
+  */
+ #define ETA_OBSTACLE_PROBE_DISTANCE 48.0f
+ 
++/**
++ * @brief How slowly the player has to be going to count as stopped.
++ *
++ * A metre a second. Above that they are getting somewhere, and whatever
++ * is beside them is not stopping them however close it is.
++ */
++#define ETA_OBSTACLE_STOPPED_SPEED 40.0f
++
+ /**
+  * @brief Says what is blocking the way, and only when something is.
+  *
+- * This used to trace a ray from the eye and announce whatever it hit
+- * within a couple of metres. A tester reported it saying "wall, 0
+- * metres" while they walked on perfectly well, and they were right to
+- * call it noise: a ray from the eye answers "what am I looking at",
+- * which is a different question from "what is stopping me".
++ * This is the second attempt at the same report, and the first one was
++ * only half a fix.
++ *
++ * It began as a ray from the eye that named whatever it hit. A tester
++ * heard "wall, 0 metres" while walking on perfectly well, and the cure
++ * was to stop asking "what am I looking at" and start asking "what is
++ * stopping me": a trace of the player's own bounding box, lifted by the
++ * engine's step height so stairs pass underneath it.
++ *
++ * That fixed the *shape* of the probe and left its *aim* alone - still
++ * the view yaw. Which means it went on answering "what am I looking
++ * at", just with a fatter instrument. The same tester came back: they
++ * could walk forward many metres and still hear the wall, because
++ * running down a corridor while glancing sideways is the commonest
++ * thing in this game and the probe was pointed wherever the eyes went.
+  *
+- * Two things it got wrong, and both were common. Stairs: every step has
+- * an upright face, so a ray sees a wall on every staircase in the game
+- * while the player climbs it without difficulty. And any wall beside a
+- * corridor, which is a wall you are looking at rather than one you are
+- * walking into.
++ * So the aim comes from the player's own movement keys now, turned into
++ * the world by their view - the direction they are *asking* to go.
++ * Press forward and it probes forward; strafe into a wall and it probes
++ * sideways, at the wall that is actually stopping you.
+  *
+- * So the probe is now the player's own bounding box, pushed forward the
+- * way the engine pushes it, with its base lifted by the engine's own
+- * step height. If the box can move, nothing is in the way and nothing is
+- * said - a stair riser passes under it, exactly as the player's feet do.
+- * If the box cannot move, the player cannot either, which is the only
+- * moment this is worth saying.
++ * And it will not speak at all unless the player is both asking to move
++ * and failing to. That is what "blocked" means, and it is the test the
++ * report should have been making all along: someone covering ground is
++ * not blocked, whatever is beside them.
+  *
+- * The distance goes too. When it only fires against something the player
+- * is up against, the number is always nearly zero, and "0 metres" was
+- * the part that read as broken.
++ * The same tester's other finding is answered in ETA_HudNarrator
++ * PassiveHeld: ordering this before the objective callout only settles a
++ * collision inside one frame, and pressing the objectives key puts the
++ * answer on one frame and this on the next.
+  */
+ static void ETA_NarrateObstacleAhead(void)
+ {
+@@ -3407,8 +3423,10 @@ static void ETA_NarrateObstacleAhead(void)
+ 	char        description[128];
+ 
+ 	const playerState_t *ps;
++	usercmd_t           cmd;
+ 	trace_t             trace;
+-	vec3_t              angles, forward, start, end, mins, maxs;
++	vec3_t              angles, forward, right, wish, start, end, mins, maxs;
++	float               speedSq;
+ 
+ 	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer)
+ 	{
+@@ -3432,18 +3450,52 @@ static void ETA_NarrateObstacleAhead(void)
+ 		return;
+ 	}
+ 
++	/* Covering ground. Whatever is beside them is not stopping them, and
++	   this is the whole of what the tester reported: metres of walking
++	   with a wall announced the entire way. */
++	speedSq = ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1];
++
++	if (speedSq > ETA_OBSTACLE_STOPPED_SPEED * ETA_OBSTACLE_STOPPED_SPEED)
++	{
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	/* Standing still on purpose is not being blocked either. Without
++	   this, anyone who stopped to listen would be told about the nearest
++	   wall for as long as they stood there. */
++	if (!trap_GetUserCmd(trap_GetCurrentCmdNumber(), &cmd)
++	    || (cmd.forwardmove == 0 && cmd.rightmove == 0))
++	{
++		lastDescription[0] = '\0';
++		return;
++	}
++
+ 	/* Flattened: looking down at your boots must not aim the probe into
+ 	   the floor, and looking up must not aim it over the obstacle. */
+ 	angles[PITCH] = 0.0f;
+ 	angles[YAW]   = cg.refdefViewAngles[YAW];
+ 	angles[ROLL]  = 0.0f;
+-	AngleVectors(angles, forward, NULL, NULL);
++	AngleVectors(angles, forward, right, NULL);
++
++	/* The direction being asked for, not the one being looked in. This
++	   is the correction: the movement keys say where the player is
++	   trying to go, and that is the only direction anything can be
++	   blocking them in. */
++	VectorScale(forward, (float)cmd.forwardmove, wish);
++	VectorMA(wish, (float)cmd.rightmove, right, wish);
++	wish[2] = 0.0f;
++
++	if (VectorNormalize(wish) < 0.1f)
++	{
++		lastDescription[0] = '\0';
++		return;
++	}
+ 
+ 	/* The player's own box - so this is crouched when they are crouched
+ 	   and prone when they are prone - with the base raised by one step.
+-	   That lift is the whole fix: it is what the engine gives the player
+-	   to get up a stair, so anything that fits under it is not an
+-	   obstacle to them and must not be announced as one. */
++	   That lift is what lets a stair riser pass underneath, exactly as
++	   the player's feet do. */
+ 	VectorCopy(ps->mins, mins);
+ 	VectorCopy(ps->maxs, maxs);
+ 	mins[2] += ETA_DROP_STEP_UNITS;
+@@ -3457,7 +3509,7 @@ static void ETA_NarrateObstacleAhead(void)
+ 	}
+ 
+ 	VectorCopy(ps->origin, start);
+-	VectorMA(start, ETA_OBSTACLE_PROBE_DISTANCE, forward, end);
++	VectorMA(start, ETA_OBSTACLE_PROBE_DISTANCE, wish, end);
+ 
+ 	CG_Trace(&trace, start, mins, maxs, end, ps->clientNum, MASK_PLAYERSOLID);
+ 
+@@ -6677,6 +6729,9 @@ void CG_DrawActive()
+ 	}
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++	/* Every active frame, so a weapon change is caught wherever it came
++	   from - a number key, the mouse wheel, running dry, or being handed a
++	   weapon on spawn. */
+ 	/* Every active frame, so a weapon change is caught wherever it came
+ 	   from - a number key, the mouse wheel, running dry, or being handed a
+ 	   weapon on spawn. */
+@@ -6686,45 +6741,60 @@ void CG_DrawActive()
+ 	   locally, and the engine can refuse a stance change without saying so. */
+ 	ETA_NarrateStanceChange();
+ 
+-	/* Before the objective callout on purpose. A backend that delivers a
+-	   new report by cutting off the one in progress leaves whichever
+-	   spoke last, and a tester lost an objective distance to a scenery
+-	   report. Scenery goes first so the objective is the one that
+-	   survives. */
+-	ETA_NarrateObstacleAhead();
+-
+-	/* Scenery too, and before the objective for the same reason. */
+-	ETA_NarrateStairsAhead();
+-
+-	/* Cheap per frame - a scan of a few dozen command map entries - and
+-	   the library speaks only on a milestone crossing. */
+-	ETA_NarrateObjectiveApproach();
++	ETA_NarrateZoom();
+ 
+ 	/* Last, so everything above still sees the previous frame's totals:
+-	   this is what a pickup next frame will be measured against. */
++	   this is what a pickup next frame will be measured against. It is
++	   bookkeeping rather than speech, so it runs whatever else is being
++	   said. */
+ 	CG_AccessibilitySampleTotals();
+ 
+-	ETA_NarrateZoom();
++	/* Both of these are continuous sounds rather than speech, so they do
++	   not compete for the one voice and are not held back by anything. */
++	ETA_BeaconDoors();
+ 
+-	/* After the zoom narration, which stands down for it rather than the
+-	   other way round: while the binoculars are up they are the answer to
+-	   this question. */
+-	ETA_NarrateFacing();
++	ETA_NarrateCrosshair();
+ 
+-	/* Last of the environment reports, most urgent last: on a backend
+-	   that delivers a new report by cutting off the one in progress, a
+-	   frame that produces several leaves the hazard spoken rather than
+-	   the heading. */
+-	ETA_NarrateWater();
++	/* The scenery stands down while an answer the player asked for is
++	   still being spoken.
+ 
+-	ETA_NarrateLocation();
++	   Ordering these before the objective callout settles a collision
++	   inside a single frame, and that is all it can do. A player who
++	   presses the objectives key gets their answer on one frame and a
++	   wall report on the next, and the next frame always wins - which is
++	   how a tester lost the same objective distance twice, the second
++	   time while deliberately asking for it. Nothing about the order of
++	   these calls could have prevented that; only not making them could.
+ 
+-	/* Both of these are continuous rather than spoken, so they do not
+-	   compete with the narration above for the one voice. */
+-	ETA_BeaconDoors();
++	   Above this line are the reports that answer something the player
++	   just did, which are theirs to have interrupted, and below it is
++	   the one that is worth interrupting anything. */
++	if (!ETA_HudNarrator_PassiveHeld(cg.time))
++	{
++		/* Scenery before the objective callout, for the within-frame
++		   half of the same problem. */
++		ETA_NarrateObstacleAhead();
+ 
+-	ETA_NarrateCrosshair();
++		ETA_NarrateStairsAhead();
++
++		ETA_NarrateObjectiveApproach();
++
++		/* After the zoom narration, which stands down for it rather than
++		   the other way round: while the binoculars are up they are the
++		   answer to this question. */
++		ETA_NarrateFacing();
++
++		/* Most urgent last: on a backend that delivers a new report by
++		   cutting off the one in progress, a frame that produces several
++		   leaves the hazard spoken rather than the heading. */
++		ETA_NarrateWater();
++
++		ETA_NarrateLocation();
++	}
+ 
++	/* Never held. The one thing allowed to cut off an answer the player
++	   asked for is being told they are about to walk off something that
++	   will kill them. */
+ 	ETA_NarrateDropAhead();
+ 
+ 	/* Alongside the stance, and for the same reason: both are things the

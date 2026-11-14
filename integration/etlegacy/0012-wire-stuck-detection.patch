@@ -1,0 +1,89 @@
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 048d221..6b40a67 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3388,6 +3388,16 @@ void CG_RemoveGameConsoleCommand(void);
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ oidInfo_t *CG_MainObjectiveForTeam(team_t team);
++
++/**
++ * Quake units to meters, for the accessibility navigation system's
++ * distance/movement APIs (which work in real-world meters). Neither this
++ * engine nor the original id Software GPL release defines an authoritative
++ * units-per-meter constant anywhere; this uses id Tech 3's commonly cited
++ * external convention of 1 Quake unit = 1 inch (0.0254 m), not a value
++ * verified against this codebase.
++ */
++#define ETA_QU_TO_METERS 0.0254f
+ #endif
+ 
+ void CG_ForceTapOut_f(void);
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 75d2106..dc86662 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -42,6 +42,7 @@
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
++#include "navigation/navigation_system.h"
+ #endif
+ 
+ /**
+@@ -259,6 +260,10 @@ void CG_Respawn(qboolean revived)
+ 
+ 	// clear medic/ammo request voice chat sprites
+ 	CG_ResetVoiceSprites(revived);
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NavigationSystem_ResetStuckDetection();
++#endif
+ }
+ 
+ /**
+@@ -429,6 +434,36 @@ static void ETA_NarrateObjectiveChange(playerState_t *ps)
+ 	lastTeam   = team;
+ 	lastEntNum = objective->entityNum;
+ }
++
++/**
++ * @brief Feeds real per-frame movement into the accessibility navigation
++ * system's stuck detection (ETA_NavigationSystem_UpdateMovement), which
++ * narrates "You may be stuck" on its own once the player has been
++ * effectively stationary for its own internal threshold.
++ *
++ * Only runs while the player is actually playing and able to move under
++ * their own control - ps->pm_type == PM_NORMAL excludes dead, noclip, and
++ * intermission/freeze states, matching the same "on a playing team" gate
++ * ETA_NarrateObjectiveChange above already uses. Outside that gate
++ * (spectating, dead, between rounds), stuck detection is reset rather than
++ * fed zero movement, so time spent not playing can never itself count as
++ * "stuck", and so a genuine respawn-driven reset (CG_Respawn, below) isn't
++ * immediately re-armed by a stale timer from before death.
++ * @param[in] ps
++ * @param[in] ops
++ */
++static void ETA_NarrateStuckDetection(playerState_t *ps, playerState_t *ops)
++{
++	team_t team = (team_t)ps->persistant[PERS_TEAM];
++
++	if ((team != TEAM_AXIS && team != TEAM_ALLIES) || ps->pm_type != PM_NORMAL)
++	{
++		ETA_NavigationSystem_ResetStuckDetection();
++		return;
++	}
++
++	ETA_NavigationSystem_UpdateMovement(Distance(ps->origin, ops->origin) * ETA_QU_TO_METERS, cg.frametime / 1000.0f);
++}
+ #endif
+ 
+ /**
+@@ -650,6 +685,7 @@ void CG_TransitionPlayerState(playerState_t *ps, playerState_t *ops)
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	ETA_NarrateObjectiveChange(ps);
++	ETA_NarrateStuckDetection(ps, ops);
+ #endif
+ }
+ 

@@ -1,0 +1,528 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 5ce2a11..dfaf087 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -46,6 +46,7 @@ static void UI_AccessibilityUpdateFrame(void);
+ static void UI_AccessibilityConsoleFrame(void);
+ static void UI_AccessibilityBotsFrame(void);
+ static void UI_AccessibilityUpdateSay(const char *text);
++static const char *UI_AccessibilityFeederRow(int feederID, int index);
+ #endif
+ #include "../qcommon/q_oss.h"
+ #include "ui_cvars.h"
+@@ -10047,6 +10048,7 @@ void UI_Init(int etLegacyClient, int clientVersion)
+ 	UI_AccessibilityInstallBinds();
+ 	UI_AccessibilityRegisterHostCvars();
+ 	UI_AccessibilityRegisterUpdateCvars();
++	ETA_FeederRowText = UI_AccessibilityFeederRow;
+ #endif
+ }
+ 
+@@ -10432,6 +10434,104 @@ void UI_DrawConnectScreen(qboolean overlay)
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief A server, as said when the server list is on it.
++ *
++ * The list on screen is five columns and a row of small icons - a
++ * padlock for a password, crossed guns for friendly fire, and the rest -
++ * and none of it was said. This is the row in words: name, map, game
++ * type, who is playing out of how many, the ping, and each icon it would
++ * show. A server that has not answered is said as such, by its address,
++ * as the screen shows it.
++ *
++ * @param[in] feederID
++ * @param[in] index
++ * @return the line, or NULL for any other list
++ */
++static const char *UI_AccessibilityFeederRow(int feederID, int index)
++{
++	static char row[512];
++	char        info[MAX_STRING_CHARS];
++	char        name[256];
++	const char  *type = NULL;
++	int         ping, game, clients, humans, maxclients, i;
++
++	if (feederID != FEEDER_SERVERS || index < 0 || index >= uiInfo.serverStatus.numDisplayServers)
++	{
++		return NULL;
++	}
++
++	trap_LAN_GetServerInfo(ui_netSource.integer, uiInfo.serverStatus.displayServers[index], info, sizeof(info));
++	ping = Q_atoi(Info_ValueForKey(info, "ping"));
++	if (ping <= 0)
++	{
++		Com_sprintf(row, sizeof(row), "%s, not answering yet", Info_ValueForKey(info, "addr"));
++		return row;
++	}
++
++	Q_strncpyz(name, Info_ValueForKey(info, "hostname"), sizeof(name));
++	Q_CleanStr(name);
++	Q_TrimStr(name);
++
++	game = Q_atoi(Info_ValueForKey(info, "gametype"));
++	for (i = 0; i < uiInfo.numGameTypes; i++)
++	{
++		if (uiInfo.gameTypes[i].gtEnum == game)
++		{
++			type = uiInfo.gameTypes[i].gameType;
++			break;
++		}
++	}
++
++	clients    = Q_atoi(Info_ValueForKey(info, "clients"));
++	humans     = Q_atoi(Info_ValueForKey(info, "humans"));
++	maxclients = Q_atoi(Info_ValueForKey(info, "sv_maxclients"));
++
++	Com_sprintf(row, sizeof(row), "%s, map %s, %s, ", name[0] ? name : Info_ValueForKey(info, "addr"),
++	            Info_ValueForKey(info, "mapname"), type ? type : "unknown game type");
++
++	/* Only an ET: Legacy server tells humans from bots. */
++	if (strstr(Info_ValueForKey(info, "version"), PRODUCT_LABEL) && clients > humans)
++	{
++		Q_strcat(row, sizeof(row), va("%i %s and %i %s of %i, ", humans, humans == 1 ? "player" : "players",
++		                              clients - humans, clients - humans == 1 ? "bot" : "bots", maxclients));
++	}
++	else
++	{
++		Q_strcat(row, sizeof(row), va("%i of %i players, ", clients, maxclients));
++	}
++	Q_strcat(row, sizeof(row), va("ping %i", ping));
++
++	/* The icons, in the order the screen draws them. */
++	if (Q_atoi(Info_ValueForKey(info, "needpass")))
++	{
++		Q_strcat(row, sizeof(row), ", password");
++	}
++	if (Q_atoi(Info_ValueForKey(info, "friendlyFire")))
++	{
++		Q_strcat(row, sizeof(row), ", friendly fire");
++	}
++	if (Q_atoi(Info_ValueForKey(info, "maxlives")))
++	{
++		Q_strcat(row, sizeof(row), ", max lives");
++	}
++	if (Q_atoi(Info_ValueForKey(info, "weaprestrict")) != 100)
++	{
++		Q_strcat(row, sizeof(row), ", weapon limits");
++	}
++	if (Q_atoi(Info_ValueForKey(info, "g_antilag")))
++	{
++		Q_strcat(row, sizeof(row), ", anti-lag");
++	}
++	if (Q_atoi(Info_ValueForKey(info, "balancedteams")))
++	{
++		Q_strcat(row, sizeof(row), ", balanced teams");
++	}
++	return row;
++}
++#endif
++
+ /**
+  * @brief UI_StopServerRefresh
+  */
+@@ -10469,6 +10569,15 @@ static void UI_StopServerRefresh(void)
+ 		Com_Printf(__("^3%d^7 servers not listed (filtered out by browser settings)\n"), total);
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* On screen the list simply fills; said, the refresh would end in
++	   silence. How many it found, and how many are playing. */
++	UI_AccessibilityUpdateSay(va("%i %s, %i %s", uiInfo.serverStatus.numDisplayServers,
++	                             uiInfo.serverStatus.numDisplayServers == 1 ? "server" : "servers",
++	                             uiInfo.serverStatus.numPlayersOnServers,
++	                             uiInfo.serverStatus.numPlayersOnServers == 1 ? "player" : "players"));
++#endif
++
+ 	// FIXME: number of humans is wrong for favorites, why?
+ 	if (uiInfo.serverStatus.numHumansOnServers > 0 && ui_netSource.integer != AS_FAVORITES)
+ 	{
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 1bb81a3..3bf3513 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -256,6 +256,174 @@ static const char *ETA_BindingText(itemDef_t *item)
+ 	return binding;
+ }
+ 
++/**
++ * @brief Controls the game draws with no words of their own.
++ *
++ * The server browser's filters are a row of three-way boxes beside
++ * small icons - a padlock, a crossed-out gun - and the server name box
++ * is drawn under a picture too. On screen the icon is the label; to a
++ * screen reader there was nothing, so arrowing past the name box went
++ * silent and stayed silent through all nine filters. Each gets a name
++ * here, from what its own tooltip says it does.
++ */
++static const struct
++{
++	const char *cvar;
++	const char *label;
++} eta_unlabelled[] =
++{
++	{ "ui_browserServerNameFilterCheckBox", "Server name filter"         },
++	{ "ui_browserMapFilter",                "Server name to filter by"   },
++	{ "ui_browserShowEmptyOrFull",          "Empty or full servers"      },
++	{ "ui_browserShowPasswordProtected",    "Password protected servers" },
++	{ "ui_browserShowFriendlyFire",         "Friendly fire"              },
++	{ "ui_browserShowMaxlives",             "Max lives"                  },
++	{ "ui_browserShowWeaponsRestricted",    "Weapon limits"              },
++	{ "ui_browserShowAntilag",              "Anti-lag"                   },
++	{ "ui_browserShowTeamBalanced",         "Team balance"               },
++	{ "ui_browserShowHumans",               "Human players"              },
++};
++
++/* Set by the ui module: a fuller line for a row of a list it feeds - a
++   server's name, map, players and what its icons show - than the
++   columns on screen give. NULL in the cgame. */
++const char *(*ETA_FeederRowText)(int feederID, int index) = NULL;
++
++/**
++ * @brief What a control is called when spoken: its text, or the name
++ *        given above, or for a list what it lists. May be NULL.
++ */
++const char *ETA_MenuItem_Label(itemDef_t *item)
++{
++	size_t i;
++
++	if (!item)
++	{
++		return NULL;
++	}
++	if (item->text && item->text[0])
++	{
++		return item->text;
++	}
++	if (item->cvar)
++	{
++		for (i = 0; i < ARRAY_LEN(eta_unlabelled); i++)
++		{
++			if (!Q_stricmp(item->cvar, eta_unlabelled[i].cvar))
++			{
++				return eta_unlabelled[i].label;
++			}
++		}
++	}
++	if (item->type == ITEM_TYPE_LISTBOX)
++	{
++		switch (item->special)
++		{
++		case FEEDER_SERVERS:
++			return "Server list";
++		case FEEDER_SERVERSTATUS:
++			return "Server details";
++		default:
++			return "List";
++		}
++	}
++	return NULL;
++}
++
++/* The same, never NULL: what a change of value is said against. */
++static const char *ETA_MenuItem_SpokenLabel(itemDef_t *item)
++{
++	const char *label = ETA_MenuItem_Label(item);
++
++	return label ? label : "Control";
++}
++
++/**
++ * @brief One row of a list, as said: the row's columns, or the fuller
++ *        line the ui gives for it, then where it is in the list.
++ *
++ * The lists were silent: arrowing through the servers, the changelog's
++ * files or a server's details said nothing at all, so a list was only
++ * any use to someone who could see it.
++ *
++ * @param[in] item a list box
++ * @param[out] out
++ * @param[in] outSize
++ * @return qfalse when the list is empty
++ */
++static qboolean ETA_ListBoxRowText(itemDef_t *item, char *out, size_t outSize)
++{
++	listBoxDef_t *listPtr = (listBoxDef_t *)item->typeData;
++	int          count    = DC->feederCount(item->special);
++	int          index    = item->cursorPos;
++	const char   *custom;
++	char         cell[256];
++
++	out[0] = '\0';
++	if (count <= 0)
++	{
++		return qfalse;
++	}
++	if (index < 0 || index >= count)
++	{
++		index = 0;
++	}
++
++	custom = ETA_FeederRowText ? ETA_FeederRowText(item->special, index) : NULL;
++	if (custom && custom[0])
++	{
++		Q_strncpyz(out, custom, outSize);
++	}
++	else
++	{
++		int columns = (listPtr && listPtr->numColumns > 0) ? listPtr->numColumns : 1;
++		int j;
++
++		for (j = 0; j < columns; j++)
++		{
++			qhandle_t  images[MAX_LB_COLUMNS];
++			int        numImages = 0;
++			const char *text     = DC->feederItemText(item->special, index, j, images, &numImages);
++
++			if (!text || !text[0])
++			{
++				continue;
++			}
++			Q_strncpyz(cell, text, sizeof(cell));
++			Q_CleanStr(cell);
++			if (!cell[0])
++			{
++				continue;
++			}
++			if (out[0])
++			{
++				Q_strcat(out, outSize, ", ");
++			}
++			Q_strcat(out, outSize, cell);
++		}
++	}
++
++	Q_strcat(out, outSize, va(", %i of %i", index + 1, count));
++	return qtrue;
++}
++
++/**
++ * @brief Says the row a list is on, after the keyboard moved it.
++ * @param[in] item a list box
++ */
++void ETA_MenuItem_NarrateListRow(itemDef_t *item)
++{
++	char       row[ETA_MAX_MENU_TEXT_LENGTH];
++	menuDef_t  *parent;
++
++	if (!item || item->type != ITEM_TYPE_LISTBOX || !ETA_ListBoxRowText(item, row, sizeof(row)))
++	{
++		return;
++	}
++	parent = (menuDef_t *)item->parent;
++	ETA_MenuNarrator_OnFocusChanged(parent ? parent->window.name : NULL, row);
++}
++
+ const char *ETA_MenuItem_SettingText(itemDef_t *item)
+ {
+ 	if (!item || !item->cvar)
+@@ -266,8 +434,31 @@ const char *ETA_MenuItem_SettingText(itemDef_t *item)
+ 	switch (item->type)
+ 	{
+ 	case ITEM_TYPE_MULTI:
+-	case ITEM_TYPE_TRICHECKBOX:
+ 		return Item_Multi_Setting(item);
++	case ITEM_TYPE_TRICHECKBOX:
++	{
++		/* The browser's filter boxes name their states "Requires
++		   password..." and the like, and the name filter's states are
++		   blank. Said without the dots, and blanks said for what the
++		   three states do. */
++		static char setting[ETA_MAX_MENU_TEXT_LENGTH];
++		const char  *named = Item_Multi_Setting(item);
++		size_t      length;
++
++		if (!named || !named[0])
++		{
++			float value = DC->getCVarValue(item->cvar);
++
++			return value == 1.f ? "only these" : (value == 2.f ? "all but these" : "off");
++		}
++		Q_strncpyz(setting, named, sizeof(setting));
++		length = strlen(setting);
++		while (length > 0 && setting[length - 1] == '.')
++		{
++			setting[--length] = '\0';
++		}
++		return setting;
++	}
+ 	case ITEM_TYPE_CHECKBOX:
+ 		return (DC->getCVarValue(item->cvar) != 0.f) ? "On" : "Off";
+ 	case ITEM_TYPE_YESNO:
+@@ -311,25 +502,40 @@ const char *ETA_MenuItem_FocusText(itemDef_t *item)
+ 		return NULL;
+ 	}
+ 
++	if (item->type == ITEM_TYPE_LISTBOX)
++	{
++		char row[ETA_MAX_MENU_TEXT_LENGTH];
++
++		eta_lastFieldText[0] = '\0';
++		if (!ETA_ListBoxRowText(item, row, sizeof(row)))
++		{
++			Com_sprintf(text, sizeof(text), "%s, empty", ETA_MenuItem_SpokenLabel(item));
++			return text;
++		}
++		Com_sprintf(text, sizeof(text), "%s, %s", ETA_MenuItem_SpokenLabel(item), row);
++		return text;
++	}
++
+ 	if (!TEXTFIELD(item->type))
+ 	{
+ 		const char *setting = ETA_MenuItem_SettingText(item);
++		const char *label   = ETA_MenuItem_Label(item);
+ 
+ 		eta_lastFieldText[0] = '\0';
+ 
+-		if (!item->text || !setting || !*setting)
++		if (!label || !setting || !*setting)
+ 		{
+-			return item->text;
++			return label;
+ 		}
+ 
+-		Com_sprintf(text, sizeof(text), "%s, %s", item->text, setting);
++		Com_sprintf(text, sizeof(text), "%s, %s", label, setting);
+ 		return text;
+ 	}
+ 
+ 	ETA_TextFieldValue(item, value, sizeof(value));
+ 
+ 	Com_sprintf(text, sizeof(text), "%s, %s, %s",
+-	            item->text ? item->text : "Text box",
++	            ETA_MenuItem_Label(item) ? ETA_MenuItem_Label(item) : "Text box",
+ 	            item->type == ITEM_TYPE_NUMERICFIELD ? "number box" : "edit box",
+ 	            value[0] ? value : "empty");
+ 
+@@ -382,11 +588,11 @@ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int b
+ 
+ 		if (ETA_CharacterAt(after, item->cursorPos, spoken, sizeof(spoken)))
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, spoken);
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), spoken);
+ 		}
+ 		else
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, "end");
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), "end");
+ 		}
+ 
+ 		/* The cursor moved but the text did not, so what was last announced
+@@ -403,7 +609,7 @@ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int b
+ 		/* Enough to confirm the key registered, and nothing more: a
+ 		   password is masked on screen for a reason that speech does not
+ 		   get to overrule. */
+-		ETA_MenuNarrator_OnValueChanged(item->text, afterLen < beforeLen ? "deleted" : "star");
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), afterLen < beforeLen ? "deleted" : "star");
+ 		return;
+ 	}
+ 
+@@ -421,7 +627,7 @@ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int b
+ 			Q_strncpyz(spoken, "character", sizeof(spoken));
+ 		}
+ 
+-		ETA_MenuNarrator_OnValueChanged(item->text,
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item),
+ 		                                afterLen == 0 ? va("%s deleted, empty", spoken)
+ 		                                              : va("%s deleted", spoken));
+ 		return;
+@@ -431,7 +637,7 @@ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int b
+ 	{
+ 		/* More than one character at once is a paste, which is read whole -
+ 		   spelling out a pasted server address would be worse than useless. */
+-		ETA_MenuNarrator_OnValueChanged(item->text, after[0] ? after : "empty");
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), after[0] ? after : "empty");
+ 		return;
+ 	}
+ 
+@@ -441,7 +647,7 @@ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int b
+ 	   moved past what was just put in. */
+ 	if (ETA_CharacterAt(after, item->cursorPos - 1, spoken, sizeof(spoken)))
+ 	{
+-		ETA_MenuNarrator_OnValueChanged(item->text, spoken);
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), spoken);
+ 	}
+ }
+ 
+@@ -3450,7 +3656,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3462,7 +3668,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed && item->cvar)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3474,7 +3680,20 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ 	case ITEM_TYPE_COMBO:
+ 		return qfalse;
+ 	case ITEM_TYPE_LISTBOX:
++#ifdef FEATURE_ACCESSIBILITY
++	{
++		int      before  = item->cursorPos;
++		qboolean handled = Item_ListBox_HandleKey(item, key, down, qfalse);
++
++		if (handled && down && item->cursorPos != before)
++		{
++			ETA_MenuItem_NarrateListRow(item);
++		}
++		return handled;
++	}
++#else
+ 		return Item_ListBox_HandleKey(item, key, down, qfalse);
++#endif
+ 	case ITEM_TYPE_YESNO:
+ 	{
+ 		qboolean changed = Item_YesNo_HandleKey(item, key);
+@@ -3482,7 +3701,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed && item->cvar)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3494,7 +3713,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+@@ -3510,7 +3729,7 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (changed && item->cvar)
+ 		{
+-			ETA_MenuNarrator_OnValueChanged(item->text, ETA_MenuItem_SettingText(item));
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), ETA_MenuItem_SettingText(item));
+ 		}
+ #endif
+ 		return changed;
+diff --git a/src/ui/ui_shared.h b/src/ui/ui_shared.h
+index a29e770..bb4f433 100644
+--- a/src/ui/ui_shared.h
++++ b/src/ui/ui_shared.h
+@@ -674,6 +674,9 @@ qboolean Item_TextField_HandleKey(itemDef_t *item, int key);
+ #ifdef FEATURE_ACCESSIBILITY
+ const char *ETA_MenuItem_SettingText(itemDef_t *item);
+ const char *ETA_MenuItem_FocusText(itemDef_t *item);
++const char *ETA_MenuItem_Label(itemDef_t *item);
++void ETA_MenuItem_NarrateListRow(itemDef_t *item);
++extern const char *(*ETA_FeederRowText)(int feederID, int index);
+ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int beforeCursor);
+ void ETA_MenuItem_NarrateTextFieldValue(itemDef_t *item);
+ #endif

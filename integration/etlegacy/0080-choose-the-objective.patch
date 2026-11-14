@@ -1,0 +1,221 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 9668aa7..a18498d 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -1939,6 +1939,65 @@ qboolean CG_AccessibilityNearestObjective(team_t team, const vec3_t from, etaObj
+ 	return found;
+ }
+ 
++/**
++ * @brief Every objective on this team's command map, nearest first.
++ *
++ * What a sighted player sees as icons: the things to build, to blow up,
++ * to capture and to defend, and the health and ammo cabinets. Each
++ * objective once, however many icons it has. Returns how many.
++ */
++int CG_AccessibilityObjectiveList(team_t team, const vec3_t from, etaObjective_t *out, int max)
++{
++	int i, j, count = 0;
++
++	for (i = 0; i < mapEntityCount && count < max; i++)
++	{
++		const mapEntityData_t *mEnt = &mapEntities[i];
++		vec3_t                origin;
++		int                   oidIndex = -1;
++		qboolean              seen     = qfalse;
++
++		if (mEnt->team != team || !CG_AccessibilityMapObjectiveAt(mEnt, origin, &oidIndex)
++		    || oidIndex < 0 || oidIndex >= MAX_OID_TRIGGERS)
++		{
++			continue;
++		}
++
++		for (j = 0; j < count; j++)
++		{
++			if (out[j].entityNum == cgs.oidInfo[oidIndex].entityNum)
++			{
++				seen = qtrue;
++				break;
++			}
++		}
++		if (seen)
++		{
++			continue;
++		}
++
++		out[count].name      = cgs.oidInfo[oidIndex].name[0] ? cgs.oidInfo[oidIndex].name : NULL;
++		out[count].entityNum = cgs.oidInfo[oidIndex].entityNum;
++		VectorCopy(origin, out[count].origin);
++		count++;
++	}
++
++	/* Nearest first: a handful at most, so a plain insertion sort. */
++	for (i = 1; i < count; i++)
++	{
++		etaObjective_t item = out[i];
++		float          here = Distance(from, item.origin);
++
++		for (j = i; j > 0 && Distance(from, out[j - 1].origin) > here; j--)
++		{
++			out[j] = out[j - 1];
++		}
++		out[j] = item;
++	}
++
++	return count;
++}
++
+ /**
+  * @brief Re-finds a previously chosen objective, to see whether it is
+  * still on the command map and where it has got to.
+@@ -3696,7 +3755,27 @@ void CG_AccessibilityMarkerPlace(void)
+  * The marker goes on the floor under the objective's point, where the
+  * player will stand: the point itself is the middle of the objective's
+  * trigger, often a metre or more up, where nobody can stand.
++ *
++ * The first press takes the current objective - the one the map says is
++ * next. But that is not always where a player means to go: a command
++ * post to build, a gun nest to defend, the cabinets to restock at. So
++ * pressing again within a few seconds moves the marker to the next
++ * objective on the team's command map, nearest first, and round again:
++ * "Marker on Garrison MG Nest, 3 of 7". The list is taken at the first
++ * press and kept while the presses come, so walking a step between them
++ * does not shuffle it.
+  */
++#define ETA_MARKER_OBJECTIVES      24
++#define ETA_MARKER_CYCLE_MS        5000
++
++static struct
++{
++	int lastPress;
++	int index;
++	int count;
++	int entityNums[ETA_MARKER_OBJECTIVES];
++} eta_objectiveCycle;
++
+ void CG_AccessibilityMarkerObjective(void)
+ {
+ 	/* The route probe's body, so the height is the one the way is
+@@ -3721,13 +3800,87 @@ void CG_AccessibilityMarkerObjective(void)
+ 		return;
+ 	}
+ 
+-	if (!CG_AccessibilityObjective(cgs.clientinfo[cg.clientNum].team,
+-	                               cg.predictedPlayerState.origin, &objective))
+ 	{
+-		ETA_Speech_BeginReport();
+-		ETA_Speech_Say("No current objective");
+-		ETA_Speech_EndReport();
+-		return;
++		team_t         team = cgs.clientinfo[cg.clientNum].team;
++		etaObjective_t list[ETA_MARKER_OBJECTIVES], current;
++		int            count, i, found = -1;
++		qboolean       cycling = (qboolean)(eta_objectiveCycle.lastPress
++		                                    && cg.time >= eta_objectiveCycle.lastPress
++		                                    && cg.time - eta_objectiveCycle.lastPress < ETA_MARKER_CYCLE_MS);
++
++		count = CG_AccessibilityObjectiveList(team, cg.predictedPlayerState.origin, list, ETA_MARKER_OBJECTIVES);
++
++		if (!cycling)
++		{
++			/* A fresh list: the current objective first, then the rest
++			   nearest first. */
++			if (CG_AccessibilityObjective(team, cg.predictedPlayerState.origin, &current))
++			{
++				for (i = 0; i < count && list[i].entityNum != current.entityNum; i++)
++				{
++				}
++				if (i == count)
++				{
++					/* Not on the list: it goes in front, and with the
++					   list full the furthest makes room. */
++					if (count < ETA_MARKER_OBJECTIVES)
++					{
++						count++;
++					}
++					else
++					{
++						i = count - 1;
++					}
++				}
++				for (; i > 0; i--)
++				{
++					list[i] = list[i - 1];
++				}
++				list[0] = current;
++			}
++
++			eta_objectiveCycle.count = count;
++			for (i = 0; i < count; i++)
++			{
++				eta_objectiveCycle.entityNums[i] = list[i].entityNum;
++			}
++			eta_objectiveCycle.index = 0;
++		}
++		else if (eta_objectiveCycle.count > 0)
++		{
++			eta_objectiveCycle.index = (eta_objectiveCycle.index + 1) % eta_objectiveCycle.count;
++		}
++
++		/* The one the list says, if it is still on the command map; one
++		   that has gone - built over, blown up - is passed by. */
++		for (i = 0; i < eta_objectiveCycle.count && found < 0; i++)
++		{
++			int want = eta_objectiveCycle.entityNums[(eta_objectiveCycle.index + i) % eta_objectiveCycle.count];
++			int j;
++
++			for (j = 0; j < count; j++)
++			{
++				if (list[j].entityNum == want)
++				{
++					found                    = j;
++					eta_objectiveCycle.index = (eta_objectiveCycle.index + i) % eta_objectiveCycle.count;
++					break;
++				}
++			}
++		}
++
++		eta_objectiveCycle.lastPress = cg.time;
++
++		if (found < 0)
++		{
++			eta_objectiveCycle.lastPress = 0;
++			ETA_Speech_BeginReport();
++			ETA_Speech_Say("No objectives on your command map");
++			ETA_Speech_EndReport();
++			return;
++		}
++
++		objective = list[found];
+ 	}
+ 
+ 	memset(&eta_marker, 0, sizeof(eta_marker));
+@@ -3754,7 +3907,15 @@ void CG_AccessibilityMarkerObjective(void)
+ 	ETA_NavigationSystem_StartMarkerApproach(distance);
+ 
+ 	ETA_Speech_BeginReport();
+-	ETA_Speech_Say(va("Marker on %s", eta_marker.name));
++	if (eta_objectiveCycle.count > 1)
++	{
++		ETA_Speech_Say(va("Marker on %s, %d of %d", eta_marker.name,
++		                  eta_objectiveCycle.index + 1, eta_objectiveCycle.count));
++	}
++	else
++	{
++		ETA_Speech_Say(va("Marker on %s", eta_marker.name));
++	}
+ 	ETA_NavigationSystem_AnnounceMarkerDistance(distance);
+ 	ETA_NavigationSystem_AnnounceHeight((eta_marker.origin[2] - cg.predictedPlayerState.origin[2]) * ETA_QU_TO_METERS);
+ 	ETA_MarkerSpeakWay();
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 6cc0a34..b662ff0 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3407,6 +3407,7 @@ typedef struct
+ 
+ qboolean CG_AccessibilityObjective(team_t team, const vec3_t from, etaObjective_t *out);
+ qboolean CG_AccessibilityNearestObjective(team_t team, const vec3_t from, etaObjective_t *out);
++int CG_AccessibilityObjectiveList(team_t team, const vec3_t from, etaObjective_t *out, int max);
+ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObjective_t *out);
+ 
+ /*

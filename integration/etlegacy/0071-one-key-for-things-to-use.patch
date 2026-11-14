@@ -1,0 +1,171 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index a18fb17..705fb82 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1754,9 +1754,9 @@ static void ETA_TurnStopStep(qboolean arrived)
+  * and look keys, fast while far off and at the ordinary speed for the
+  * last few degrees, and letting go on the target - the tap turn's way.
+  *
+- *   - "Aim at what you can use": the nearest thing close by that can be
+- *     used, said by name as the view turns to it. Pressed again within a
+- *     few seconds, the next nearest.
++ *   - The use key, F: see CG_AccessibilityActivateDown_f. It once had a
++ *     key of its own beside it, DEL, for turning to things further off;
++ *     the tester asked for one key, and F now does both.
+  *   - "Lock on to an enemy", held: the nearest enemy in sight is said and
+  *     followed for as long as the key is down. Lose them and the next one
+  *     in sight is taken; when there is none, "Lock lost". It runs only
+@@ -1776,9 +1776,6 @@ static void ETA_TurnStopStep(qboolean arrived)
+  *     uses it. Only within reach, only standing still - a view that swung
+  *     to every door walked past would walk the player into them - and
+  *     once per thing until the player has walked away from it.
+- *   - The use key: pressed with nothing under the crosshair to use, it
+- *     turns to the thing within reach and uses it on arrival - the same
+- *     turn, for a player quicker than the standing-still wait.
+  *
+  * Pitch moves too: the keys look up and down as well as turn. The two
+  * key numbers for looking are the turn keys' neighbours, so the player's
+@@ -1985,22 +1982,44 @@ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
+ 	}
+ }
+ 
+-static void CG_AccessibilityAimUse_f(void)
++/**
++ * @brief The use key, and the one key for everything to use.
++ *
++ * The tester had two keys for one job - DEL to turn to things, F to use
++ * them - and asked for one. So F does all of it:
++ *
++ *   - something already under the crosshair that the game offers to use
++ *     (the use icon is showing) is used at once, as the plain key would;
++ *   - otherwise, the nearest thing to use is turned to. Within reach, it
++ *     is used on arrival, quietly - the game's own icon names it. Further
++ *     off, it is named with its direction and distance, and the walk is
++ *     the player's;
++ *   - pressed again within a few seconds, with still nothing under the
++ *     crosshair, the next one along;
++ *   - with nothing close by at all, the key does what it always did.
++ */
++static void CG_AccessibilityActivateDown_f(void)
+ {
+ 	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
++	qboolean       hint;
+ 	int            count, index = 0;
+ 
+-	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	if (eta_use.held)
+ 	{
+-		ETA_Speech_Say("Nothing to aim at until you are in play");
+ 		return;
+ 	}
+ 
+-	count = CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS);
++	eta_use.held = qtrue;
+ 
+-	if (count <= 0)
++	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
++	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
++
++	count = (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL && !hint)
++	        ? CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) : 0;
++
++	if (hint || count <= 0)
+ 	{
+-		ETA_Speech_Say("Nothing to use close by");
++		ETA_UseKey(qtrue);
+ 		return;
+ 	}
+ 
+@@ -2013,45 +2032,15 @@ static void CG_AccessibilityAimUse_f(void)
+ 	eta_aim.cycleIndex = index;
+ 	eta_aim.cycleAt    = cg.time;
+ 
+-	ETA_AimStartSnap(&list[index],
+-	                 count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : list[index].name);
+-}
+-
+-/**
+- * @brief The use key: turn to the thing first when nothing is under the
+- * crosshair, then use it.
+- *
+- * Something already under the crosshair that the game offers to use - the
+- * use icon is showing - is used at once, as the plain key would. Otherwise,
+- * with something to use within reach, the view turns to it and it is used
+- * on arrival. With nothing in reach, the key does what it always did:
+- * things further off are the standing-still turn's, and DEL's.
+- */
+-static void CG_AccessibilityActivateDown_f(void)
+-{
+-	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
+-	qboolean       hint;
+-
+-	if (eta_use.held)
+-	{
+-		return;
+-	}
+-
+-	eta_use.held = qtrue;
+-
+-	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
+-	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
+-
+-	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL || hint
+-	    || CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) <= 0
+-	    || list[0].meters > ETA_USE_REACH_METERS)
++	if (list[index].meters <= ETA_USE_REACH_METERS)
+ 	{
+-		ETA_UseKey(qtrue);
++		ETA_AimStartSnap(&list[index], NULL);
++		eta_use.pending = qtrue;
+ 		return;
+ 	}
+ 
+-	ETA_AimStartSnap(&list[0], NULL);
+-	eta_use.pending = qtrue;
++	ETA_AimStartSnap(&list[index],
++	                 count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : list[index].name);
+ }
+ 
+ static void CG_AccessibilityActivateUp_f(void)
+@@ -5421,7 +5410,6 @@ static consoleCommand_t commands[] =
+ 	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
+ 	{ "+accessibilityTurnRight",  CG_AccessibilityTurnRightDown_f },
+ 	{ "-accessibilityTurnRight",  CG_AccessibilityTurnRightUp_f  },
+-	{ "accessibilityAimUse",      CG_AccessibilityAimUse_f       },
+ 	{ "+accessibilityAimLock",    CG_AccessibilityAimLockDown_f  },
+ 	{ "-accessibilityAimLock",    CG_AccessibilityAimLockUp_f    },
+ 	{ "+accessibilityActivate",   CG_AccessibilityActivateDown_f },
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index a808e9e..147aa15 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8995,11 +8995,12 @@ void UI_AccessibilityInstallBinds(void)
+ 		   layout, next to the report keys on F5, F6 and F8; the
+ 		   left-handed one opens the stats there, and keeps them. */
+ 		{ K_F9,           "accessibilitySurroundings", NULL,         8 },
+-		/* Aiming: Delete turns to the nearest thing to use, Insert held
+-		   locks on to an enemy. The pair above the arrow keys, which are
+-		   the turn and look keys, so the right hand stays where it
+-		   aims; neither is bound in the stock layouts. */
+-		{ K_DEL,          "accessibilityAimUse",       NULL,         9 },
++		/* Aiming: Insert held locks on to an enemy - above the arrow
++		   keys, which are the turn and look keys, so the right hand
++		   stays where it aims; it is bound in neither stock layout.
++		   Delete once turned to things to use; the tester asked for
++		   that to be the use key's job, and it is, below. A Delete
++		   already given it simply does nothing now. */
+ 		{ K_INS,          "+accessibilityAimLock",     NULL,         9 },
+ 		/* The use key turns to the thing first when nothing is under the
+ 		   crosshair. Only the stock right-handed F, and only while it is
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 57932f0..d5125bf 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -874,7 +874,6 @@ static bind_t g_bindings[] =
+ 	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },
+-	{ "accessibilityaimuse",                       -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityaimlock",                     -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityactivate",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ #endif

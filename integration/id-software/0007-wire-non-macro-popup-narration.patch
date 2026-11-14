@@ -1,0 +1,51 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index f2027de..d15bc68 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -5324,10 +5324,14 @@ qboolean Menus_AnyFullScreenVisible() {
+ /**
+  * Narrates a newly shown popup/confirm dialog by reading every static
+  * text item it declares (its title plus any body labels), in declaration
+- * order. This relies on the SUBWINDOW/SUBWINDOWBLACK/LABEL/LABELWHITE .menu
+- * macros (etmain/ui/menumacros.h) always emitting ITEM_TYPE_TEXT decoration
+- * items with a literal text string - true of every popup built with them -
+- * but not guaranteed for a hand-rolled popup that doesn't use those macros.
++ * order. This covers both the SUBWINDOW/SUBWINDOWBLACK/LABEL/LABELWHITE
++ * .menu macros (etmain/ui/menumacros.h), which emit ITEM_TYPE_TEXT items
++ * with a literal text string, and the CVARLABEL macro, which emits an
++ * ITEM_TYPE_TEXT item with text == NULL and a cvar to resolve instead -
++ * the same item->text == NULL && item->cvar != NULL case that
++ * Item_Text_AutoWrapped_Paint resolves via DC->getCVarString when
++ * actually painting the item. A hand-rolled popup using neither of these
++ * macros still won't be picked up here.
+  */
+ static void ETA_NarrateConfirmDialog( menuDef_t *menu ) {
+ 	char text[ETA_MAX_MENU_TEXT_LENGTH + 1];
+@@ -5337,12 +5341,25 @@ static void ETA_NarrateConfirmDialog( menuDef_t *menu ) {
+ 
+ 	for ( i = 0; i < menu->itemCount; i++ ) {
+ 		itemDef_t *item = menu->items[i];
++		const char *itemText = NULL;
++		char cvarText[256];
+ 
+-		if ( item->type == ITEM_TYPE_TEXT && item->text ) {
++		if ( item->type != ITEM_TYPE_TEXT ) {
++			continue;
++		}
++
++		if ( item->text ) {
++			itemText = item->text;
++		} else if ( item->cvar ) {
++			DC->getCVarString( item->cvar, cvarText, sizeof( cvarText ) );
++			itemText = cvarText;
++		}
++
++		if ( itemText && *itemText ) {
+ 			if ( text[0] != '\0' ) {
+ 				Q_strcat( text, sizeof( text ), " " );
+ 			}
+-			Q_strcat( text, sizeof( text ), item->text );
++			Q_strcat( text, sizeof( text ), itemText );
+ 		}
+ 	}
+ 

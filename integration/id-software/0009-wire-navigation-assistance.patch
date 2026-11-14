@@ -1,0 +1,242 @@
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 0cc6a50..e4511ec 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2376,6 +2376,18 @@ void CG_AddLagometerFrameInfo( void );
+ void CG_AddLagometerSnapshotInfo( snapshot_t *snap );
+ #ifdef FEATURE_ACCESSIBILITY
+ int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo );
++
++/**
++ * Quake units to meters, for the accessibility navigation system's
++ * distance and movement APIs, which work in real-world meters. Searched
++ * for and confirmed absent rather than assumed: this codebase defines no
++ * units-per-meter constant anywhere, so this uses id Tech 3's commonly
++ * cited external convention of 1 unit = 1 inch (0.0254 m) - a value from
++ * outside this source, not one derived from it.
++ */
++#define ETA_QU_TO_METERS 0.0254f
++
++qboolean ETA_NearestObjectiveOrigin( team_t team, const vec3_t from, vec3_t origin );
+ #endif
+ void CG_CenterPrint( const char *str, int y, int charWidth );
+ void CG_PriorityCenterPrint( const char *str, int y, int charWidth, int priority );     // NERVE - SMF
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index ba197f6..16f53d2 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -843,6 +843,80 @@ void CG_DrawMapEntity( mapEntityData_t *mEnt, float x, float y, float w, float h, int mEntFilter, mapScissor_t *scissor, qboolean interactive, snapshot_t* snap, int icon_size ) {
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Finds the world origin of the map objective belonging to team that is
++ * nearest to from, for the accessibility navigation system's distance and
++ * route-correction announcements. Returns qfalse when the client doesn't
++ * currently know a position for any of that team's objectives.
++ *
++ * mapEntities[] is the live list the server publishes through its "entnfo"
++ * command (G_SendMapEntityInfo, g_teammapdata.c) and CG_ParseMapEntityInfo
++ * parses - the same list, filtered by the same team test CG_DrawMap uses,
++ * that the command map already draws objective icons from. It is entirely
++ * separate from the CS_MAIN_AXIS_OBJECTIVE/CS_MAIN_ALLIES_OBJECTIVE
++ * configstrings, which are dead in this release (see the README).
++ *
++ * Positions are resolved exactly the way CG_DrawMapEntity above already
++ * resolves them for drawing: ME_CONSTRUCT/ME_DESTRUCT/ME_DESTRUCT_2 carry
++ * an entity number in mEnt->data whose lerpOrigin is the objective's
++ * position, and ME_TANK/ME_TANK_DEAD are located through the
++ * ET_OID_TRIGGER entity in the current snapshot whose teamNum matches
++ * mEnt->data. mEnt->x/y are deliberately not used: CG_ParseMapEntity only
++ * fills those in for tanks and players, leaving them stale for the
++ * constructible/destructible types, and quantizes them to 128-unit steps
++ * even then.
++ *
++ * "Nearest" is this integration's own choice of navigation target, not an
++ * engine concept - this release designates no "main" objective at all.
++ */
++qboolean ETA_NearestObjectiveOrigin( team_t team, const vec3_t from, vec3_t origin ) {
++	int i, j;
++	float bestDistance = 0;
++	qboolean found = qfalse;
++
++	for ( i = 0; i < mapEntityCount; i++ ) {
++		mapEntityData_t *mEnt = &mapEntities[i];
++		centity_t *cent = NULL;
++		float distance;
++
++		if ( mEnt->team != team ) {
++			continue;
++		}
++
++		// mEnt->data is server-supplied, so range-check it before indexing
++		if ( mEnt->data < 0 || mEnt->data >= MAX_GENTITIES ) {
++			continue;
++		}
++
++		if ( mEnt->type == ME_CONSTRUCT || mEnt->type == ME_DESTRUCT || mEnt->type == ME_DESTRUCT_2 ) {
++			cent = &cg_entities[mEnt->data];
++		} else if ( mEnt->type == ME_TANK || mEnt->type == ME_TANK_DEAD ) {
++			for ( j = 0; j < cg.snap->numEntities; j++ ) {
++				if ( cg.snap->entities[j].eType == ET_OID_TRIGGER && cg.snap->entities[j].teamNum == mEnt->data ) {
++					cent = &cg_entities[cg.snap->entities[j].number];
++					break;
++				}
++			}
++		}
++
++		if ( !cent ) {
++			continue;
++		}
++
++		distance = Distance( from, cent->lerpOrigin );
++
++		if ( !found || distance < bestDistance ) {
++			bestDistance = distance;
++			VectorCopy( cent->lerpOrigin, origin );
++			found = qtrue;
++		}
++	}
++
++	return found;
++}
++#endif
++
+ void CG_DrawMap( float x, float y, float w, float h, int mEntFilter, mapScissor_t *scissor, qboolean interactive, float alpha, qboolean borderblend ) {
+ 	int i /*, j = 1*/;
+ 	snapshot_t* snap;
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 5bf9014..06c463f 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -38,6 +38,7 @@ If you have questions concerning this li
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "hud/hud_narrator.h"
++#include "navigation/navigation_system.h"
+ #endif
+ 
+ void CG_TargetCommand_f( void ) {
+@@ -946,13 +947,24 @@ static void CG_CPM_f( void ) {
+ /**
+  * On-demand "query basic match state" command for the accessibility HUD
+  * narrator (Milestone 4's exit condition). Bindable to a key; narrates
+- * health, the active weapon, and its ammo in one status report rather
+- * than announcing every stat change automatically, since health/ammo
+- * change too often during combat for that to be anything but noise.
++ * health, the active weapon, and its ammo - plus, per Milestone 6, the
++ * distance to the nearest objective and a turn-left/right/ahead route
++ * correction toward it - in one status report rather than announcing any
++ * of it automatically, since health/ammo change too often during combat,
++ * and a walking player's bearing to an objective changes too continuously,
++ * for that to be anything but noise.
++ *
++ * The bearing uses AngleSubtract - the same helper cg_draw.c's mortar
++ * reticle already uses to express one yaw relative to another - because a
++ * signed [-180, 180] "which way to turn" value reads more naturally as
++ * spoken text than a 0-359 compass bearing does. The +-15 degree "ahead"
++ * band is a judgment call, not a value found anywhere in this engine: no
++ * comparable on-course tolerance exists here to match it against.
+  */
+ static void CG_AccessibilityStatus_f( void ) {
+ 	playerState_t *ps = &cg.snap->ps;
+ 	gitem_t *item;
++	vec3_t objectiveOrigin;
+ 
+ 	ETA_HudNarrator_SpeakHealth( ps->stats[STAT_HEALTH] );
+ 
+@@ -969,6 +981,25 @@ static void CG_AccessibilityStatus_f( void ) {
+ 			ETA_HudNarrator_SpeakAmmo( ammo );
+ 		}
+ 	}
++
++	if ( ETA_NearestObjectiveOrigin( CG_LimboPanel_GetRealTeam(), ps->origin, objectiveOrigin ) ) {
++		vec3_t delta, angles;
++		float relativeYaw;
++
++		ETA_NavigationSystem_AnnounceDistance( (int)( Distance( ps->origin, objectiveOrigin ) * ETA_QU_TO_METERS ) );
++
++		VectorSubtract( objectiveOrigin, ps->origin, delta );
++		vectoangles( delta, angles );
++		relativeYaw = AngleSubtract( angles[YAW], ps->viewangles[YAW] );
++
++		if ( fabs( relativeYaw ) <= 15.0f ) {
++			ETA_NavigationSystem_AnnounceRouteCorrection( "Objective is ahead" );
++		} else if ( relativeYaw > 0.0f ) {
++			ETA_NavigationSystem_AnnounceRouteCorrection( "Turn left toward the objective" );
++		} else {
++			ETA_NavigationSystem_AnnounceRouteCorrection( "Turn right toward the objective" );
++		}
++	}
+ }
+ #endif
+ 
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 88293ba..f363e5c 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -38,6 +38,7 @@ If you have questions concerning this li
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
++#include "navigation/navigation_system.h"
+ #endif
+ 
+ /*
+@@ -314,6 +315,10 @@ void CG_Respawn( qboolean revived ) {
+ 	// reset fog to world fog (if present)
+ 	trap_R_SetFog( FOG_CMD_SWITCHFOG, FOG_MAP,20,0,0,0,0 );
+ 	// dhm - end
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NavigationSystem_ResetStuckDetection();
++#endif
+ }
+ 
+ extern char *eventnames[];
+@@ -501,6 +506,34 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Feeds real per-frame movement into the accessibility navigation system's
++ * stuck detection (ETA_NavigationSystem_UpdateMovement), which narrates
++ * "You may be stuck" on its own once the player has stayed under its own
++ * movement threshold for long enough.
++ *
++ * Only runs while the player is on a playing team and actually able to
++ * move under their own control: PM_NORMAL is the only pm_type this
++ * release's Pmove lets a live, unfrozen player move freely in (the others
++ * being PM_DEAD, PM_SPECTATOR, PM_NOCLIP, PM_FREEZE and PM_INTERMISSION).
++ * Outside that, stuck detection is reset rather than fed zero movement, so
++ * time spent dead, spectating or between rounds can never itself count as
++ * being stuck, and so the reset CG_Respawn already does above isn't
++ * immediately re-armed by a stale timer from before death.
++ */
++static void ETA_NarrateStuckDetection( playerState_t *ps, playerState_t *ops ) {
++	team_t team = (team_t)ps->persistant[PERS_TEAM];
++
++	if ( ( team != TEAM_AXIS && team != TEAM_ALLIES ) || ps->pm_type != PM_NORMAL ) {
++		ETA_NavigationSystem_ResetStuckDetection();
++		return;
++	}
++
++	ETA_NavigationSystem_UpdateMovement( Distance( ps->origin, ops->origin ) * ETA_QU_TO_METERS, cg.frametime / 1000.0f );
++}
++#endif
++
+ /*
+ ===============
+ CG_TransitionPlayerState
+@@ -615,5 +648,9 @@ void CG_TransitionPlayerState( playerState_t *ps, playerState_t *ops ) {
+ 		cg.duckChange = ps->viewheight - ops->viewheight;
+ 		cg.duckTime = cg.time;
+ 	}
++
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NarrateStuckDetection( ps, ops );
++#endif
+ }
+ 

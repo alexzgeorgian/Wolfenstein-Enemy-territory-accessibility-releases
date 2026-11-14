@@ -1,0 +1,68 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 6abbc2f..bcf8461 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -4982,6 +4982,53 @@ static const char *UI_AccessibilityBotCommand(int bots)
+  * not. Changed on the Hosting page during the match, it is sent at once
+  * (UI_AccessibilityBotsFrame).
+  */
++#ifdef __APPLE__
++/**
++ * @brief On a Mac, whether bots can come, said when they cannot.
++ *
++ * ET: Legacy builds its Mac game module without Omni-bot, so the Mac
++ * download carries one built with it, qagame_mac, for the legacy folder
++ * in the player's Library, and Omni-bot itself goes in their home
++ * folder, where the game module looks for it. Neither is in the pk3, so
++ * either can be missing, and the game module can be one left from
++ * another version that the updater never replaced. Without this, a
++ * hosted game simply has no bots and nothing says why.
++ */
++static void UI_AccessibilityMacBotsCheck(void)
++{
++	char       homepath[MAX_OSPATH];
++	char       path[MAX_OSPATH];
++	const char *home = getenv("HOME");
++	FILE       *omnibot;
++
++	trap_Cvar_VariableStringBuffer("fs_homepath", homepath, sizeof(homepath));
++	Com_sprintf(path, sizeof(path), "%s/legacy/qagame_mac", homepath);
++
++	switch (ETA_Update_CheckMacGame(path, ETA_Update_MacGameSha256()))
++	{
++	case ETA_MAC_GAME_UNCHECKED:
++		return; /* a build that made no bots file */
++	case ETA_MAC_GAME_ABSENT:
++		UI_AccessibilityUpdateSay("No bots: the Mac needs the bots file. Copy qagame_mac from the Mac download into the legacy folder, as the guide says.");
++		return;
++	case ETA_MAC_GAME_OTHER:
++		UI_AccessibilityUpdateSay("No bots: the bots file in the legacy folder is from another version. Copy qagame_mac from this version's Mac download over it.");
++		return;
++	case ETA_MAC_GAME_MATCHES:
++		break;
++	}
++
++	Com_sprintf(path, sizeof(path), "%s/omni-bot/omnibot_et_mac.so", home ? home : "");
++	omnibot = home ? fopen(path, "rb") : NULL;
++	if (!omnibot)
++	{
++		UI_AccessibilityUpdateSay("No bots: Omni-bot is not in your home folder. The guide says where to get it.");
++		return;
++	}
++	fclose(omnibot);
++}
++#endif
++
+ static void UI_AccessibilityHostServer(void)
+ {
+ 	trap_Cvar_Update(&eta_hostPlain);
+@@ -5003,6 +5050,9 @@ static void UI_AccessibilityHostServer(void)
+ 	}
+ 
+ 	trap_Cvar_Set("omnibot_enable", "1");
++#ifdef __APPLE__
++	UI_AccessibilityMacBotsCheck();
++#endif
+ 	trap_Cmd_ExecuteText(EXEC_APPEND, va("wait 10 ; bot difficulty %i ; %s\n",
+ 	                                     (int)Com_Clamp(1, 6, eta_hostBotSkill.integer),
+ 	                                     UI_AccessibilityBotCommand((int)Com_Clamp(1, ETA_HOST_BOTS_MAX, eta_hostBotCount.integer))));

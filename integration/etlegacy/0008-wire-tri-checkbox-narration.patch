@@ -1,0 +1,23 @@
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 2bbae56..5ca7b07 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -2827,7 +2827,17 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ 	case ITEM_TYPE_RADIOBUTTON:
+ 		return qfalse;
+ 	case ITEM_TYPE_TRICHECKBOX:
+-		return Item_CheckBox_HandleKey(item, key);
++	{
++		qboolean changed = Item_CheckBox_HandleKey(item, key);
++
++#ifdef FEATURE_ACCESSIBILITY
++		if (changed)
++		{
++			ETA_MenuNarrator_OnValueChanged(item->text, Item_Multi_Setting(item));
++		}
++#endif
++		return changed;
++	}
+ 	case ITEM_TYPE_CHECKBOX:
+ 	{
+ 		qboolean changed = Item_CheckBox_HandleKey(item, key);

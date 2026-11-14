@@ -1,0 +1,138 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index da62554..7e241e8 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -5609,6 +5609,25 @@ void CG_AccessibilityMarkerWhere(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief For N: the point to face for the way to the marker - round the
++ * walls, as the ping is placed - and how far the marker is.
++ *
++ * @param[out] out
++ * @param[out] meters
++ * @return qfalse with no marker
++ */
++qboolean CG_AccessibilityMarkerFacePoint(vec3_t out, int *meters)
++{
++	if (!eta_marker.active)
++	{
++		return qfalse;
++	}
++	ETA_MarkerTarget(out);
++	*meters = ETA_MarkerDistance();
++	return qtrue;
++}
++
+ /**
+  * @brief Takes the marker away.
+  */
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 0868d8b..bddcea6 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1587,6 +1587,37 @@ static void CG_AccessibilityMarkerWhere_f(void)
+ 	CG_AccessibilityMarkerWhere();
+ }
+ 
++/*
++ * Period: turned toward the way to the marker, as O turns the player in the
++ * RTCW mode - round the walls, where the ping is - and how far it is.
++ * The tester, used to O there, wanted a key that leads them straight to
++ * the marker rather than turning by ear.
++ */
++static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label);
++
++static void CG_AccessibilityMarkerFace_f(void)
++{
++	etaAimTarget_t target;
++	vec3_t         point;
++	int            meters;
++
++	ETA_HudNarrator_HoldPassive(cg.time);
++	if (!CG_AccessibilityMarkerFacePoint(point, &meters))
++	{
++		ETA_Speech_Say("No marker set. Keypad plus puts it on the objective");
++		return;
++	}
++
++	/* Faced level: the way's point is on the floor, and looking down at
++	   it would leave the player staring at their feet. */
++	memset(&target, 0, sizeof(target));
++	target.entityNum = -1;
++	VectorCopy(point, target.point);
++	target.point[2] = cg.predictedPlayerState.origin[2] + cg.predictedPlayerState.viewheight;
++	ETA_AimStartSnap(&target, NULL);
++	ETA_Speech_Say(meters <= 1 ? "Facing the marker, here" : va("Facing the way. %d meters to marker", meters));
++}
++
+ static void CG_AccessibilityMarkerClear_f(void)
+ {
+ 	ETA_HudNarrator_HoldPassive(cg.time);
+@@ -6312,6 +6343,7 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMapNext",   CG_AccessibilityMapNext_f    },
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
+ 	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
++	{ "accessibilityMarkerFace", CG_AccessibilityMarkerFace_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
+ 	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
+ 	{ "accessibilityUseNext",     CG_AccessibilityUseNext_f },
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 02fc6c0..bf9eaf8 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3443,6 +3443,7 @@ void CG_AccessibilityMapClosed(void);
+  */
+ void CG_AccessibilityMarkerPlace(void);
+ void CG_AccessibilityMarkerWhere(void);
++qboolean CG_AccessibilityMarkerFacePoint(vec3_t out, int *meters);
+ void CG_AccessibilityMarkerClear(void);
+ void CG_AccessibilityMarkerObjective(void);
+ void CG_AccessibilitySniperSpot(void);
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index dfaf087..19a89c6 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9749,7 +9749,11 @@ void UI_AccessibilityInstallBinds(void)
+ 		/* The marker on the way out of a building, or into one. The
+ 		   semicolon, beside the apostrophe, is bound in neither stock
+ 		   layout. */
+-		{ ';',            "accessibilityWayOut",       NULL,         15 }
++		{ ';',            "accessibilityWayOut",       NULL,         15 },
++		/* Period turns toward the way to the marker, as O does in the
++		   RTCW mode; taken only from the game's zoom of the on-screen
++		   map, which is of no use without sight. */
++		{ '.',            "accessibilityMarkerFace",   "mapzoomin",  16 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 3bf3513..06f0edb 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -303,6 +303,12 @@ const char *ETA_MenuItem_Label(itemDef_t *item)
+ 	}
+ 	if (item->text && item->text[0])
+ 	{
++		/* The main menu's button reads "PLAY", and opens Play Online:
++		   the tester knows it by that name. */
++		if (item->action && Q_stristr(item->action, "open playonline"))
++		{
++			return "Play online";
++		}
+ 		return item->text;
+ 	}
+ 	if (item->cvar)
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 9c140a7..c1c2115 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -870,6 +870,7 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymapnext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerplace",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerwhere",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymarkerface",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerobjective",              -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilityusenext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },

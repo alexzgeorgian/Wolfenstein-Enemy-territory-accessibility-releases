@@ -1,0 +1,539 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 16be104..32e8fa9 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -429,6 +429,41 @@ void CG_AdjustAutomapZoom(int zoomIn)
+ 		}
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* The compass is a picture, and zooming it changes nothing a player
++	   who cannot see it can tell - not even whether the key did anything.
++	   So each step says where it now stands, as one of the thirteen steps
++	   the game allows, and how far the compass reaches in metres: the
++	   part of the map it shows is the map's width divided by the zoom,
++	   the same scaling CG_TransformAutomapEntity just applied. */
++	{
++		float before = cg_automapZoom.value;
++		int   level  = (int)(logf(automapZoom / (M_SQRT2 * 0.5f)) / logf(1.2f) + 0.5f) + 1;
++		int   levels = (int)(logf(7.43f / (M_SQRT2 * 0.5f)) / logf(1.2f) + 0.5f) + 1;
++		float span   = 0.5f * (fabsf(cg.mapcoordsMaxs[0] - cg.mapcoordsMins[0])
++		                       + fabsf(cg.mapcoordsMaxs[1] - cg.mapcoordsMins[1]));
++		int   across = (int)(span / automapZoom * ETA_QU_TO_METERS + 0.5f);
++
++		ETA_HudNarrator_HoldPassive(cg.time);
++		ETA_Speech_BeginReport();
++
++		if (fabsf(before - automapZoom) < 0.001f)
++		{
++			ETA_Speech_Say(zoomIn ? "Compass fully zoomed in" : "Compass fully zoomed out");
++		}
++		else if (automapZoom <= 1.0f)
++		{
++			ETA_Speech_Say(va("Compass zoom %d of %d, the whole map", level, levels));
++		}
++		else
++		{
++			ETA_Speech_Say(va("Compass zoom %d of %d, about %d meters across", level, levels, across));
++		}
++
++		ETA_Speech_EndReport();
++	}
++#endif
++
+ 	trap_Cvar_Set("cg_automapZoom", va("%f", automapZoom));
+ 
+ 	// recalculate the screen coordinates since the zoom changed
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 7d65575..22bf61a 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1532,6 +1532,357 @@ static void CG_AccessibilityMarkerClear_f(void)
+ 	ETA_HudNarrator_HoldPassive(cg.time);
+ 	CG_AccessibilityMarkerClear();
+ }
++
++/**
++ * @brief Turning with the keys the way the mouse turns.
++ *
++ * A tester put it exactly: with the mouse, turning to the west says
++ * "west" at once; with the keys it took three or four taps before
++ * anything was said. That is the engine's own key speed and nothing
++ * else. A turn key moves the view at cl_yawspeed, 140 degrees a second,
++ * so a quick tap moves it about fifteen degrees - a third of a compass
++ * point - and nothing has changed that is worth a word.
++ *
++ * So a tap now finishes the turn itself: it carries on to the next of
++ * the eight compass points, quickly, stops on it, and says it. Two taps
++ * turn a quarter. Holding the key is untouched - it turns smoothly for
++ * as long as it is held and stops where it is let go, which aiming at
++ * somebody needs - and while it is held each point is named as it is
++ * crossed rather than after the view has settled there.
++ *
++ * Nothing here can write the view angles: that is the client's, and
++ * this is the cgame. What it can do is what a player can - press the
++ * engine's own +left and +right, and the walk key that makes them turn
++ * faster by cl_anglespeedkey - and let go at the right moment. They are
++ * pressed under key numbers no keyboard has, so a player's own keys on
++ * the same buttons are never released by this. cl_anglespeedkey is the
++ * one setting touched, and only while a step runs: it is not saved to
++ * the player's config, and it is put back as soon as the step ends, on
++ * a map change and on shutdown.
++ */
++#define ETA_TURN_KEY_LEFT   "998"
++#define ETA_TURN_KEY_RIGHT  "999"
++#define ETA_TURN_KEY_SPEED  "997"
++
++/* Shorter than this between press and release is a tap. A tap at 140
++   degrees a second covers about 35 degrees in this time, under a
++   compass point, so a tap can never finish past the point it meant. */
++#define ETA_TURN_TAP_MS 250
++
++/* How far past the heading a tap started from the next point must be.
++   Facing 40 degrees short of a point, a tap goes there; facing five
++   degrees short, it goes to the one after - five degrees is already
++   "there" to the ear, and a tap that said the point you were on would
++   sound like a tap that did nothing. */
++#define ETA_TURN_STEP_MARGIN 10.0f
++
++/* The step's speed: cl_yawspeed times this while the walk key is held
++   down by the step. 140 x 5 is 700 degrees a second, so a compass point
++   takes about 65 ms - the length of a flick of the mouse. */
++#define ETA_TURN_FAST_SCALE "5"
++#define ETA_TURN_FAST_FACTOR 5.0f
++
++/* The last few degrees go at the ordinary speed, so the view stops on the
++   point rather than a few degrees past it. */
++#define ETA_TURN_SLOW_DEGREES 12.0f
++
++/* However long a step has been running, it stops here - a view that has
++   not reached its point in this time is not going to. */
++#define ETA_TURN_STEP_LIMIT_MS 1500
++
++typedef struct
++{
++	int      held;          /* -1 left, 1 right, 0 none: a turn key is down */
++	int      pressedAt;
++	float    startYaw;
++	int      passthrough;   /* the setting is off: a plain +left or +right */
++	int      step;          /* -1 left, 1 right, 0 none: a step is running */
++	int      stepStarted;
++	float    target;        /* the yaw it stops at */
++	qboolean fast;
++	char     savedScale[32];
++} eta_turn_t;
++
++static eta_turn_t eta_turn;
++
++static void ETA_TurnKey(int direction, qboolean down)
++{
++	trap_SendConsoleCommand(va("%s%s %s\n", down ? "+" : "-",
++	                           direction < 0 ? "left" : "right",
++	                           direction < 0 ? ETA_TURN_KEY_LEFT : ETA_TURN_KEY_RIGHT));
++}
++
++static void ETA_TurnBoost(qboolean on)
++{
++	if (on && !eta_turn.fast)
++	{
++		trap_Cvar_VariableStringBuffer("cl_anglespeedkey", eta_turn.savedScale,
++		                               sizeof(eta_turn.savedScale));
++		trap_Cvar_Set("cl_anglespeedkey", ETA_TURN_FAST_SCALE);
++		trap_SendConsoleCommand("+speed " ETA_TURN_KEY_SPEED "\n");
++		eta_turn.fast = qtrue;
++	}
++	else if (!on && eta_turn.fast)
++	{
++		trap_SendConsoleCommand("-speed " ETA_TURN_KEY_SPEED "\n");
++		trap_Cvar_Set("cl_anglespeedkey", eta_turn.savedScale[0] ? eta_turn.savedScale : "1.5");
++		eta_turn.fast = qfalse;
++	}
++}
++
++/**
++ * @brief The next of the eight compass points in the direction of turn.
++ *
++ * The points sit at every 45 degrees of yaw. Turning right lowers the
++ * yaw - the engine's own convention, in CL_AdjustAngles - so right goes
++ * down to the next multiple of 45 and left goes up.
++ */
++static float ETA_TurnNextPoint(float yaw, int direction)
++{
++	if (direction > 0)
++	{
++		return 45.0f * floorf((yaw - ETA_TURN_STEP_MARGIN) / 45.0f);
++	}
++
++	return 45.0f * ceilf((yaw + ETA_TURN_STEP_MARGIN) / 45.0f);
++}
++
++/**
++ * @brief Degrees still to turn, positive until the point is reached.
++ */
++static float ETA_TurnRemaining(void)
++{
++	float yaw = cg.predictedPlayerState.viewangles[YAW];
++
++	return eta_turn.step > 0 ? AngleSubtract(yaw, eta_turn.target)
++	                         : AngleSubtract(eta_turn.target, yaw);
++}
++
++static void ETA_TurnStopStep(qboolean arrived)
++{
++	ETA_TurnKey(eta_turn.step, qfalse);
++	ETA_TurnBoost(qfalse);
++	eta_turn.step = 0;
++	ETA_HudNarrator_SetFacingKeyTurn(0);
++
++	if (arrived)
++	{
++		ETA_Facing facing = ETA_HudNarrator_FacingFromYaw(eta_turn.target);
++
++		/* Said here, at once, rather than left to the compass: waiting
++		   for it to settle is exactly the delay the tap exists to
++		   remove. Marked held so the compass does not say it again. */
++		ETA_HudNarrator_SetFacingHeld(facing);
++
++		if (eta_facingCallouts.integer)
++		{
++			ETA_Speech_BeginReport();
++			ETA_HudNarrator_SpeakFacing(facing);
++			ETA_Speech_EndReport();
++		}
++	}
++}
++
++static void CG_AccessibilityTurnDown(int direction)
++{
++	/* A second press of a key already down is a repeat, not a tap. The
++	   engine drops keyboard repeats in play, but a repeat reaching here
++	   would restart the tap timer - so a hold would read as a tap - or
++	   add a compass point to a step nobody asked for. */
++	if (!cg.snap || eta_turn.held == direction || eta_turn.passthrough == direction)
++	{
++		return;
++	}
++
++	if (!eta_turnSteps.integer)
++	{
++		eta_turn.passthrough = direction;
++		ETA_TurnKey(direction, qtrue);
++		return;
++	}
++
++	if (eta_turn.step == direction)
++	{
++		/* Tapped again before the last step finished: one more point.
++		   Two quick taps are a quarter turn, as a flick would be. Held
++		   under half a turn, so which way is "still to go" can never be
++		   mistaken for which way is "already past". */
++		if (ETA_TurnRemaining() + 45.0f < 170.0f)
++		{
++			eta_turn.target = eta_turn.target - 45.0f * (float)direction;
++		}
++		eta_turn.held = direction;
++		return;
++	}
++
++	if (eta_turn.step)
++	{
++		/* The other way: stop where the view is and start from there. */
++		ETA_TurnStopStep(qfalse);
++	}
++
++	/* The compass is told the key is down only once this is known to be
++	   a hold (see CG_AccessibilityTurnFrame): a tap's own few degrees of
++	   travel are not worth a word before it lands. */
++	eta_turn.held      = direction;
++	eta_turn.pressedAt = cg.time;
++	eta_turn.startYaw  = cg.predictedPlayerState.viewangles[YAW];
++	ETA_TurnKey(direction, qtrue);
++}
++
++static void CG_AccessibilityTurnUp(int direction)
++{
++	if (eta_turn.passthrough == direction)
++	{
++		eta_turn.passthrough = 0;
++		ETA_TurnKey(direction, qfalse);
++		return;
++	}
++
++	if (eta_turn.held != direction)
++	{
++		return;
++	}
++
++	eta_turn.held = 0;
++
++	if (eta_turn.step == direction)
++	{
++		/* The step this press extended is still running; it carries on
++		   and releases the key when it arrives. */
++		return;
++	}
++
++	if (cg.time - eta_turn.pressedAt < ETA_TURN_TAP_MS)
++	{
++		/* A tap: keep the key down, and let the frame finish the turn. */
++		eta_turn.step        = direction;
++		eta_turn.stepStarted = cg.time;
++		eta_turn.target      = ETA_TurnNextPoint(eta_turn.startYaw, direction);
++
++		/* A long tap from just short of a point can already have
++		   carried the view past it. Then the next one is meant. */
++		if (ETA_TurnRemaining() < 0.0f)
++		{
++			eta_turn.target = eta_turn.target - 45.0f * (float)direction;
++		}
++
++		if (ETA_TurnRemaining() > ETA_TURN_SLOW_DEGREES)
++		{
++			ETA_TurnBoost(qtrue);
++		}
++		return;
++	}
++
++	/* A hold: it stops where it was let go. */
++	ETA_TurnKey(direction, qfalse);
++	ETA_HudNarrator_SetFacingKeyTurn(0);
++}
++
++/**
++ * @brief Every frame: brings a running step in to land on its point.
++ */
++void CG_AccessibilityTurnFrame(void)
++{
++	float remaining, perFrame;
++
++	/* Held past a tap: a smooth turn, and every point it crosses is
++	   worth naming as it is crossed. */
++	if (eta_turn.held && !eta_turn.step && cg.time - eta_turn.pressedAt >= ETA_TURN_TAP_MS)
++	{
++		ETA_HudNarrator_SetFacingKeyTurn(1);
++	}
++
++	if (!eta_turn.step)
++	{
++		return;
++	}
++
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL
++	    || cg.time - eta_turn.stepStarted > ETA_TURN_STEP_LIMIT_MS
++	    || cg.time < eta_turn.stepStarted)
++	{
++		ETA_TurnStopStep(qfalse);
++		return;
++	}
++
++	remaining = ETA_TurnRemaining();
++
++	if (eta_turn.fast && remaining <= ETA_TURN_SLOW_DEGREES)
++	{
++		ETA_TurnBoost(qfalse);
++	}
++
++	/* How far the next frame will carry the view. A release sent now
++	   takes effect before the next frame's movement, so letting go once
++	   less than half of that is left lands within half a frame's turn of
++	   the point - under a degree at the ordinary speed. */
++	perFrame = 0.14f * (float)cg.frametime * (eta_turn.fast ? ETA_TURN_FAST_FACTOR : 1.0f);
++
++	if (remaining <= perFrame * 0.5f)
++	{
++		ETA_TurnStopStep(qtrue);
++	}
++}
++
++/**
++ * @brief Whether a tap is still on its way to a compass point.
++ *
++ * The compass stands down meanwhile. The tap says where it lands the
++ * moment it lands, and a compass that named a point on the way would
++ * either say the wrong one or say the right one twice.
++ */
++qboolean CG_AccessibilityTurnBusy(void)
++{
++	return (qboolean)(eta_turn.step
++	                  || (eta_turn.held && cg.time - eta_turn.pressedAt < ETA_TURN_TAP_MS));
++}
++
++/**
++ * @brief Lets go of everything, for a map change or a shutdown.
++ *
++ * A key this pressed stays down in the client until something releases
++ * it, and the client outlives the cgame - left alone, the view would
++ * keep turning into the next map.
++ */
++void CG_AccessibilityTurnShutdown(void)
++{
++	if (eta_turn.step)
++	{
++		ETA_TurnStopStep(qfalse);
++	}
++	if (eta_turn.held)
++	{
++		ETA_TurnKey(eta_turn.held, qfalse);
++	}
++	if (eta_turn.passthrough)
++	{
++		ETA_TurnKey(eta_turn.passthrough, qfalse);
++	}
++	ETA_TurnBoost(qfalse);
++	ETA_HudNarrator_SetFacingKeyTurn(0);
++	memset(&eta_turn, 0, sizeof(eta_turn));
++}
++
++static void CG_AccessibilityTurnLeftDown_f(void)
++{
++	CG_AccessibilityTurnDown(-1);
++}
++
++static void CG_AccessibilityTurnLeftUp_f(void)
++{
++	CG_AccessibilityTurnUp(-1);
++}
++
++static void CG_AccessibilityTurnRightDown_f(void)
++{
++	CG_AccessibilityTurnDown(1);
++}
++
++static void CG_AccessibilityTurnRightUp_f(void)
++{
++	CG_AccessibilityTurnUp(1);
++}
+ #endif
+ 
+ /**
+@@ -4213,6 +4564,10 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
+ 	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
++	{ "+accessibilityTurnLeft",   CG_AccessibilityTurnLeftDown_f },
++	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
++	{ "+accessibilityTurnRight",  CG_AccessibilityTurnRightDown_f },
++	{ "-accessibilityTurnRight",  CG_AccessibilityTurnRightUp_f  },
+ 	{ "accessibilityHealth",    CG_AccessibilityHealth_f     },
+ 	{ "accessibilityAmmo",      CG_AccessibilityAmmo_f       },
+ 	{ "accessibilityRepeat",    CG_AccessibilityRepeat_f     },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index d3d8b46..ad08b2b 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3331,6 +3331,12 @@ static void ETA_NarrateFacing(void)
+ 		return;
+ 	}
+ 
++	/* A tap on a turn key says its own point when it lands. */
++	if (CG_AccessibilityTurnBusy())
++	{
++		return;
++	}
++
+ 	/* Predicted rather than the snapshot's, for the same reason the
+ 	   stance is: turning is a local action and the snapshot lags it by a
+ 	   round trip, which on a direction is long enough to be felt. */
+@@ -7154,6 +7160,10 @@ void CG_DrawActive()
+ 	   and arriving is the one thing the marker exists to say. */
+ 	CG_AccessibilityMarkerFrame();
+ 
++	/* A tap on a turn key, landing on its compass point. Not held back:
++	   the player just pressed the key and is waiting for the word. */
++	CG_AccessibilityTurnFrame();
++
+ 	/* The scenery stands down while an answer the player asked for is
+ 	   still being spoken.
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index ff2a21f..f9f0ebc 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3443,6 +3443,14 @@ void CG_AccessibilityMarkerReset(void);
+ void CG_AccessibilityMarkerFrame(void);
+ void CG_AccessibilityMarkerApproach(void);
+ 
++/*
++ * Turning with the keys: a tap steps to the next compass point. See
++ * cg_consolecmds.c.
++ */
++void CG_AccessibilityTurnFrame(void);
++qboolean CG_AccessibilityTurnBusy(void);
++void CG_AccessibilityTurnShutdown(void);
++
+ /**
+  * @brief The mod's own looping sounds, shipped inside the pk3.
+  */
+@@ -3460,6 +3468,7 @@ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+ extern vmCvar_t eta_doorCues;
+ extern vmCvar_t eta_crosshairCues;
+ extern vmCvar_t eta_markerCues;
++extern vmCvar_t eta_turnSteps;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 59dbe8b..f685256 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2201,6 +2201,7 @@ vmCvar_t eta_mapCallouts;
+ vmCvar_t eta_doorCues;
+ vmCvar_t eta_crosshairCues;
+ vmCvar_t eta_markerCues;
++vmCvar_t eta_turnSteps;
+ 
+ /**
+  * @brief The four sounds this mod brings with it, and why they are not
+@@ -2378,6 +2379,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_doorCues,            "eta_doorCues",            "1" },
+ 	{ &eta_crosshairCues,       "eta_crosshairCues",       "1" },
+ 	{ &eta_markerCues,          "eta_markerCues",          "1" },
++	{ &eta_turnSteps,           "eta_turnSteps",           "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },
+@@ -2452,6 +2454,10 @@ static void ETA_InitAccessibility(void)
+  */
+ static void ETA_ShutdownAccessibility(void)
+ {
++	/* First, while the command buffer is still ours to write to: a turn
++	   key this module pressed has to be let go before it is gone. */
++	CG_AccessibilityTurnShutdown();
++
+ 	ETA_NavigationSystem_Shutdown();
+ 	ETA_HudNarrator_Shutdown();
+ 	ETA_AudioCueSystem_Shutdown();
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index e26f954..1e021ea 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8912,7 +8912,15 @@ void UI_AccessibilityInstallBinds(void)
+ 		   by the rule every row here follows. */
+ 		{ K_KP_INS,       "accessibilityMarkerPlace", NULL,          6 },
+ 		{ K_KP_DEL,       "accessibilityMarkerWhere", NULL,          6 },
+-		{ K_KP_STAR,      "accessibilityMarkerClear", NULL,          6 }
++		{ K_KP_STAR,      "accessibilityMarkerClear", NULL,          6 },
++		/* The arrows move from the engine's own +left and +right to the
++		   mod's turn keys, which pass a hold straight through to those
++		   and turn a tap into a step to the next compass point - the
++		   way a flick of the mouse turns. Only an arrow still on exactly
++		   the command this table put there is moved; the plain turns
++		   stay on the Key Binds page for anyone who wants them. */
++		{ K_LEFTARROW,    "+accessibilityTurnLeft",  "+left",        7 },
++		{ K_RIGHTARROW,   "+accessibilityTurnRight", "+right",       7 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 50d98bb..079b5b8 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -871,6 +871,8 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymarkerplace",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerwhere",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ #endif
+ };
+ 

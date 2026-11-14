@@ -1,0 +1,194 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 3c891ef..cceb7b2 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -3004,6 +3004,7 @@ typedef struct
+ 	int      along;       /* the point of the way the player is at */
+ 	int      side;        /* which way round the last opening was: -1, 1, 0 */
+ 	int      saidJump;    /* the jump on the way last told of, by its point */
++	qboolean crouched;    /* told to crouch, and not yet to stand */
+ 	qboolean overEdge;    /* steer is across a jump or up a ladder */
+ 	qboolean onWay;       /* steer is the way's next point, from on the way */
+ 	qboolean jumps;       /* this search may jump: there was no way without */
+@@ -3031,13 +3032,18 @@ static eta_route_t eta_route;
+ #define ETA_ROUTE_BODY_HALF  18.0f   /* the player's own: -18 to 18 */
+ #define ETA_ROUTE_BODY_NUDGE 10.0f
+ #define ETA_ROUTE_BODY_TOP   48.0f   /* standing: playerMaxs in g_client.c */
++/* Crouched: the game's crouchMaxZ, standing less the drop from the
++   standing to the crouching view (40 - 16). The tunnels under Oasis are
++   lower than a player standing; the way refused them, and the way out of
++   them was never found. */
++#define ETA_ROUTE_CROUCH_TOP (ETA_ROUTE_BODY_TOP - (40.0f - 16.0f))
+ 
+-static qboolean ETA_RouteRoom(const float from[3], float to[3], float lift)
++static qboolean ETA_RouteRoom(const float from[3], float to[3], float lift, float top)
+ {
+ 	static const vec3_t mins = { -ETA_ROUTE_BODY_HALF, -ETA_ROUTE_BODY_HALF, -24.0f + 18.0f };
+-	static const vec3_t maxs = { ETA_ROUTE_BODY_HALF, ETA_ROUTE_BODY_HALF, ETA_ROUTE_BODY_TOP };
+ 	static const vec3_t snugMins = { -ETA_ROUTE_BODY_HALF + 1.0f, -ETA_ROUTE_BODY_HALF + 1.0f, -24.0f + 18.0f };
+-	static const vec3_t snugMaxs = { ETA_ROUTE_BODY_HALF - 1.0f, ETA_ROUTE_BODY_HALF - 1.0f, ETA_ROUTE_BODY_TOP };
++	const vec3_t        maxs     = { ETA_ROUTE_BODY_HALF, ETA_ROUTE_BODY_HALF, top };
++	const vec3_t        snugMaxs = { ETA_ROUTE_BODY_HALF - 1.0f, ETA_ROUTE_BODY_HALF - 1.0f, top };
+ 	static const float  nudges[5][2] =
+ 	{
+ 		{ 0.0f, 0.0f },
+@@ -3098,8 +3104,9 @@ static int ETA_RouteMoveExact(void *context, const float from[3], float to[3])
+ 	static const float lifts[2] = { ETA_ROUTE_SLOPE_LIFT, ETA_ROUTE_JUMP_LIFT };
+ 	trace_t  trace;
+ 	vec3_t   start, end, down;
+-	float    lift  = 0.0f;
+-	qboolean ledge = qfalse;
++	float    lift   = 0.0f;
++	qboolean ledge  = qfalse;
++	qboolean crouch = qfalse;
+ 	int      i;
+ 
+ 	(void)context;
+@@ -3161,9 +3168,15 @@ static int ETA_RouteMoveExact(void *context, const float from[3], float to[3])
+ 		}
+ 	}
+ 
+-	if (!ETA_RouteRoom(from, to, lift))
++	/* Room for the player standing; or, on the level, crouched - a jump
++	   wants the headroom a crouch has not got. */
++	if (!ETA_RouteRoom(from, to, lift, ETA_ROUTE_BODY_TOP))
+ 	{
+-		return ETA_PATH_NONE;
++		if (ledge || !ETA_RouteRoom(from, to, lift, ETA_ROUTE_CROUCH_TOP))
++		{
++			return ETA_PATH_NONE;
++		}
++		crouch = qtrue;
+ 	}
+ 	end[0] = to[0];
+ 	end[1] = to[1];
+@@ -3190,8 +3203,9 @@ static int ETA_RouteMoveExact(void *context, const float from[3], float to[3])
+ 	to[2] = trace.endpos[2];
+ 
+ 	/* Up onto a ledge, or over something and down the other side: either
+-	   way the player has to jump, and is told to. */
+-	return ledge ? ETA_PATH_JUMP : ETA_PATH_WALK;
++	   way the player has to jump, and is told to. Under a low ceiling,
++	   to crouch. */
++	return ledge ? ETA_PATH_JUMP : crouch ? ETA_PATH_CROUCH : ETA_PATH_WALK;
+ }
+ 
+ /**
+@@ -3256,7 +3270,8 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ 			return kind;
+ 		}
+ 
+-		if (kind != ETA_PATH_NONE && found == ETA_PATH_NONE)
++		/* A crouch is taken over a jump. */
++		if (kind != ETA_PATH_NONE && (found == ETA_PATH_NONE || (kind == ETA_PATH_CROUCH && found == ETA_PATH_JUMP)))
+ 		{
+ 			found = kind;
+ 			VectorCopy(tried, jumpTo);
+@@ -3506,11 +3521,11 @@ static void ETA_RouteForget(void)
+  * @brief ", press space": the key the player jumps with, for the jump
+  * callout. Nothing when jump is on no key.
+  */
+-static const char *ETA_RouteJumpKey(void)
++static const char *ETA_RouteKey(const char *binding)
+ {
+ 	static char text[48];
+ 	char        name[32];
+-	int         key = trap_Key_GetKey("+moveup");
++	int         key = trap_Key_GetKey(binding);
+ 
+ 	if (key < 0)
+ 	{
+@@ -3529,6 +3544,11 @@ static const char *ETA_RouteJumpKey(void)
+ 	return text;
+ }
+ 
++static const char *ETA_RouteJumpKey(void)
++{
++	return ETA_RouteKey("+moveup");
++}
++
+ /**
+  * @brief "Jump up, ahead", once, as the player comes to a jump on the way.
+  *
+@@ -3571,6 +3591,64 @@ static void ETA_RouteSayJump(int special, int count, const vec3_t here)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief "Crouch, low ceiling ahead", once, as the way goes under one,
++ * and "Stand up" past it.
++ *
++ * The tunnels under Oasis are lower than a player standing, and a
++ * player who does not crouch walks into the roof at the entrance as if
++ * into a wall. So within a couple of metres of where the way first needs
++ * a crouch, it is said, with the key; and once the way has come out from
++ * under, standing is said too.
++ */
++#define ETA_ROUTE_CROUCH_SAY   96.0f   /* this near where it starts: told */
++#define ETA_ROUTE_CROUCH_AHEAD 4       /* points ahead looked at */
++
++static void ETA_RouteSayCrouch(int nearest, int count, const vec3_t here)
++{
++	int    i, start = -1;
++	vec3_t point;
++
++	for (i = nearest + 1; i < count && i <= nearest + ETA_ROUTE_CROUCH_AHEAD; i++)
++	{
++		if (ETA_PathFinder_PointKind(i) == ETA_PATH_CROUCH)
++		{
++			start = i;
++			break;
++		}
++	}
++
++	if (start < 0)
++	{
++		/* Out from under, and the way on stands up again. */
++		if (eta_route.crouched && ETA_PathFinder_PointKind(nearest) != ETA_PATH_CROUCH)
++		{
++			eta_route.crouched = qfalse;
++			ETA_Speech_BeginReport();
++			ETA_Speech_Say("Stand up, the ceiling is high again");
++			ETA_Speech_EndReport();
++		}
++		return;
++	}
++
++	if (eta_route.crouched)
++	{
++		return;
++	}
++
++	/* Where the low ceiling begins: the point before the first crouch. */
++	ETA_PathFinder_Point(start - 1, point);
++	if (Distance(here, point) > ETA_ROUTE_CROUCH_SAY && ETA_PathFinder_PointKind(nearest) != ETA_PATH_CROUCH)
++	{
++		return;
++	}
++
++	eta_route.crouched = qtrue;
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(va("Crouch, low ceiling ahead%s", ETA_RouteKey("+movedown")));
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief "Stairs up, ahead left", once, as the player comes to stairs.
+  *
+@@ -3755,7 +3833,7 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 	special = count;
+ 	for (i = nearest + 1; i < count; i++)
+ 	{
+-		if (ETA_PathFinder_PointKind(i) != ETA_PATH_WALK)
++		if (ETA_PathFinder_PointKind(i) != ETA_PATH_WALK && ETA_PathFinder_PointKind(i) != ETA_PATH_CROUCH)
+ 		{
+ 			special = i;
+ 			break;
+@@ -3764,6 +3842,7 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 
+ 	ETA_RouteSayJump(special, count, here);
+ 	ETA_RouteSayStairs(nearest, special, here);
++	ETA_RouteSayCrouch(nearest, count, here);
+ 
+ 	/* The furthest point a few steps on that can be walked to straight. */
+ 	best = nearest;

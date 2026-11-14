@@ -1,0 +1,109 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 8318a91..73d16e1 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -37,6 +37,7 @@ If you have questions concerning this li
+ #include "cg_local.h"
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++#include "audio/audio_cue_system.h"
+ #include "core/runtime_guard.h"
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
+@@ -1018,6 +1019,14 @@ static void CG_AccessibilityStatus_f( void ) {
+ 
+ 		VectorSubtract( objectiveOrigin, ps->origin, delta );
+ 		vectoangles( delta, angles );
++
++		/**
++		 * Yaw increases counterclockwise here, so a target to the player's
++		 * LEFT is at a *higher* yaw than the view: relativeYaw > 0 means
++		 * turn left, < 0 means turn right. Worth stating explicitly - this
++		 * is the one place in the integration where getting the sign
++		 * backwards produces working, confident, wrong directions.
++		 */
+ 		relativeYaw = AngleSubtract( angles[YAW], ps->viewangles[YAW] );
+ 
+ 		if ( fabs( relativeYaw ) <= 15.0f ) {
+@@ -1027,6 +1036,18 @@ static void CG_AccessibilityStatus_f( void ) {
+ 		} else {
+ 			ETA_NavigationSystem_AnnounceRouteCorrection( "Turn right toward the objective" );
+ 		}
++
++		/**
++		 * The two objective audio cues, on the same request: an attention
++		 * cue, then a directional one the player can simply turn toward.
++		 * The bearing is view-relative in the same 0 = front, 90 = right,
++		 * 180 = behind, 270 = left convention 0008's damage-direction cue
++		 * uses - which is view yaw minus target yaw, not the other way
++		 * round (see the README).
++		 */
++		ETA_AudioCueSystem_PlayObjectiveCue();
++		ETA_AudioCueSystem_PlayObjectiveDirectionCue(
++			(int)AngleNormalize360( ps->viewangles[YAW] - angles[YAW] ) );
+ 	}
+ }
+ #endif
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index f363e5c..fa47a56 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -508,6 +508,47 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ /**
++ * Plays the objective and objective-direction audio cues on respawn, to
++ * orient the player toward the nearest objective at the one moment they
++ * have no idea which way they are facing.
++ *
++ * Respawn is used as the trigger because this release offers no objective
++ * *change* event to cue on: it has no "main objective", and 0013
++ * established that objective completion state never reaches the client at
++ * all, so there is nothing that fires when an objective becomes or stops
++ * being the one to head for. Cueing off the nearest objective changing
++ * instead would chatter as the player walks past things. Respawn is a
++ * real, discrete event, it happens once per life, and it is exactly when
++ * the cue is worth hearing.
++ *
++ * Bearing convention matches 0008's damage-direction cue: view yaw minus
++ * target yaw, giving 0 = front, 90 = right, 180 = behind, 270 = left.
++ */
++static void ETA_ObjectiveOrientationCue( playerState_t *ps ) {
++	team_t team = (team_t)ps->persistant[PERS_TEAM];
++	vec3_t objectiveOrigin;
++
++	if ( team != TEAM_AXIS && team != TEAM_ALLIES ) {
++		return;
++	}
++
++	if ( !ETA_NearestObjectiveOrigin( team, ps->origin, objectiveOrigin ) ) {
++		return;
++	}
++
++	{
++		vec3_t delta, angles;
++
++		VectorSubtract( objectiveOrigin, ps->origin, delta );
++		vectoangles( delta, angles );
++
++		ETA_AudioCueSystem_PlayObjectiveCue();
++		ETA_AudioCueSystem_PlayObjectiveDirectionCue(
++			(int)AngleNormalize360( ps->viewangles[YAW] - angles[YAW] ) );
++	}
++}
++
++/**
+  * Feeds real per-frame movement into the accessibility navigation system's
+  * stuck detection (ETA_NavigationSystem_UpdateMovement), which narrates
+  * "You may be stuck" on its own once the player has stayed under its own
+@@ -602,6 +643,10 @@ void CG_TransitionPlayerState( playerState_t *ps, playerState_t *ops ) {
+ 	// respawning
+ 	if ( ps->persistant[PERS_SPAWN_COUNT] != ops->persistant[PERS_SPAWN_COUNT] ) {
+ 		CG_Respawn( ps->persistant[PERS_REVIVE_COUNT] != ops->persistant[PERS_REVIVE_COUNT] ? qtrue : qfalse );
++
++#ifdef FEATURE_ACCESSIBILITY
++		ETA_ObjectiveOrientationCue( ps );
++#endif
+ 	}
+ 
+ 	if ( cg.mapRestart ) {

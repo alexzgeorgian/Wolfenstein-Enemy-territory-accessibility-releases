@@ -1,0 +1,154 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index a18498d..b4a0c32 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2923,13 +2923,21 @@ static float ETA_MarkerSquareRadius(void)
+  *
+  * The walk is judged against the map's own brushes alone. A closed door
+  * is a way through - it opens when used - and so is anything else that
+- * moves. The probe is a little narrower than a player and stands a step
+- * high, so kerbs and stairs are walked up and a doorway is found
+- * wherever the squares fall; it is refused wherever the floor falls away
+- * further than a safe drop, and wherever the floor is lava or slime.
++ * moves. The probe stands a step high, so kerbs and stairs are walked
++ * up; it is refused wherever the floor falls away further than a safe
++ * drop, and wherever the floor is lava or slime.
++ *
++ * It is 32 units across, against a player's 36. It was 24, so that a
++ * doorway would be found wherever the squares fell - and on the real
++ * Oasis map that sent the way to the Allied Command Post between a post
++ * and a ramp, through a gap the probe fitted and a player does not. A
++ * walk following the ping stopped there for good, which is what the
++ * tester met. 32 still finds every doorway a player uses: the squares
++ * are 32 apart, so a 64-unit doorway always has one with 16 to spare on
++ * each side.
+  */
+ #define ETA_ROUTE_CELL          32.0f
+-#define ETA_ROUTE_HALF_WIDTH    12.0f
++#define ETA_ROUTE_HALF_WIDTH    16.0f
+ #define ETA_ROUTE_SLOPE_LIFT    20.0f   /* a second try, higher, for ramps */
+ #define ETA_ROUTE_JUMP_LIFT     24.0f   /* a third, for a ledge to jump onto */
+ #define ETA_ROUTE_MAX_DROP      96.0f
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 2169d3e..36ba57d 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -2289,12 +2289,19 @@ static void CG_AccessibilityActivateDown_f(void)
+ 	count = (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL && !hint)
+ 	        ? CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) : 0;
+ 
+-	/* A ladder within reach, nearer than anything else to use: climb it. */
++	/* A ladder within reach, nearer than anything else to use: climb it.
++	   The ladders on the list are the same ladders seen from further
++	   off, so it is weighed against the nearest thing that is not one. */
+ 	if (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL && !hint)
+ 	{
+ 		etaLadder_t ladder;
++		int         other;
+ 
+-		if (CG_AccessibilityLadderNear(&ladder) && (count <= 0 || ladder.meters < list[0].meters))
++		for (other = 0; other < count && list[other].ladder; other++)
++		{
++		}
++
++		if (CG_AccessibilityLadderNear(&ladder) && (other >= count || ladder.meters < list[other].meters))
+ 		{
+ 			ETA_ClimbStart(&ladder);
+ 			return;
+@@ -2316,6 +2323,15 @@ static void CG_AccessibilityActivateDown_f(void)
+ 	eta_aim.cycleIndex = index;
+ 	eta_aim.cycleAt    = cg.time;
+ 
++	/* A ladder is turned to and said, always: pressing use at it does
++	   nothing, and F climbs it once the player is there. */
++	if (list[index].ladder)
++	{
++		ETA_AimStartSnap(&list[index],
++		                 count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : list[index].name);
++		return;
++	}
++
+ 	if (list[index].meters <= ETA_USE_REACH_METERS)
+ 	{
+ 		ETA_AimStartSnap(&list[index], NULL);
+@@ -2485,6 +2501,13 @@ static void ETA_AutoUse(void)
+ 
+ 	for (i = 0; i < count && list[i].meters <= ETA_USE_REACH_METERS; i++)
+ 	{
++		/* A ladder is climbed with F, never turned to unasked: standing
++		   by one is not wanting to climb it. */
++		if (list[i].ladder)
++		{
++			continue;
++		}
++
+ 		for (j = 0; j < eta_use.doneCount; j++)
+ 		{
+ 			if (eta_use.done[j] == list[i].entityNum)
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index d03e326..a4fe612 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4421,6 +4421,50 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 		ETA_AimInsert(list, &count, max, &target);
+ 	}
+ 
++	/* The map's ladders, read from the map file: turned to like anything
++	   else to use, so a ladder heard knocking can be found with F - and
++	   once there, F climbs it (cg_consolecmds.c). Aimed at the middle of
++	   the ladder, level with the player, and only one in sight: turning
++	   to a ladder behind a wall would turn the player to the wall. */
++	for (i = 0; i < eta_mapLadderCount; i++)
++	{
++		const ETA_BspLadder *ladder = &eta_mapLadders[i];
++		etaAimTarget_t      target;
++		vec3_t              toward, seen;
++		qboolean            up, down;
++
++		memset(&target, 0, sizeof(target));
++		target.entityNum = -1;
++		target.ladder    = qtrue;
++		target.point[0]  = (ladder->mins[0] + ladder->maxs[0]) * 0.5f;
++		target.point[1]  = (ladder->mins[1] + ladder->maxs[1]) * 0.5f;
++		target.point[2]  = ps->origin[2] < ladder->mins[2] ? ladder->mins[2]
++		                   : ps->origin[2] > ladder->maxs[2] ? ladder->maxs[2] : ps->origin[2];
++
++		if (Distance(ps->origin, target.point) > ETA_USE_RANGE)
++		{
++			continue;
++		}
++
++		/* A little short of the ladder, so the line is not cut by the
++		   ladder's own clip. */
++		VectorSubtract(eye, target.point, toward);
++		VectorNormalize(toward);
++		VectorMA(target.point, 8.0f, toward, seen);
++		if (!ETA_SeesPoint(eye, seen, -1))
++		{
++			continue;
++		}
++
++		up   = (qboolean)(ladder->maxs[2] > ps->origin[2] + 32.0f);
++		down = (qboolean)(ladder->mins[2] < ps->origin[2] - 64.0f);
++		Q_strncpyz(target.name, up && !down ? "Ladder up" : down && !up ? "Ladder down" : "Ladder",
++		           sizeof(target.name));
++		target.meters = Distance(ps->origin, target.point) * ETA_QU_TO_METERS;
++
++		ETA_AimInsert(list, &count, max, &target);
++	}
++
+ 	return count;
+ }
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index b662ff0..8e00e93 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3492,6 +3492,7 @@ typedef struct
+ 	vec3_t point;       ///< where to aim
+ 	float  meters;
+ 	char   name[64];
++	qboolean ladder;    ///< one of the map's ladders: F turns to it, and climbs it there
+ } etaAimTarget_t;
+ 
+ int      CG_AccessibilityUseTargets(etaAimTarget_t *list, int max);

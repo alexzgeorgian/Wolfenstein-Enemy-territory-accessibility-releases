@@ -1,0 +1,19 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index c4c356a..e26f954 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -1575,6 +1575,14 @@ void UI_LoadMenus(const char *menuFile, qboolean reset)
+ 	   by this point, and a player whose pk3 is half-installed is better
+ 	   off with a game that runs. */
+ 	UI_ParseMenu("ui/options_accessibility.menu");
++
++	/* Its three pages, each reached from a button on it: what the mod
++	   tells you about the world, how the voice sounds, and the keys. One
++	   page held all of it for a release; the tester asked for each kind
++	   of thing to have a page of its own. */
++	UI_ParseMenu("ui/options_accessibility_environment.menu");
++	UI_ParseMenu("ui/options_accessibility_speech.menu");
++	UI_ParseMenu("ui/options_accessibility_keys.menu");
+ #endif
+ 
+ 	Com_DPrintf("UI menu load time = %d milli seconds\n", trap_Milliseconds() - start);

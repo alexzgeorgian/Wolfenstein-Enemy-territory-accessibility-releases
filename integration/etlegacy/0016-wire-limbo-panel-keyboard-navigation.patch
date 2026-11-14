@@ -1,0 +1,214 @@
+diff --git a/src/cgame/cg_limbopanel.c b/src/cgame/cg_limbopanel.c
+index 55a8fda..e6e7811 100644
+--- a/src/cgame/cg_limbopanel.c
++++ b/src/cgame/cg_limbopanel.c
+@@ -36,6 +36,9 @@
+ 
+ extern const char *cg_skillRewards[SK_NUM_SKILLS][NUM_SKILL_LEVELS - 1];
+ extern const char *cg_skillRewardsDetails[SK_NUM_SKILLS][NUM_SKILL_LEVELS - 1];
++#ifdef FEATURE_ACCESSIBILITY
++#include "speech/speech_manager.h"
++#endif
+ 
+ #define SOUNDEVENT(sound) trap_S_StartLocalSound(sound, CHAN_LOCAL_SOUND)
+ 
+@@ -3517,6 +3520,182 @@ qboolean CG_LimboPanel_Draw(void)
+ 	return qtrue;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++
++/**
++ * @brief Keyboard traversal for the limbo panel, which never had any.
++ *
++ * The panel is mouse-driven: every control is hit-tested against the cursor
++ * (BG_CursorInRect reads DC->cursorx / cursory), and BG_PanelButtonsKeyEvent
++ * only delivers keys to a button that a click already focused. A player who
++ * cannot aim a cursor therefore cannot reach team or class selection - the
++ * one screen standing between them and a match.
++ *
++ * Rather than synthesising button presses, this moves the real cursor onto
++ * each control in turn and then calls that control's own handler, which is
++ * the path a mouse click takes. Nothing here duplicates or second-guesses
++ * the panel's logic; it only drives it from the keyboard.
++ *
++ * Only the controls needed to get into a game are listed. limboPanelButtons
++ * holds some fifty entries, most of them frames, medals and counters that
++ * are decorative - cycling those would bury the three that matter.
++ */
++#define ETA_LIMBO_TEAM    0
++#define ETA_LIMBO_CLASS   1
++#define ETA_LIMBO_CONFIRM 2
++
++typedef struct
++{
++	panel_button_t *button;
++	int            kind;
++} eta_limboStop_t;
++
++static eta_limboStop_t eta_limboStops[] =
++{
++	{ &teamButton0,  ETA_LIMBO_TEAM    },
++	{ &teamButton1,  ETA_LIMBO_TEAM    },
++	{ &teamButton2,  ETA_LIMBO_TEAM    },
++	{ &classButton0, ETA_LIMBO_CLASS   },
++	{ &classButton1, ETA_LIMBO_CLASS   },
++	{ &classButton2, ETA_LIMBO_CLASS   },
++	{ &classButton3, ETA_LIMBO_CLASS   },
++	{ &classButton4, ETA_LIMBO_CLASS   },
++	{ &okButton,     ETA_LIMBO_CONFIRM }
++};
++
++#define ETA_LIMBO_STOP_COUNT ((int)(sizeof(eta_limboStops) / sizeof(eta_limboStops[0])))
++
++static int eta_limboIndex = -1;
++
++/**
++ * @brief Spoken name for one stop, including whether it is the current choice
++ * and whether the server has ruled it out - both of which a sighted player
++ * reads from the button's colour, and neither of which is in its text.
++ * @param[in] stop
++ * @return
++ */
++static const char *ETA_LimboStopText(const eta_limboStop_t *stop)
++{
++	static char text[128];
++	const char  *name  = NULL;
++	const char  *state = "";
++	team_t      team;
++
++	switch (stop->kind)
++	{
++	case ETA_LIMBO_TEAM:
++		team = teamOrder[stop->button->data[0]];
++		name = (team == TEAM_AXIS) ? "Axis" : ((team == TEAM_ALLIES) ? "Allies" : "Spectator");
++
++		if (CG_LimboPanel_TeamIsDisabled(team))
++		{
++			state = ", full";
++		}
++		else if (CG_LimboPanel_GetTeam() == team)
++		{
++			state = ", selected";
++		}
++		break;
++	case ETA_LIMBO_CLASS:
++		name = BG_ClassnameForNumber(stop->button->data[1]);
++
++		if (CG_LimboPanel_ClassIsDisabled(CG_LimboPanel_GetTeam(), stop->button->data[1]))
++		{
++			state = ", unavailable";
++		}
++		else if (CG_LimboPanel_GetClass() == stop->button->data[1])
++		{
++			state = ", selected";
++		}
++		break;
++	default:
++		name = "Confirm and spawn";
++		break;
++	}
++
++	Com_sprintf(text, sizeof(text), "%s%s", name ? name : "Unknown", state);
++	return text;
++}
++
++/**
++ * @brief Puts the cursor on the current stop, so the panel's own hit testing
++ * agrees with where the keyboard thinks it is.
++ */
++static void ETA_LimboPanel_MoveCursor(void)
++{
++	rectDef_t *rect;
++
++	if (eta_limboIndex < 0 || eta_limboIndex >= ETA_LIMBO_STOP_COUNT)
++	{
++		return;
++	}
++
++	rect         = &eta_limboStops[eta_limboIndex].button->rect;
++	cgs.cursorX  = (int)(rect->x + rect->w / 2.f);
++	cgs.cursorY  = (int)(rect->y + rect->h / 2.f);
++	cgDC.cursorx = cgs.cursorX;
++	cgDC.cursory = cgs.cursorY;
++}
++
++/**
++ * @brief Speaks the current stop.
++ */
++static void ETA_LimboPanel_SpeakCurrent(void)
++{
++	if (eta_limboIndex < 0 || eta_limboIndex >= ETA_LIMBO_STOP_COUNT)
++	{
++		return;
++	}
++
++	ETA_Speech_Say(ETA_LimboStopText(&eta_limboStops[eta_limboIndex]));
++}
++
++/**
++ * @brief Arrow keys and Tab walk the stops; Enter presses one.
++ * @param[in] key
++ * @return qtrue when the key was consumed.
++ */
++static qboolean ETA_LimboPanel_HandleKey(int key)
++{
++	switch (key)
++	{
++	case K_DOWNARROW:
++	case K_TAB:
++		eta_limboIndex = (eta_limboIndex + 1) % ETA_LIMBO_STOP_COUNT;
++		ETA_LimboPanel_MoveCursor();
++		ETA_LimboPanel_SpeakCurrent();
++		return qtrue;
++	case K_UPARROW:
++		eta_limboIndex = (eta_limboIndex <= 0 ? ETA_LIMBO_STOP_COUNT : eta_limboIndex) - 1;
++		ETA_LimboPanel_MoveCursor();
++		ETA_LimboPanel_SpeakCurrent();
++		return qtrue;
++	case K_ENTER:
++	case K_KP_ENTER:
++		if (eta_limboIndex < 0)
++		{
++			return qfalse;
++		}
++
++		/* The cursor is already on the control, so its own handler sees
++		   exactly what it would see under a real click. */
++		ETA_LimboPanel_MoveCursor();
++
++		if (eta_limboStops[eta_limboIndex].button->onKeyDown)
++		{
++			eta_limboStops[eta_limboIndex].button->onKeyDown(eta_limboStops[eta_limboIndex].button, K_MOUSE1);
++		}
++
++		/* Re-read the same stop: selecting a team or class changes what the
++		   panel now says about it. */
++		ETA_LimboPanel_SpeakCurrent();
++		return qtrue;
++	default:
++		return qfalse;
++	}
++}
++#endif
++
+ /**
+  * @brief CG_LimboPanel_KeyHandling
+  * @param[in] key
+@@ -3541,6 +3720,16 @@ void CG_LimboPanel_KeyHandling(int key, qboolean down)
+ 			return;
+ 		}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		/* After the close key, so it is never swallowed, and after
++		   BG_PanelButtonsKeyEvent above, so only keys nobody else wanted
++		   reach the keyboard traversal. */
++		if (ETA_LimboPanel_HandleKey(key))
++		{
++			return;
++		}
++#endif
++
+ 		// accelerator keys when the weapon panel is open
+ 		if (BG_PanelButtons_GetFocusButton() == &weaponPanel)
+ 		{

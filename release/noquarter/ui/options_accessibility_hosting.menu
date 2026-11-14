@@ -1,0 +1,46 @@
+#include "ui/menudef.h"
+#include "ui/eta_menudef.h"
+#include "ui/menumacros.h"
+
+// Accessibility - Hosting //
+//
+// What happens when you host a game yourself, from HOST GAME and START
+// SERVER: whether friends can join with the plain game, how many bots
+// play, and the enemy lock taking an enemy by itself - which runs only in
+// a game you host, or on a server that allows it. In No Quarter, also map
+// voting, which its Host Game screen does not offer.
+
+#define WINDOW_X      16
+#define WINDOW_Y      16
+#define WINDOW_WIDTH  608
+#define WINDOW_HEIGHT 448
+#define GROUP_NAME    "grpOptionsAccessibilityHosting"
+
+menuDef {
+	name        "options_accessibility_hosting"
+	visible     0
+	fullscreen  0
+	rect WINDOW_X WINDOW_Y WINDOW_WIDTH WINDOW_HEIGHT
+	style WINDOW_STYLE_FILLED
+
+	onESC {
+		close options_accessibility_hosting ;
+		open  options_accessibility
+	}
+
+// Window //
+	WINDOW("HOSTING", 150)
+
+// When you host //
+#define HOST_Y SUBWINDOW_OPTION_Y_START
+#define HOST_H SUBWINDOW_OPTION_COMPUTE_H(5)
+	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X1_START, HOST_Y, SUBWINDOW_OPTION_HEADER_WIDTH_L, HOST_H, "WHEN YOU HOST A GAME")
+	YESNO(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(HOST_Y, 1), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Friends join with the plain game:", .2, 8, "eta_hostPlain", "Yes: your server checks nobody's game files and sends no downloads, so friends join without this mod. No: the Host Game screen's own Pure Server and Client Downloads are used")
+	MULTI(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(HOST_Y, 2), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Bots:", .2, 8, "eta_hostBotCount", cvarFloatList { "None" 0 "1 bot" 1 "2 bots" 2 "3 bots" 3 "4 bots" 4 "5 bots" 5 "6 bots" 6 "7 bots" 7 "8 bots" 8 "9 bots" 9 "10 bots" 10 "11 bots" 11 "12 bots" 12 "13 bots" 13 "14 bots" 14 "15 bots" 15 "16 bots" 16 "17 bots" 17 "18 bots" 18 "19 bots" 19 }, "How many Omni-bot bots play in a game you host, however many friends join. Changed during the match, they join or leave at once")
+	MULTI(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(HOST_Y, 3), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Bot skill:", .2, 8, "eta_hostBotSkill", cvarFloatList { "Easiest" 1 "Easy" 2 "Medium" 3 "Hard" 4 "Very hard" 5 "Hardest" 6 }, "How well the bots aim and move")
+	YESNO(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(HOST_Y, 4), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Lock on to enemies by itself:", .2, 8, "eta_autoLock", "In a game you host, or where the server allows it: an enemy coming into sight is locked on to without holding the lock key")
+	YESNO(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(HOST_Y, 5), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Map voting:", .2, 8, "eta_hostMapVote", "Yes: the game you host is a map vote - at the end of each match everyone votes for the next map, on the debriefing's Map Vote page")
+
+// Buttons //
+	BUTTON(SUBWINDOW_OPTION_HEADER_X1_START, WINDOW_HEIGHT - 22, .33 * (WINDOW_WIDTH - 24), 18, "BACK", .3, 14, close options_accessibility_hosting ; open options_accessibility)
+}

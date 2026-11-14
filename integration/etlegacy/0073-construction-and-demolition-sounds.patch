@@ -1,0 +1,191 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index c9a96b3..3b58eed 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3366,6 +3366,106 @@ static void ETA_BeaconDoors(void)
+ 	}
+ }
+ 
++/**
++ * @brief How far a construction site or a demolition target can be
++ *        heard, in Quake units. About twenty-five metres.
++ *
++ * Further than a door: an objective is what a whole stretch of the map
++ * is about, and the walk toward one starts well before it is in reach.
++ * Still a neighbourhood rather than the map - the objective direction
++ * cue and the map survey answer "where are the objectives at all".
++ */
++#define ETA_SITE_CUE_RANGE 1000.0f
++
++/**
++ * @brief Puts a sound on every construction site the player's team can
++ *        build, and every enemy objective they can blow up, within
++ *        earshot.
++ *
++ * Both come from the game's own objective markers - the entities the
++ * compass and the command map draw their icons from - rather than from
++ * the construction itself, because the marker is what says what the
++ * thing is for:
++ *
++ * - A construction indicator stands at a site while there is something
++ *   there to build, and is removed by the server the moment it is
++ *   built. Its team is the team that builds it, or 3 where either team
++ *   can. So it is heard exactly while it is still worth walking to.
++ *
++ * - An explosive indicator stands on a dynamite objective, and on any
++ *   construction once it is built and can be destroyed - the server
++ *   puts one there for the other team when the building finishes, and
++ *   takes it away when the thing is blown up. Its team is the side that
++ *   owns it; the other side's are the ones to destroy. A construction
++ *   that cannot be destroyed never gets one, so it is never heard as a
++ *   target.
++ *
++ * The player's own team's targets are left silent: they are there to
++ * be defended, and a beacon on every one would fill the base with
++ * sound. The game's own ticking already marks armed dynamite for
++ * everybody.
++ *
++ * The markers are sent to every client wherever they are, walls or
++ * not, so these are heard through walls - like the doors, they say what
++ * is near, and the walk there is the player's.
++ */
++static void ETA_BeaconSites(void)
++{
++	team_t team;
++	int    i;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_siteCues.integer)
++	{
++		return;
++	}
++
++	team = cgs.clientinfo[cg.clientNum].team;
++	if (team != TEAM_AXIS && team != TEAM_ALLIES)
++	{
++		return;
++	}
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		eta_loopSoundType_t which;
++		sfxHandle_t         sfx;
++		vec3_t              origin;
++
++		if (es->eType == ET_CONSTRUCTIBLE_INDICATOR
++		    && (es->teamNum == team || es->teamNum == 3))
++		{
++			which = ETA_LOOP_BUILD_SITE;
++		}
++		else if (es->eType == ET_EXPLOSIVE_INDICATOR
++		         && (es->teamNum == TEAM_AXIS || es->teamNum == TEAM_ALLIES)
++		         && es->teamNum != team)
++		{
++			which = ETA_LOOP_DEMOLITION_TARGET;
++		}
++		else
++		{
++			continue;
++		}
++
++		/* A point entity, placed by the server at the middle of the
++		   objective's trigger - the spot the command map's icon marks. */
++		VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++
++		if (Distance(cg.predictedPlayerState.origin, origin) > ETA_SITE_CUE_RANGE)
++		{
++			continue;
++		}
++
++		sfx = CG_AccessibilityLoopSound(which);
++
++		if (sfx)
++		{
++			trap_S_AddLoopingSound(origin, vec3_origin, sfx, 255, 0);
++		}
++	}
++}
++
+ /**
+  * @brief A spoken name from a model's file name.
+  *
+@@ -8458,9 +8558,10 @@ void CG_DrawActive()
+ 	   said. */
+ 	CG_AccessibilitySampleTotals();
+ 
+-	/* Both of these are continuous sounds rather than speech, so they do
+-	   not compete for the one voice and are not held back by anything. */
++	/* These are continuous sounds rather than speech, so they do not
++	   compete for the one voice and are not held back by anything. */
+ 	ETA_BeaconDoors();
++	ETA_BeaconSites();
+ 
+ 	ETA_NarrateCrosshair();
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index f18ebb3..786f2fc 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3500,12 +3500,15 @@ typedef enum
+ 	ETA_LOOP_DOOR_LOCKED,
+ 	ETA_LOOP_CROSSHAIR_ENEMY,
+ 	ETA_LOOP_CROSSHAIR_TEAMMATE,
+-	ETA_LOOP_MARKER
++	ETA_LOOP_MARKER,
++	ETA_LOOP_BUILD_SITE,
++	ETA_LOOP_DEMOLITION_TARGET
+ } eta_loopSoundType_t;
+ 
+ sfxHandle_t CG_AccessibilityLoopSound(eta_loopSoundType_t which);
+ 
+ extern vmCvar_t eta_doorCues;
++extern vmCvar_t eta_siteCues;
+ extern vmCvar_t eta_crosshairCues;
+ extern vmCvar_t eta_markerCues;
+ extern vmCvar_t eta_turnSteps;
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 4310b97..fe3ed5e 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2199,6 +2199,7 @@ vmCvar_t eta_locationCallouts;
+ vmCvar_t eta_interactionCallouts;
+ vmCvar_t eta_mapCallouts;
+ vmCvar_t eta_doorCues;
++vmCvar_t eta_siteCues;
+ vmCvar_t eta_crosshairCues;
+ vmCvar_t eta_markerCues;
+ vmCvar_t eta_turnSteps;
+@@ -2210,11 +2211,11 @@ vmCvar_t eta_autoLock;
+ vmCvar_t eta_autoUse;
+ 
+ /**
+- * @brief The four sounds this mod brings with it, and why they are not
+- *        the game's own.
++ * @brief The sounds this mod brings with it, and why they are not the
++ *        game's own.
+  *
+  * Every other cue here is a sound ET already ships, chosen by a cvar, so
+- * a player can read the path and know what they are hearing. These four
++ * a player can read the path and know what they are hearing. These
+  * cannot work that way. They loop continuously, and ET's sound set is
+  * combat and world effects - one-shot transients with hard onsets, which
+  * buzz when looped tightly and grate when looped slowly. Nothing in the
+@@ -2230,7 +2231,9 @@ static eta_cueSound_t eta_loopSounds[] =
+ 	{ "eta_cueDoorLocked",        "sound/accessibility/door_creak_locked.wav",  { 0 }, 0, { 0 } },
+ 	{ "eta_cueCrosshairEnemy",    "sound/accessibility/crosshair_enemy.wav",    { 0 }, 0, { 0 } },
+ 	{ "eta_cueCrosshairTeammate", "sound/accessibility/crosshair_teammate.wav", { 0 }, 0, { 0 } },
+-	{ "eta_cueMarker",            "sound/accessibility/marker_beacon.wav",      { 0 }, 0, { 0 } }
++	{ "eta_cueMarker",            "sound/accessibility/marker_beacon.wav",      { 0 }, 0, { 0 } },
++	{ "eta_cueBuildSite",         "sound/accessibility/build_site.wav",         { 0 }, 0, { 0 } },
++	{ "eta_cueDemolitionTarget",  "sound/accessibility/demolition_target.wav",  { 0 }, 0, { 0 } }
+ };
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+@@ -2383,6 +2386,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_interactionCallouts, "eta_interactionCallouts", "1" },
+ 	{ &eta_mapCallouts,         "eta_mapCallouts",         "1" },
+ 	{ &eta_doorCues,            "eta_doorCues",            "1" },
++	{ &eta_siteCues,            "eta_siteCues",            "1" },
+ 	{ &eta_crosshairCues,       "eta_crosshairCues",       "1" },
+ 	{ &eta_markerCues,          "eta_markerCues",          "1" },
+ 	{ &eta_turnSteps,           "eta_turnSteps",           "1" },

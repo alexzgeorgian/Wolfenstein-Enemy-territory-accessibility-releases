@@ -1,0 +1,96 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index c392544..1269552 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -36,6 +36,10 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#endif
++
+ char *Binding_FromName(const char *cvar);
+ 
+ /**
+@@ -257,6 +261,40 @@ static void CG_topshotsUp_f(void)
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief CG_AccessibilityStatus_f
++ * On-demand "query basic match state" command for the accessibility HUD
++ * narrator (Milestone 4's exit condition). Bindable to a key; narrates
++ * health, the active weapon, and its ammo in one status report rather than
++ * announcing every stat change automatically, since health/ammo change too
++ * often during combat for that to be anything but noise.
++ */
++static void CG_AccessibilityStatus_f(void)
++{
++	playerState_t *ps = &cg.snap->ps;
++	weapon_t      weap;
++
++	ETA_HudNarrator_SpeakHealth(ps->stats[STAT_HEALTH]);
++
++	weap = (weapon_t)ps->weapon;
++
++	if (IS_VALID_WEAPON(weap))
++	{
++		int ammo, clips, akimboammo, maxammo;
++
++		ETA_HudNarrator_SpeakWeapon(GetWeaponTableData(weap)->desc);
++
++		CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
++
++		if (ammo >= 0)
++		{
++			ETA_HudNarrator_SpeakAmmo(ammo);
++		}
++	}
++}
++#endif
++
+ /**
+  * @brief CG_objectivesDown_f
+  */
+@@ -3548,6 +3586,10 @@ static consoleCommand_t commands[] =
+ 	{ "+objectives",            CG_objectivesDown_f          },
+ 	{ "-objectives",            CG_objectivesUp_f            },
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	{ "accessibilityStatus",    CG_AccessibilityStatus_f     },
++#endif
++
+ 	{ "autoRecord",             CG_autoRecord_f              },
+ 	{ "toggleRecord",           CG_toggleRecord_f            },
+ 	{ "autoScreenshot",         CG_autoScreenShot_f          },
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index fcfc60a..d387a48 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -39,6 +39,10 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#endif
++
+ /**
+  * @brief CG_DamageFeedback
+  * @param[in] yawByte
+@@ -407,6 +411,13 @@ void CG_TransitionPlayerState(playerState_t *ps, playerState_t *ops)
+ 	{
+ 		cg.predictedPlayerEntity.firedTime = 0; // reset smoke generation
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		if (IS_VALID_WEAPON((weapon_t)ps->weapon))
++		{
++			ETA_HudNarrator_SpeakWeapon(GetWeaponTableData((weapon_t)ps->weapon)->desc);
++		}
++#endif
++
+ 		// ensure the weapon we ask for is aligned with the one selected by the server
+ 		// otherwise, check if the status side arm is the correct one
+ 		// this may happen if a vid_restart has been issued as status side arm is not restored

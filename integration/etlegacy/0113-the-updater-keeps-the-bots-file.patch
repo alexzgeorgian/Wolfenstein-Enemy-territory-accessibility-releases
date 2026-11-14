@@ -1,0 +1,125 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 574cf37..5ce2a11 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -5398,6 +5398,109 @@ static void UI_AccessibilityUpdateDownloaded(void)
+ 	etaUpdate.popup = "eta_update_ready";
+ }
+ 
++#ifdef __APPLE__
++/**
++ * @brief Keeps the Mac's bots file in step with this version.
++ *
++ * The bots file, qagame_mac, sits loose in the legacy folder - the
++ * engine loads the game module only as a loose file - so updating the
++ * pk3 left it behind, and each version needs its own: the tester was
++ * asked to copy it out of every Mac download by hand. Each release now
++ * publishes it beside the pk3. Once a run, after the start-up update
++ * check and never over an update in progress, when the one installed is
++ * from another version - or none is, but Omni-bot is there, so the
++ * player has set up bots - this version's is downloaded, checked against
++ * the checksum built in, and put in place. A Mac not set up for bots is
++ * left alone.
++ */
++static void UI_AccessibilityMacGameFrame(void)
++{
++	static int  stage; /* 0 not looked yet, 1 downloading, 2 done this run */
++	static char target[MAX_OSPATH];
++	static char download[MAX_OSPATH];
++	const char  *expected = ETA_Update_MacGameSha256();
++
++	if (stage == 2)
++	{
++		return;
++	}
++
++	if (stage == 0)
++	{
++		char             homepath[MAX_OSPATH];
++		char             omnibot[MAX_OSPATH];
++		char             url[512];
++		const char       *home = getenv("HOME");
++		ETA_MacGameState state;
++		FILE             *found;
++
++		trap_Cvar_Update(&eta_updateCheck);
++		if ((eta_updateCheck.integer && trap_Cvar_VariableValue("eta_updateAsked") == 0.f)
++		    || etaUpdate.stage != ETA_UPDATE_STAGE_IDLE || etaUpdate.popup
++		    || ETA_WindowsUpdate_Poll() == ETA_WINDOWS_UPDATE_BUSY)
++		{
++			return;
++		}
++
++		stage = 2; /* looked at once a run, whatever is found */
++		if (!ETA_Update_IsReleaseBuild(ETA_Update_InstalledVersion()))
++		{
++			return;
++		}
++
++		trap_Cvar_VariableStringBuffer("fs_homepath", homepath, sizeof(homepath));
++		Com_sprintf(target, sizeof(target), "%s/legacy/%s", homepath, ETA_UPDATE_MAC_GAME_NAME);
++		state = ETA_Update_CheckMacGame(target, expected);
++
++		if (state == ETA_MAC_GAME_ABSENT)
++		{
++			Com_sprintf(omnibot, sizeof(omnibot), "%s/legacy/omni-bot/omnibot_et_mac.so", homepath);
++			found = fopen(omnibot, "rb");
++			if (!found && home)
++			{
++				Com_sprintf(omnibot, sizeof(omnibot), "%s/omni-bot/omnibot_et_mac.so", home);
++				found = fopen(omnibot, "rb");
++			}
++			if (!found)
++			{
++				return; /* not set up for bots */
++			}
++			fclose(found);
++		}
++		else if (state != ETA_MAC_GAME_OTHER)
++		{
++			return; /* already this version's, or this build made none */
++		}
++
++		Com_sprintf(download, sizeof(download), "%s.download", target);
++		if (!ETA_Update_MacGameUrl(ETA_Update_InstalledVersion(), url, sizeof(url))
++		    || !ETA_WindowsUpdate_StartDownload(url, download, ETA_UPDATE_MAX_PACKAGE_BYTES))
++		{
++			return;
++		}
++		stage = 1;
++		return;
++	}
++
++	if (ETA_WindowsUpdate_Poll() == ETA_WINDOWS_UPDATE_BUSY)
++	{
++		return;
++	}
++	stage = 2;
++
++	if (ETA_WindowsUpdate_Poll() == ETA_WINDOWS_UPDATE_DONE
++	    && !Q_stricmp(ETA_WindowsUpdate_DownloadSha256(), expected)
++	    && rename(download, target) == 0)
++	{
++		UI_AccessibilityUpdateSay("Bots file updated for this version.");
++		return;
++	}
++
++	/* Anything else leaves the one there as it was; hosting says so. */
++	ETA_WindowsUpdate_RemoveFile(download);
++}
++#endif
++
+ /**
+  * @brief Runs the update check along, once a frame.
+  */
+@@ -5464,6 +5567,10 @@ static void UI_AccessibilityUpdateFrame(void)
+ 		Menus_ActivateByName(etaUpdate.popup, qtrue);
+ 		etaUpdate.popup = NULL;
+ 	}
++
++#ifdef __APPLE__
++	UI_AccessibilityMacGameFrame();
++#endif
+ }
+ 
+ /**

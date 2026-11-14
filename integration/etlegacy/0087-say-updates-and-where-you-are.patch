@@ -1,0 +1,224 @@
+diff --git a/src/cgame/cg_limbopanel.c b/src/cgame/cg_limbopanel.c
+index bc03f34..7ee760d 100644
+--- a/src/cgame/cg_limbopanel.c
++++ b/src/cgame/cg_limbopanel.c
+@@ -3457,6 +3457,10 @@ void CG_LimboPanel_Setup(void)
+ 	cgs.ccSelectedWeaponSlot = PRIMARY_SLOT;
+ 
+ 	CG_LimboPanel_RequestWeaponStats();
++
++#ifdef FEATURE_ACCESSIBILITY
++	CG_AccessibilityLimboOpened();
++#endif
+ }
+ 
+ /**
+@@ -3768,6 +3772,14 @@ static void ETA_LimboPanel_MoveCursor(void)
+ /**
+  * @brief Speaks the current stop.
+  */
++void CG_AccessibilityLimboOpened(void)
++{
++	/* Where the player is, as the panel comes up - the tester asked for
++	   every menu to say which one it is. The first stop is said when the
++	   arrow keys or Tab move to it. */
++	ETA_Speech_Say("Limbo menu");
++}
++
+ static void ETA_LimboPanel_SpeakCurrent(void)
+ {
+ 	if (eta_limboIndex < 0 || eta_limboIndex >= ETA_LIMBO_STOP_COUNT)
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 63ba962..7f7c429 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3520,6 +3520,7 @@ typedef struct
+ 
+ qboolean CG_AccessibilityLadderNear(etaLadder_t *out);
+ qboolean CG_AccessibilityClimbing(void);
++void     CG_AccessibilityLimboOpened(void);
+ void     CG_AccessibilitySpeakPlayState(void);
+ 
+ /**
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index b31fa25..8f6e8d3 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -4996,6 +4996,10 @@ static void UI_AccessibilityHostServer(void)
+  */
+ static vmCvar_t eta_updateCheck;
+ 
++/* How long after the game starts the check begins: long enough for the
++   main menu to be up and read, short enough to be the first thing heard. */
++#define ETA_UPDATE_STARTUP_DELAY_MS 1500
++
+ typedef enum
+ {
+ 	ETA_UPDATE_STAGE_IDLE = 0,
+@@ -5020,6 +5024,56 @@ static void UI_AccessibilityUpdateSay(const char *text)
+ 	ETA_MenuNarrator_OnConfirmDialogShown(text);
+ }
+ 
++/*
++ * Where the player is, said as the main menu or the in-game menu opens.
++ * The tester asked for it: at start-up the update check's answer first,
++ * then "Main menu"; in a match, Escape says which menu came up. While the
++ * start-up check is still to come or still running, the menu's name
++ * waits and is said after the answer, in the same breath - said
++ * separately, the second line would cut off the first.
++ */
++static char etaMenuTitle[32];
++
++static qboolean UI_AccessibilityStartupCheckPending(void)
++{
++	trap_Cvar_Update(&eta_updateCheck);
++
++	if (etaUpdate.stage == ETA_UPDATE_STAGE_CHECKING && !etaUpdate.manual)
++	{
++		return qtrue;
++	}
++
++	return (qboolean)(eta_updateCheck.integer && ETA_WindowsUpdate_Supported()
++	                  && ETA_Update_IsReleaseBuild(ETA_Update_InstalledVersion())
++	                  && trap_Cvar_VariableValue("eta_updateAsked") == 0.f);
++}
++
++static void UI_AccessibilitySayMenu(const char *title)
++{
++	if (UI_AccessibilityStartupCheckPending())
++	{
++		Q_strncpyz(etaMenuTitle, title, sizeof(etaMenuTitle));
++		return;
++	}
++
++	etaMenuTitle[0] = '\0';
++	UI_AccessibilityUpdateSay(title);
++}
++
++/* The start-up check's answer, and then where the player is. */
++static void UI_AccessibilityStartupSay(const char *text)
++{
++	if (etaMenuTitle[0])
++	{
++		UI_AccessibilityUpdateSay(va("%s %s.", text, etaMenuTitle));
++		etaMenuTitle[0] = '\0';
++	}
++	else
++	{
++		UI_AccessibilityUpdateSay(text);
++	}
++}
++
+ static void UI_AccessibilityRegisterUpdateCvars(void)
+ {
+ 	trap_Cvar_Register(&eta_updateCheck, "eta_updateCheck", "1", CVAR_ARCHIVE);
+@@ -5072,6 +5126,10 @@ static void UI_AccessibilityUpdateStartCheck(qboolean manual)
+ 	{
+ 		UI_AccessibilityUpdateSay("The update check could not start.");
+ 	}
++	else
++	{
++		UI_AccessibilityStartupSay("Could not check for updates.");
++	}
+ }
+ 
+ static void UI_AccessibilityUpdateChecked(void)
+@@ -5092,19 +5150,32 @@ static void UI_AccessibilityUpdateChecked(void)
+ 		UI_AccessibilityUpdateSay("The release page did not say which version is newest. Try again later.");
+ 		return;
+ 	}
++	else
++	{
++		UI_AccessibilityStartupSay("Could not check for updates.");
++		return;
++	}
+ 
+ 	if (offer == ETA_UPDATE_NONE)
+ 	{
++		char version[ETA_UPDATE_MAX_VERSION_LENGTH + 1];
++
++		/* At start-up too: the tester asked to hear it every time. */
++		ETA_Update_SpokenVersion(ETA_Update_InstalledVersion(), version, sizeof(version));
+ 		if (etaUpdate.manual)
+ 		{
+-			char version[ETA_UPDATE_MAX_VERSION_LENGTH + 1];
+-
+-			ETA_Update_SpokenVersion(ETA_Update_InstalledVersion(), version, sizeof(version));
+-			UI_AccessibilityUpdateSay(va("You have the newest version, %s.", version));
++			UI_AccessibilityUpdateSay(va("You have the latest version, %s.", version));
++		}
++		else
++		{
++			UI_AccessibilityStartupSay(va("You have the latest version, %s.", version));
+ 		}
+ 		return;
+ 	}
+ 
++	/* The offer itself is where the player is now: the popup reads it. */
++	etaMenuTitle[0] = '\0';
++
+ 	ETA_Update_DescribeOffer(offer, &etaUpdate.manifest, ETA_Update_InstalledVersion(), words, sizeof(words));
+ 	trap_Cvar_Set("eta_updateMessage", words);
+ 	etaUpdate.popup = offer == ETA_UPDATE_INSTALL ? "eta_update_offer" : "eta_update_game";
+@@ -5143,15 +5214,17 @@ static void UI_AccessibilityUpdateFrame(void)
+ 	{
+ 		trap_Cvar_Update(&eta_updateCheck);
+ 
+-		/* Eight seconds in, so the offer does not talk over the menu
+-		   that has just been read out. */
++		/* As soon as the menus are up, and said: the tester asked to
++		   hear from the start whether there is a new version, and the
++		   menu's name waits for the answer. */
+ 		if (eta_updateCheck.integer && ETA_WindowsUpdate_Supported()
+ 		    && ETA_Update_IsReleaseBuild(ETA_Update_InstalledVersion())
+ 		    && trap_Cvar_VariableValue("eta_updateAsked") == 0.f
+-		    && trap_Milliseconds() - etaUpdate.startTime > 8000
++		    && trap_Milliseconds() - etaUpdate.startTime > ETA_UPDATE_STARTUP_DELAY_MS
+ 		    && UI_AccessibilityAtMenus())
+ 		{
+ 			trap_Cvar_Set("eta_updateAsked", "1");
++			UI_AccessibilityUpdateSay("Checking for updates.");
+ 			UI_AccessibilityUpdateStartCheck(qfalse);
+ 		}
+ 	}
+@@ -5172,6 +5245,10 @@ static void UI_AccessibilityUpdateFrame(void)
+ 			   the same way as no connection at all. */
+ 			UI_AccessibilityUpdateSay("The release page could not be reached. Check the internet connection, and try again later.");
+ 		}
++		else
++		{
++			UI_AccessibilityStartupSay("Could not check for updates.");
++		}
+ 	}
+ 	else if (etaUpdate.stage == ETA_UPDATE_STAGE_DOWNLOADING && state != ETA_WINDOWS_UPDATE_BUSY)
+ 	{
+@@ -5688,6 +5765,9 @@ void UI_RunMenuScript(char **args)
+ 				Menus_CloseAll();
+ 				Menus_ActivateByName("backgroundmusic", qtrue);
+ 				Menus_ActivateByName("main_opener", qtrue);
++#ifdef FEATURE_ACCESSIBILITY
++				UI_AccessibilitySayMenu("Main menu");
++#endif
+ 			}
+ 		}
+ 		else if (Q_stricmp(name, "ServerSort") == 0)
+@@ -9774,6 +9854,9 @@ void UI_SetActiveMenu(uiMenuCommand_t menu)
+ 			Menus_CloseAll();
+ 			Menus_ActivateByName("backgroundmusic", qtrue); // not nice, but best way to do it - putting the music in it's own menudef
+ 			Menus_ActivateByName("main_opener", qtrue);
++#ifdef FEATURE_ACCESSIBILITY
++			UI_AccessibilitySayMenu("Main menu");
++#endif
+ 
+ 			trap_Cvar_VariableStringBuffer("com_errorMessage", buf, sizeof(buf));
+ 
+@@ -9857,6 +9940,9 @@ void UI_SetActiveMenu(uiMenuCommand_t menu)
+ 			Menu_SetFeederSelection(NULL, FEEDER_PLAYER_LIST, 0, NULL);
+ 			Menus_CloseAll();
+ 			Menus_ActivateByName("ingame_main", qtrue);
++#ifdef FEATURE_ACCESSIBILITY
++			UI_AccessibilitySayMenu("In-game menu");
++#endif
+ 			return;
+ 
+ 		case UIMENU_WM_QUICKMESSAGE:

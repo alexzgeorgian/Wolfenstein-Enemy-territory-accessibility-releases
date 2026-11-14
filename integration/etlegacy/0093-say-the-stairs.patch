@@ -1,0 +1,182 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 203db07..8df00f5 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2993,6 +2993,8 @@ typedef struct
+ 	qboolean overEdge;    /* steer is across a jump or up a ladder */
+ 	qboolean onWay;       /* steer is the way's next point, from on the way */
+ 	qboolean jumps;       /* this search may jump: there was no way without */
++	vec3_t   stairsAt;    /* the foot of the stairs last told of */
++	qboolean saidStairs;
+ } eta_route_t;
+ 
+ static eta_route_t eta_route;
+@@ -3478,6 +3480,33 @@ static void ETA_RouteForget(void)
+ 	memset(&eta_route, 0, sizeof(eta_route));
+ }
+ 
++/**
++ * @brief ", press space": the key the player jumps with, for the jump
++ * callout. Nothing when jump is on no key.
++ */
++static const char *ETA_RouteJumpKey(void)
++{
++	static char text[48];
++	char        name[32];
++	int         key = trap_Key_GetKey("+moveup");
++
++	if (key < 0)
++	{
++		return "";
++	}
++
++	name[0] = '\0';
++	trap_Key_KeynumToStringBuf(key, name, sizeof(name));
++	if (!name[0])
++	{
++		return "";
++	}
++
++	Q_strlwr(name);
++	Com_sprintf(text, sizeof(text), ", press %s", name);
++	return text;
++}
++
+ /**
+  * @brief "Jump up, ahead", once, as the player comes to a jump on the way.
+  *
+@@ -3514,8 +3543,124 @@ static void ETA_RouteSayJump(int special, int count, const vec3_t here)
+ 	eta_route.saidJump = special;
+ 
+ 	ETA_Speech_BeginReport();
+-	ETA_Speech_Say(va("%s, %s", landing[2] > edge[2] + 8.0f ? "Jump up" : "Jump over",
+-	                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(landing))));
++	ETA_Speech_Say(va("%s, %s%s", landing[2] > edge[2] + 8.0f ? "Jump up" : "Jump over",
++	                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(landing)),
++	                  ETA_RouteJumpKey()));
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief "Stairs up, ahead left", once, as the player comes to stairs.
++ *
++ * The tester could not get up to the Allied command post on Oasis, and
++ * asked to be told where the stairs are and which way they go, and when
++ * it is not stairs, that it is a jump and which key. The way already
++ * climbs the stairs, square by square, and the ping follows it; but the
++ * ping alone says only which way, not that the next few metres go up a
++ * flight - and a player who does not know it walks into the bottom step
++ * at an angle, or along it. So within a few metres of the foot of a
++ * climb on the way, it is said: stairs, or a ramp, up or down, which way
++ * they go from where the player faces, and how high.
++ */
++#define ETA_ROUTE_STAIRS_SAY    160.0f   /* this near the foot: told, about 4 metres */
++#define ETA_ROUTE_STAIRS_LOOK   12       /* points ahead looked at for a climb, about 10 metres */
++#define ETA_ROUTE_STAIRS_RISE   48.0f    /* this much up or down within four steps: a climb */
++#define ETA_ROUTE_STAIRS_HEIGHT 64.0f    /* and this much in all: worth saying */
++
++static void ETA_RouteSayStairs(int nearest, int special, const vec3_t here)
++{
++	vec3_t a, b, top, delta;
++	int    i, foot = -1, end, risers = 0, slopes = 0;
++	float  climb;
++
++	for (i = nearest; i + 4 < special && i < nearest + ETA_ROUTE_STAIRS_LOOK; i++)
++	{
++		ETA_PathFinder_Point(i, a);
++		ETA_PathFinder_Point(i + 4, b);
++
++		if (fabsf(b[2] - a[2]) >= ETA_ROUTE_STAIRS_RISE)
++		{
++			foot = i;
++			break;
++		}
++	}
++
++	if (foot < 0)
++	{
++		return;
++	}
++
++	/* Up the climb until it levels off or turns back. */
++	ETA_PathFinder_Point(foot, a);
++	climb = 0.0f;
++	for (end = foot + 1; end < special; end++)
++	{
++		float step;
++
++		ETA_PathFinder_Point(end - 1, b);
++		ETA_PathFinder_Point(end, top);
++		step = top[2] - b[2];
++
++		if ((climb > 0.0f && step < -2.0f) || (climb < 0.0f && step > 2.0f))
++		{
++			break;
++		}
++		if (fabsf(step) < 0.5f && end - foot > 4)
++		{
++			/* Level for two squares: the landing. */
++			vec3_t next;
++
++			if (end + 1 >= special)
++			{
++				break;
++			}
++			ETA_PathFinder_Point(end + 1, next);
++			if (fabsf(next[2] - top[2]) < 0.5f)
++			{
++				break;
++			}
++		}
++
++		climb += step;
++		if (fabsf(step) >= 8.0f)
++		{
++			risers++;
++		}
++		else if (fabsf(step) >= 0.5f)
++		{
++			slopes++;
++		}
++	}
++	ETA_PathFinder_Point(end - 1, top);
++
++	if (fabsf(top[2] - a[2]) < ETA_ROUTE_STAIRS_HEIGHT)
++	{
++		return;
++	}
++
++	VectorSubtract(a, here, delta);
++	delta[2] = 0.0f;
++	if (VectorLength(delta) > ETA_ROUTE_STAIRS_SAY)
++	{
++		return;
++	}
++
++	/* The same flight is said once; a new search finds its foot again a
++	   square or two off. */
++	if (eta_route.saidStairs && Distance(eta_route.stairsAt, a) < 128.0f)
++	{
++		return;
++	}
++	eta_route.saidStairs = qtrue;
++	VectorCopy(a, eta_route.stairsAt);
++
++	ETA_PathFinder_Point(MIN(foot + 3, end - 1), b);
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(va("%s %s, %s, %d meters", risers >= slopes ? "Stairs" : "Ramp",
++	                  top[2] > a[2] ? "up" : "down",
++	                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(b)),
++	                  (int)(fabsf(top[2] - a[2]) * ETA_QU_TO_METERS + 0.5f)));
+ 	ETA_Speech_EndReport();
+ }
+ 
+@@ -3596,6 +3741,7 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 	}
+ 
+ 	ETA_RouteSayJump(special, count, here);
++	ETA_RouteSayStairs(nearest, special, here);
+ 
+ 	/* The furthest point a few steps on that can be walked to straight. */
+ 	best = nearest;

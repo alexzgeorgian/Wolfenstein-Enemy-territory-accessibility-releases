@@ -1,0 +1,82 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 4d69ed3..204e2d5 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4864,6 +4864,66 @@ static void ETA_NarrateZoom( void ) {
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * How far out the lean has to travel before it counts as leaning.
++ *
++ * leanf is an offset in Quake units that eases in and out, so it spends
++ * time near zero on the way to and from cover. A bare sign test would
++ * announce a lean the instant the key went down and again the instant it
++ * came up, several times over during a quick peek.
++ */
++#define ETA_LEAN_THRESHOLD 2.0f
++
++/**
++ * Says when the player leans out from cover and when they come back.
++ *
++ * Q and E are bound to +leanleft and +leanright in the stock config, and
++ * leaning is one of the few controls the engine silently refuses: it will
++ * not lean a player who is moving, firing, prone or mounted. So this
++ * reads leanf, which is what the lean actually did, and never the key -
++ * announcing the keypress would tell a player they are leaning out from
++ * behind a wall at exactly the moment they are not.
++ */
++static void ETA_NarrateLean( void ) {
++	static ETA_Lean spoken = (ETA_Lean) - 1;
++	const playerState_t *ps;
++	ETA_Lean lean;
++
++	if ( !cg.snap ) {
++		return;
++	}
++
++	ps = &cg.predictedPlayerState;
++
++	if ( ps->pm_type != PM_NORMAL ) {
++		spoken = (ETA_Lean) - 1;
++		return;
++	}
++
++	if ( ps->leanf > ETA_LEAN_THRESHOLD ) {
++		lean = ETA_LEAN_RIGHT;
++	} else if ( ps->leanf < -ETA_LEAN_THRESHOLD ) {
++		lean = ETA_LEAN_LEFT;
++	} else {
++		lean = ETA_LEAN_UPRIGHT;
++	}
++
++	if ( lean == spoken ) {
++		return;
++	}
++
++	/* Nothing to report on the first frame: a player who has not leaned
++	   yet does not need to be told they are upright. */
++	if ( spoken == (ETA_Lean) - 1 && lean == ETA_LEAN_UPRIGHT ) {
++		spoken = lean;
++		return;
++	}
++
++	spoken = lean;
++
++	ETA_HudNarrator_SpeakLean( lean );
++}
++
+ /**
+  * Says which way the player is facing when it changes.
+  *
+@@ -5102,6 +5162,10 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 	ETA_NarrateObstacleAhead();
+ 
+ 	ETA_NarrateFacing();
++
++	/* Alongside the stance, and for the same reason: both are things the
++	   engine can refuse without saying so. */
++	ETA_NarrateLean();
+ #endif
+ 
+ 	if ( !cg.showGameView ) {

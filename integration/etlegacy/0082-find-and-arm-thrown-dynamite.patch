@@ -1,0 +1,252 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index a4fe612..a58cc99 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4290,6 +4290,40 @@ static void ETA_PlayerAimPoint(const centity_t *cent, vec3_t out)
+ 	}
+ }
+ 
++/* What dynamite on the ground is to this player: the team's own not yet
++   armed, to arm, or an enemy's ticking, to defuse. The game lets an
++   engineer work either with pliers; the rest - the team's own ticking,
++   an enemy's never armed - is nothing to do. effect1Time is stamped when
++   the dynamite is armed (G_ArmDynamite), and is what starts its tick. */
++typedef enum
++{
++	ETA_DYNAMITE_NONE,
++	ETA_DYNAMITE_TO_ARM,
++	ETA_DYNAMITE_TO_DEFUSE
++} etaDynamite_t;
++
++static etaDynamite_t ETA_DynamiteUse(const entityState_t *es)
++{
++	const team_t team = cgs.clientinfo[cg.clientNum].team;
++
++	if (es->eType != ET_MISSILE || es->weapon != WP_DYNAMITE
++	    || (team != TEAM_AXIS && team != TEAM_ALLIES))
++	{
++		return ETA_DYNAMITE_NONE;
++	}
++
++	if (es->teamNum == team)
++	{
++		return es->effect1Time ? ETA_DYNAMITE_NONE : ETA_DYNAMITE_TO_ARM;
++	}
++
++	return es->effect1Time ? ETA_DYNAMITE_TO_DEFUSE : ETA_DYNAMITE_NONE;
++}
++
++/* Where to aim at dynamite: a little above where it lies, the middle of
++   the box the pliers reach for. */
++#define ETA_DYNAMITE_AIM_LIFT 6.0f
++
+ /**
+  * @brief The things close by the player could use, nearest first.
+  *
+@@ -4297,7 +4331,8 @@ static void ETA_PlayerAimPoint(const centity_t *cent, vec3_t out)
+  * player - a construction to build, an enemy one to blow up - and the
+  * things the game draws a use icon for: a door, a health or ammo
+  * cabinet, a mounted gun, something on the ground, a wounded teammate,
+- * and for a covert op an enemy body with its uniform on. Everything but
++ * for an engineer dynamite to arm or defuse, and for a covert op an
++ * enemy body with its uniform on. Everything but
+  * an objective must be in sight; an objective's own marker sits where
+  * the engine puts it, often inside what it marks.
+  */
+@@ -4308,6 +4343,7 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 	const playerState_t *ps   = &cg.predictedPlayerState;
+ 	const team_t        team  = cgs.clientinfo[cg.clientNum].team;
+ 	qboolean            covert = (qboolean)(ps->stats[STAT_PLAYER_CLASS] == PC_COVERTOPS);
++	qboolean            engineer = (qboolean)(ps->stats[STAT_PLAYER_CLASS] == PC_ENGINEER);
+ 	vec3_t              eye;
+ 	int                 count = 0, i;
+ 
+@@ -4386,6 +4422,24 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 			           sizeof(target.name));
+ 			target.point[2] -= 16.0f;
+ 			break;
++		case ET_MISSILE:
++		{
++			/* The tester threw their dynamite and could not arm it, not
++			   knowing where it had rolled. Dynamite is sent to every
++			   player wherever it is, so it is only listed in sight. */
++			etaDynamite_t use = ETA_DynamiteUse(es);
++
++			if (!engineer || use == ETA_DYNAMITE_NONE)
++			{
++				continue;
++			}
++			Q_strncpyz(target.name,
++			           use == ETA_DYNAMITE_TO_DEFUSE ? "Enemy dynamite, armed"
++			           : es->clientNum == ps->clientNum ? "Your dynamite, not armed" : "Dynamite, not armed",
++			           sizeof(target.name));
++			target.point[2] += ETA_DYNAMITE_AIM_LIFT;
++			break;
++		}
+ 		case ET_CORPSE:
+ 			if (!covert || (es->modelindex != TEAM_AXIS && es->modelindex != TEAM_ALLIES)
+ 			    || es->modelindex == team || es->time2 == 1)
+@@ -5884,6 +5938,87 @@ qboolean CG_AccessibilityLadderNear(etaLadder_t *out)
+ 	return qfalse;
+ }
+ 
++/**
++ * @brief Says where the player's own dynamite came to rest.
++ *
++ * Dynamite is thrown, not placed: it leaves the hand low and rolls, and
++ * all the game says is "Dynamite is set, but NOT armed!" - true, and no
++ * help to a player who cannot see where it went. The tester could not
++ * arm theirs for not knowing where it had fallen. So once it stops, where
++ * it lies is said, once; F then turns to it (CG_AccessibilityUseTargets)
++ * and the pliers' hint says "arm" over it.
++ *
++ * Each throw is told apart by its entity and the time it came to rest,
++ * which the server stamps when it stops (G_BounceMissile).
++ */
++#define ETA_DYNAMITE_REMEMBERED 8
++
++static void ETA_NarrateDynamiteDown(void)
++{
++	static struct
++	{
++		int number;
++		int time;
++	} said[ETA_DYNAMITE_REMEMBERED];
++	static int          next;
++	const playerState_t *ps = &cg.predictedPlayerState;
++	int                 i, j;
++
++	if (!cg.snap || ps->stats[STAT_PLAYER_CLASS] != PC_ENGINEER)
++	{
++		return;
++	}
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		vec3_t              point, flat;
++		int                 meters;
++
++		if (ETA_DynamiteUse(es) != ETA_DYNAMITE_TO_ARM || es->clientNum != ps->clientNum
++		    || es->pos.trType != TR_STATIONARY)
++		{
++			continue;
++		}
++
++		for (j = 0; j < ETA_DYNAMITE_REMEMBERED; j++)
++		{
++			if (said[j].number == es->number && said[j].time == es->time)
++			{
++				break;
++			}
++		}
++
++		if (j < ETA_DYNAMITE_REMEMBERED)
++		{
++			continue;
++		}
++
++		said[next].number = es->number;
++		said[next].time   = es->time;
++		next              = (next + 1) % ETA_DYNAMITE_REMEMBERED;
++
++		/* Along the ground: the dynamite is at the feet, the player's
++		   origin is not. */
++		VectorCopy(cg_entities[es->number].lerpOrigin, point);
++		VectorSubtract(point, ps->origin, flat);
++		flat[2] = 0.0f;
++		meters  = (int)(VectorLength(flat) * ETA_QU_TO_METERS + 0.5f);
++
++		if (meters < 1)
++		{
++			ETA_Speech_Say("Dynamite down at your feet, not armed. Take pliers and press F");
++		}
++		else
++		{
++			ETA_Speech_Say(va("Dynamite down, %d %s %s, not armed. Take pliers and press F", meters,
++			                  meters == 1 ? "meter" : "meters",
++			                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(point))));
++		}
++		return;
++	}
++}
++
+ /**
+  * @brief Says a ladder once, as the player comes to it.
+  *
+@@ -6211,6 +6346,49 @@ static void ETA_NarrateStanceChange(void)
+ 	ETA_HudNarrator_SpeakStance(stance);
+ }
+ 
++/**
++ * @brief The dynamite under the crosshair, as the pliers would find it.
++ *
++ * The nearest in front of the eye and within the pliers' reach, give or
++ * take the size of its box - the hint itself does not say which entity
++ * it is about.
++ */
++static etaDynamite_t ETA_DynamiteAhead(void)
++{
++	vec3_t        eye, forward, to;
++	float         best  = CH_BREAKABLE_DIST + 32.0f;
++	etaDynamite_t found = ETA_DYNAMITE_NONE;
++	int           i;
++
++	ETA_AimEye(eye);
++	AngleVectors(cg.predictedPlayerState.viewangles, forward, NULL, NULL);
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		float               distance;
++
++		if (es->eType != ET_MISSILE || es->weapon != WP_DYNAMITE)
++		{
++			continue;
++		}
++
++		VectorSubtract(cg_entities[es->number].lerpOrigin, eye, to);
++		to[2]   += ETA_DYNAMITE_AIM_LIFT;
++		distance = VectorNormalize(to);
++
++		if (distance > best || DotProduct(to, forward) < 0.7f)
++		{
++			continue;
++		}
++
++		best  = distance;
++		found = ETA_DynamiteUse(es);
++	}
++
++	return found;
++}
++
+ /**
+  * @brief Narrates a newly shown (or newly different) interaction hint icon
+  * for the accessibility audio cue system.
+@@ -6603,6 +6781,14 @@ static void ETA_NarrateInteractionHint(void)
+ 		return;
+ 	}
+ 
++	/* G_CheckForCursorHints sends the defuse icon for any dynamite an
++	   engineer looks at, the team's own too - which is there to be
++	   armed, and "defuse" over it says the opposite. */
++	if (what == ETA_INTERACT_DISARM && ETA_DynamiteAhead() == ETA_DYNAMITE_TO_ARM)
++	{
++		what = ETA_INTERACT_ARM_DYNAMITE;
++	}
++
+ 	/* The same number CG_DrawCursorHintBar draws, on the same condition
+ 	   it draws it: how far a construction has got, how much is left of a
+ 	   breakable. Without it "pliers, build here" is the same sentence
+@@ -9393,6 +9579,10 @@ void CG_DrawActive()
+ 	/* The scoreboard the player asked for, once the whole of it is in. */
+ 	CG_AccessibilityScoresFrame();
+ 
++	/* Where the dynamite just thrown came to rest: the answer to the
++	   throw, and the one way to know where to arm it. */
++	ETA_NarrateDynamiteDown();
++
+ 	/* The scenery stands down while an answer the player asked for is
+ 	   still being spoken.
+ 

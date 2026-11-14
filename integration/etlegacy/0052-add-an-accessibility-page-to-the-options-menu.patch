@@ -1,0 +1,99 @@
+diff --git a/src/ui/ui_atoms.c b/src/ui/ui_atoms.c
+index 3be689c..1dca3be 100644
+--- a/src/ui/ui_atoms.c
++++ b/src/ui/ui_atoms.c
+@@ -210,6 +210,12 @@ static uiConsoleCommand_t commands[] =
+ 	{ "accessibilityRepeatMenuItem",  UI_AccessibilityRepeat_f     },
+ 	{ "accessibilityStopSpeech",      UI_AccessibilityStopSpeech_f },
+ 	{ "accessibilityStopSpeechMenu",  UI_AccessibilityStopSpeech_f },
++	/* Not a key a player binds - it is how "reset controls to default"
++	   puts the mod's own binds back, queued behind the config exec that
++	   would otherwise have taken them away for good. Reachable from the
++	   console too, which is the only way back for anyone who reset their
++	   controls on an earlier build. */
++	{ "accessibilityInstallBinds",    UI_AccessibilityInstallBinds },
+ #endif
+ 
+ 	{ NULL,            NULL,                    },
+diff --git a/src/ui/ui_local.h b/src/ui/ui_local.h
+index 5cecb3f..6f7f2f1 100644
+--- a/src/ui/ui_local.h
++++ b/src/ui/ui_local.h
+@@ -774,4 +774,13 @@ typedef struct
+ 	void (*function)(void);
+ } uiConsoleCommand_t;
+ 
++
++#ifdef FEATURE_ACCESSIBILITY
++/* Offers the mod's own key binds, skipping any generation the player has
++   already been offered. Called at startup, and again from the console
++   command of the same name after the controls are reset to defaults -
++   which execs the stock config and drops every bind this mod added. */
++void UI_AccessibilityInstallBinds(void);
++#endif
++
+ #endif
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index b9e68e4..67a9da0 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -1559,6 +1559,25 @@ void UI_LoadMenus(const char *menuFile, qboolean reset)
+ 		}
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* The mod's own page, added after the game's own list rather than by
++	   shipping a copy of that list.
++
++	   ui/menus.txt names all eighty-odd menu files, so a copy of it in
++	   the mod's pk3 would shadow the real one and quietly freeze the set
++	   of menus at whatever the engine shipped the day this was written -
++	   a menu added upstream would simply stop loading, with nothing
++	   anywhere to say why. Parsing one extra file here adds a page and
++	   shadows nothing.
++
++	   A missing file is not an error worth failing over: UI_ParseMenu
++	   prints its own complaint, the rest of the menus are already loaded
++	   by this point, and a player whose pk3 is half-installed is better
++	   off with a game that runs. */
++	UI_ParseMenu("ui/options_accessibility.menu");
++	UI_ParseMenu("ui/options_controls_accessibility.menu");
++#endif
++
+ 	Com_DPrintf("UI menu load time = %d milli seconds\n", trap_Milliseconds() - start);
+ 
+ 	trap_PC_FreeSource(handle);
+@@ -6472,6 +6491,24 @@ void UI_RunMenuScript(char **args)
+ 		{
+ 			int ui_handedness = (int)(trap_Cvar_VariableValue("ui_handedness"));
+ 
++#ifdef FEATURE_ACCESSIBILITY
++			/* Resetting the controls execs the stock config, which binds
++			   every key the game ships with and drops every key it does
++			   not - including all of this mod's. Without what follows
++			   they are gone permanently: the installer records which
++			   generation of binds a player has been offered, and having
++			   offered them once it never offers them again, so a single
++			   press of DEFAULT would silently take the status key, the
++			   map survey and the look keys away for good.
++
++			   Forgetting which generation was offered is what makes them
++			   come back. The exec is queued rather than immediate, so
++			   the re-offer is queued behind it - doing it here and now
++			   would write binds that the config then overwrote. */
++			trap_Cvar_Set("eta_bindsInstalled", "0");
++			trap_Cmd_ExecuteText(EXEC_APPEND, "accessibilityInstallBinds\n");
++#endif
++
+ 			if (ui_handedness == 0)
+ 			{
+ 				// exec default.cfg
+@@ -8777,7 +8814,7 @@ static void UI_RunCinematicFrame(int handle)
+  * than it is as a dead weapon bank. Only those exact commands are replaced,
+  * and a test holds the engine to still making them dead.
+  */
+-static void UI_AccessibilityInstallBinds(void)
++void UI_AccessibilityInstallBinds(void)
+ {
+ 	static const struct
+ 	{

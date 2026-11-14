@@ -1,0 +1,66 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 908664e..e552d8a 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -31,6 +31,10 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#endif
++
+ #define STATUSBARHEIGHT 452
+ char* BindingFromName( const char *cvar );
+ void Controls_GetConfig( void );
+@@ -2631,6 +2635,39 @@ int CG_CalculateReinfTime( qboolean menu ) {
+ }
+ 
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Narrates the same reinforcement countdown CG_DrawLimboMessage (below)
++ * is about to draw as "Reinforcements deploy in %d seconds.", via
++ * CG_CalculateReinfTime(qfalse) - the exact same call the on-screen text
++ * uses, so what's spoken always matches what's on screen. Like the
++ * on-screen text, stays silent once persistant[PERS_RESPAWNS_LEFT] hits 0
++ * ("No more reinforcements this round.").
++ *
++ * The countdown recomputes fresh from elapsed time every frame rather
++ * than being driven by a discrete state transition, so this does its own
++ * edge detection with a static local, narrating only when the integer
++ * actually changes - the same approach ET: Legacy's own respawn-timer
++ * patch uses for its equivalent HUD component.
++ */
++static void ETA_NarrateRespawnTimer( playerState_t *ps ) {
++	static int lastNarratedSeconds = -1;
++	int seconds;
++
++	if ( ps->persistant[PERS_RESPAWNS_LEFT] == 0 ) {
++		lastNarratedSeconds = -1;
++		return;
++	}
++
++	seconds = CG_CalculateReinfTime( qfalse );
++
++	if ( seconds != lastNarratedSeconds ) {
++		ETA_HudNarrator_SpeakRespawn( seconds );
++		lastNarratedSeconds = seconds;
++	}
++}
++#endif
++
+ /*
+ =================
+ CG_DrawLimboMessage
+@@ -2656,6 +2693,10 @@ static void CG_DrawLimboMessage( void ) {
+ 		return;
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_NarrateRespawnTimer( ps );
++#endif
++
+ 	if ( cg_descriptiveText.integer ) {
+ 		str = CG_TranslateString( "You are wounded and waiting for a medic." );
+ 		CG_DrawSmallStringColor( INFOTEXT_STARTX, y, str, color );

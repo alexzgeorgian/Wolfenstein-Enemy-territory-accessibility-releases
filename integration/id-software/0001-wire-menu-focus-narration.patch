@@ -1,0 +1,27 @@
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 1fd509f..370c79a 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -32,6 +32,9 @@ If you have questions concerning this license or the applicable additional terms
+ #include "ui_shared.h"
+ #include "ui_local.h"    // For CS settings/retrieval
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "menu/menu_narrator.h"
++#endif
+ 
+ #define SCROLL_TIME_START                   500
+ #define SCROLL_TIME_ADJUST              150
+@@ -2041,6 +2044,12 @@ qboolean Item_SetFocus( itemDef_t *item, float x, float y ) {
+ 		DC->startLocalSound( *sfx, CHAN_LOCAL_SOUND );
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	if ( item->window.flags & WINDOW_HASFOCUS ) {
++		ETA_MenuNarrator_OnFocusChanged( parent ? parent->window.name : NULL, item->text );
++	}
++#endif
++
+ 	for ( i = 0; i < parent->itemCount; i++ ) {
+ 		if ( parent->items[i] == item ) {
+ 			parent->cursorItem = i;

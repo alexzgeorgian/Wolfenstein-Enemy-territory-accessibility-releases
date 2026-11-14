@@ -1,0 +1,203 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index b21a555..7faf31a 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1020,6 +1020,62 @@ static void CG_AccessibilityStopSpeech_f( void ) {
+ 	ETA_Speech_Stop();
+ }
+ 
++/**
++ * Speaks where the team's nearest objective is: how far off, and which way
++ * to turn for it.
++ *
++ * Shared by the status report and the stuck detector, so the two cannot
++ * drift into describing the same objective differently. The caller opens
++ * the speech report; this only contributes parts to it.
++ *
++ * The bearing uses AngleSubtract - the same helper cg_draw.c's mortar
++ * reticle already uses to express one yaw relative to another - because a
++ * signed [-180, 180] "which way to turn" value reads more naturally as
++ * spoken text than a 0-359 compass bearing does. The +-15 degree "ahead"
++ * band is a judgment call, not a value found anywhere in this engine.
++ */
++void CG_AccessibilityNarrateObjective( void ) {
++	playerState_t *ps;
++	vec3_t objectiveOrigin;
++	vec3_t delta, angles;
++	float relativeYaw;
++
++	if ( !cg.snap ) {
++		return;
++	}
++
++	ps = &cg.snap->ps;
++
++	if ( !ETA_NearestObjectiveOrigin( CG_LimboPanel_GetRealTeam(), ps->origin, objectiveOrigin ) ) {
++		/* Never silence: "no objective here" and "the mod has stopped
++		   working" must not sound the same. */
++		ETA_Speech_Say( "No current objective" );
++		return;
++	}
++
++	ETA_NavigationSystem_AnnounceDistance( (int)( Distance( ps->origin, objectiveOrigin ) * ETA_QU_TO_METERS ) );
++
++	VectorSubtract( objectiveOrigin, ps->origin, delta );
++	vectoangles( delta, angles );
++
++	/**
++	 * Yaw increases counterclockwise here, so a target to the player's
++	 * LEFT is at a *higher* yaw than the view: relativeYaw > 0 means
++	 * turn left, < 0 means turn right. Worth stating explicitly - this
++	 * is the one place in the integration where getting the sign
++	 * backwards produces working, confident, wrong directions.
++	 */
++	relativeYaw = AngleSubtract( angles[YAW], ps->viewangles[YAW] );
++
++	if ( fabs( relativeYaw ) <= 15.0f ) {
++		ETA_NavigationSystem_AnnounceRouteCorrection( "Objective is ahead" );
++	} else if ( relativeYaw > 0.0f ) {
++		ETA_NavigationSystem_AnnounceRouteCorrection( "Turn left toward the objective" );
++	} else {
++		ETA_NavigationSystem_AnnounceRouteCorrection( "Turn right toward the objective" );
++	}
++}
++
+ /**
+  * On-demand "query basic match state" command for the accessibility HUD
+  * narrator (Milestone 4's exit condition). Bindable to a key; narrates
+@@ -1046,7 +1102,6 @@ static void CG_AccessibilityStopSpeech_f( void ) {
+ static void CG_AccessibilityStatus_f( void ) {
+ 	playerState_t *ps = &cg.snap->ps;
+ 	gitem_t *item;
+-	vec3_t objectiveOrigin;
+ 
+ 	ETA_HudNarrator_SpeakHealth( ps->stats[STAT_HEALTH] );
+ 
+@@ -1085,44 +1140,7 @@ static void CG_AccessibilityStatus_f( void ) {
+ 		}
+ 	}
+ 
+-	if ( ETA_NearestObjectiveOrigin( CG_LimboPanel_GetRealTeam(), ps->origin, objectiveOrigin ) ) {
+-		vec3_t delta, angles;
+-		float relativeYaw;
+-
+-		ETA_NavigationSystem_AnnounceDistance( (int)( Distance( ps->origin, objectiveOrigin ) * ETA_QU_TO_METERS ) );
+-
+-		VectorSubtract( objectiveOrigin, ps->origin, delta );
+-		vectoangles( delta, angles );
+-
+-		/**
+-		 * Yaw increases counterclockwise here, so a target to the player's
+-		 * LEFT is at a *higher* yaw than the view: relativeYaw > 0 means
+-		 * turn left, < 0 means turn right. Worth stating explicitly - this
+-		 * is the one place in the integration where getting the sign
+-		 * backwards produces working, confident, wrong directions.
+-		 */
+-		relativeYaw = AngleSubtract( angles[YAW], ps->viewangles[YAW] );
+-
+-		if ( fabs( relativeYaw ) <= 15.0f ) {
+-			ETA_NavigationSystem_AnnounceRouteCorrection( "Objective is ahead" );
+-		} else if ( relativeYaw > 0.0f ) {
+-			ETA_NavigationSystem_AnnounceRouteCorrection( "Turn left toward the objective" );
+-		} else {
+-			ETA_NavigationSystem_AnnounceRouteCorrection( "Turn right toward the objective" );
+-		}
+-
+-		/**
+-		 * The two objective audio cues, on the same request: an attention
+-		 * cue, then a directional one the player can simply turn toward.
+-		 * The bearing is view-relative in the same 0 = front, 90 = right,
+-		 * 180 = behind, 270 = left convention 0008's damage-direction cue
+-		 * uses - which is view yaw minus target yaw, not the other way
+-		 * round (see the README).
+-		 */
+-		ETA_AudioCueSystem_PlayObjectiveCue();
+-		ETA_AudioCueSystem_PlayObjectiveDirectionCue(
+-			(int)AngleNormalize360( ps->viewangles[YAW] - angles[YAW] ) );
+-	}
++	CG_AccessibilityNarrateObjective();
+ }
+ #endif
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 20aef11..749ed12 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2385,6 +2385,8 @@ int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo );
+  * cited external convention of 1 unit = 1 inch (0.0254 m) - a value from
+  * outside this source, not one derived from it.
+  */
++void CG_AccessibilityNarrateObjective( void );
++
+ #define ETA_QU_TO_METERS 0.0254f
+ 
+ qboolean ETA_NearestObjectiveOrigin( team_t team, const vec3_t from, vec3_t origin );
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index fa47a56..43080f9 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -39,6 +39,7 @@ If you have questions concerning this license or the applicable additional terms
+ #include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ /*
+@@ -550,9 +551,15 @@ static void ETA_ObjectiveOrientationCue( playerState_t *ps ) {
+ 
+ /**
+  * Feeds real per-frame movement into the accessibility navigation system's
+- * stuck detection (ETA_NavigationSystem_UpdateMovement), which narrates
+- * "You may be stuck" on its own once the player has stayed under its own
+- * movement threshold for long enough.
++ * stuck detection, and reports the way out when it fires.
++ *
++ * The player's own movement input gates the whole question. Without it
++ * this reported anyone who stood still for a few seconds, which in a
++ * shooter is most people most of the time - aiming, covering a doorway,
++ * waiting out a spawn. Being stuck is wanting to move and not moving.
++ * Leaning and jumping are left out deliberately: neither is an attempt to
++ * get anywhere, and someone jumping to free themselves from geometry is
++ * exactly who should still be told.
+  *
+  * Only runs while the player is on a playing team and actually able to
+  * move under their own control: PM_NORMAL is the only pm_type this
+@@ -560,18 +567,34 @@ static void ETA_ObjectiveOrientationCue( playerState_t *ps ) {
+  * being PM_DEAD, PM_SPECTATOR, PM_NOCLIP, PM_FREEZE and PM_INTERMISSION).
+  * Outside that, stuck detection is reset rather than fed zero movement, so
+  * time spent dead, spectating or between rounds can never itself count as
+- * being stuck, and so the reset CG_Respawn already does above isn't
+- * immediately re-armed by a stale timer from before death.
++ * being stuck.
++ *
++ * What gets said is where the objective is, not that the player is stuck:
++ * at the moment you cannot move, what helps is knowing where to go.
+  */
+ static void ETA_NarrateStuckDetection( playerState_t *ps, playerState_t *ops ) {
+ 	team_t team = (team_t)ps->persistant[PERS_TEAM];
++	usercmd_t cmd;
++	int trying;
+ 
+ 	if ( ( team != TEAM_AXIS && team != TEAM_ALLIES ) || ps->pm_type != PM_NORMAL ) {
+ 		ETA_NavigationSystem_ResetStuckDetection();
+ 		return;
+ 	}
+ 
+-	ETA_NavigationSystem_UpdateMovement( Distance( ps->origin, ops->origin ) * ETA_QU_TO_METERS, cg.frametime / 1000.0f );
++	if ( !trap_GetUserCmd( trap_GetCurrentCmdNumber(), &cmd ) ) {
++		ETA_NavigationSystem_ResetStuckDetection();
++		return;
++	}
++
++	trying = ( cmd.forwardmove != 0 || cmd.rightmove != 0 );
++
++	if ( ETA_NavigationSystem_UpdateMovement( Distance( ps->origin, ops->origin ) * ETA_QU_TO_METERS,
++											  cg.frametime / 1000.0f, trying ) ) {
++		ETA_Speech_BeginReport();
++		CG_AccessibilityNarrateObjective();
++		ETA_Speech_EndReport();
++	}
+ }
+ #endif
+ 

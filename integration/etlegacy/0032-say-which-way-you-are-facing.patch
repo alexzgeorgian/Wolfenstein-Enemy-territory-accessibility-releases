@@ -1,0 +1,117 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index bfa524e..bfb0781 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -541,6 +541,22 @@ void CG_AccessibilityNarrateObjective(void)
+ 	{
+ 		ETA_NavigationSystem_AnnounceRouteCorrection("Turn right toward the objective");
+ 	}
++
++	/* The two compass points together say how far round to turn, which
++	   "turn left" on its own never does: a player who hears they are
++	   facing south and the objective is north knows to keep turning past
++	   the point where a vaguer instruction would have them stop.
++	   `angles[YAW]` is already the objective's own world yaw, so both come
++	   out of the same conversion the compass uses. */
++	{
++		char compass[96];
++
++		Com_sprintf(compass, sizeof(compass), "Objective lies %s, you are facing %s",
++		            ETA_HudNarrator_FacingName(ETA_HudNarrator_FacingFromYaw(angles[YAW])),
++		            ETA_HudNarrator_FacingName(ETA_HudNarrator_FacingFromYaw(ps->viewangles[YAW])));
++
++		ETA_NavigationSystem_AnnounceRouteCorrection(compass);
++	}
+ }
+ 
+ /**
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index dd6fbd7..2252c66 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2533,6 +2533,44 @@ static void ETA_NarrateZoom(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief Says which way the player is facing when it changes.
++ *
++ * ET already draws this: the compass has a ring of cardinal points and
++ * the map can be locked north-up, and the direction is how a sighted
++ * player holds a route in their head between one landmark and the next.
++ *
++ * The conversion from view yaw lives in the shared library so both
++ * integrations say the same word for the same heading, and so it can be
++ * checked against the engine's own compass arithmetic without a game
++ * running. Getting this backwards would be the worst kind of failure
++ * this mod can have - confidently wrong, and wrong in the direction the
++ * player then walks.
++ *
++ * The library also owns the hysteresis, which is what keeps a player
++ * lining up on a doorway from hearing the direction flip back and forth.
++ */
++static void ETA_NarrateFacing(void)
++{
++	ETA_Facing facing;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_facingCallouts.integer)
++	{
++		ETA_HudNarrator_ResetFacing();
++		return;
++	}
++
++	/* Predicted rather than the snapshot's, for the same reason the
++	   stance is: turning is a local action and the snapshot lags it by a
++	   round trip, which on a direction is long enough to be felt. */
++	if (ETA_HudNarrator_UpdateFacing(cg.predictedPlayerState.viewangles[YAW], &facing))
++	{
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakFacing(facing);
++		ETA_Speech_EndReport();
++	}
++}
++
+ /**
+  * @brief How long the obstacle ahead stays announced before it is news again.
+  *
+@@ -5459,6 +5497,8 @@ void CG_DrawActive()
+ 	   other way round: while the binoculars are up they are the answer to
+ 	   this question. */
+ 	ETA_NarrateObstacleAhead();
++
++	ETA_NarrateFacing();
+ #endif
+ 
+ 	if (!cg.showGameView)
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 07f39ab..12bb970 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3414,6 +3414,7 @@ void CG_AccessibilitySampleTotals(void);
+ 
+ extern vmCvar_t eta_objectiveCallouts;
+ extern vmCvar_t eta_environmentCallouts;
++extern vmCvar_t eta_facingCallouts;
+ 
+ /**
+  * Quake units to meters, for the accessibility navigation system's
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index ed435c0..f01682f 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2189,6 +2189,7 @@ typedef struct
+  */
+ vmCvar_t eta_objectiveCallouts;
+ vmCvar_t eta_environmentCallouts;
++vmCvar_t eta_facingCallouts;
+ 
+ static eta_cueSound_t eta_cueSounds[] =
+ {
+@@ -2300,6 +2301,7 @@ static void ETA_InitAccessibility(void)
+ 
+ 	trap_Cvar_Register(&eta_objectiveCallouts, "eta_objectiveCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_environmentCallouts, "eta_environmentCallouts", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_facingCallouts, "eta_facingCallouts", "1", CVAR_ARCHIVE);
+ 
+ 	for (i = 0; i < sizeof(eta_cueSounds) / sizeof(eta_cueSounds[0]); i++)
+ 	{

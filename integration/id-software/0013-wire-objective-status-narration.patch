@@ -1,0 +1,145 @@
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index e4511ec..20aef11 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2388,6 +2388,7 @@ int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo );
+ #define ETA_QU_TO_METERS 0.0254f
+ 
+ qboolean ETA_NearestObjectiveOrigin( team_t team, const vec3_t from, vec3_t origin );
++int ETA_TeamObjectiveNames( team_t team, const char **names, int maxNames );
+ #endif
+ void CG_CenterPrint( const char *str, int y, int charWidth );
+ void CG_PriorityCenterPrint( const char *str, int y, int charWidth, int priority );     // NERVE - SMF
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 16f53d2..389e1b4 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -915,6 +915,63 @@ qboolean ETA_NearestObjectiveOrigin( team_t team, const vec3_t from, vec3_t origin ) {
+ 
+ 	return found;
+ }
++
++/**
++ * Collects the display names of team's objectives into names, up to
++ * maxNames of them, and returns how many were filled in. The pointers are
++ * into cgs.oidInfo[], which lives as long as the map does.
++ *
++ * Same list and same team filter as ETA_NearestObjectiveOrigin above, and
++ * the names are resolved the way CG_DrawMapEntity resolves them for the
++ * command map's own hover label (`name = oidInfo->name`) - note it indexes
++ * cgs.oidInfo[] differently per type, through the entity's modelindex2 for
++ * the constructible/destructible types but through mEnt->data directly for
++ * tanks, so both are mirrored rather than unified. Entries whose oidInfo
++ * has no name are skipped: an objective the client has no name for yet is
++ * nothing to say out loud.
++ *
++ * This is deliberately the whole list rather than one "main" objective:
++ * this release has no such concept (see the README), so the honest spoken
++ * equivalent of the command map is every objective it would draw.
++ */
++int ETA_TeamObjectiveNames( team_t team, const char **names, int maxNames ) {
++	int i;
++	int count = 0;
++
++	for ( i = 0; i < mapEntityCount && count < maxNames; i++ ) {
++		mapEntityData_t *mEnt = &mapEntities[i];
++		int oid;
++
++		if ( mEnt->team != team ) {
++			continue;
++		}
++
++		// mEnt->data is server-supplied, so range-check it before indexing
++		if ( mEnt->data < 0 || mEnt->data >= MAX_GENTITIES ) {
++			continue;
++		}
++
++		if ( mEnt->type == ME_CONSTRUCT || mEnt->type == ME_DESTRUCT || mEnt->type == ME_DESTRUCT_2 ) {
++			oid = cg_entities[mEnt->data].currentState.modelindex2;
++		} else if ( mEnt->type == ME_TANK || mEnt->type == ME_TANK_DEAD ) {
++			oid = mEnt->data;
++		} else {
++			continue;
++		}
++
++		if ( oid < 0 || oid >= MAX_OID_TRIGGERS ) {
++			continue;
++		}
++
++		if ( !cgs.oidInfo[oid].name[0] ) {
++			continue;
++		}
++
++		names[count++] = cgs.oidInfo[oid].name;
++	}
++
++	return count;
++}
+ #endif
+ 
+ void CG_DrawMap( float x, float y, float w, float h, int mEntFilter, mapScissor_t *scissor, qboolean interactive, float alpha, qboolean borderblend ) {
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 06c463f..c326626 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -37,6 +37,7 @@ If you have questions concerning this li
+ #include "cg_local.h"
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++#include "core/runtime_guard.h"
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
+ #endif
+@@ -947,12 +948,18 @@ static void CG_CPM_f( void ) {
+ /**
+  * On-demand "query basic match state" command for the accessibility HUD
+  * narrator (Milestone 4's exit condition). Bindable to a key; narrates
+- * health, the active weapon, and its ammo - plus, per Milestone 6, the
+- * distance to the nearest objective and a turn-left/right/ahead route
+- * correction toward it - in one status report rather than announcing any
+- * of it automatically, since health/ammo change too often during combat,
+- * and a walking player's bearing to an objective changes too continuously,
+- * for that to be anything but noise.
++ * health, the active weapon, its ammo and the team's objectives - plus,
++ * per Milestone 6, the distance to the nearest objective and a
++ * turn-left/right/ahead route correction toward it - in one status report
++ * rather than announcing any of it automatically, since health/ammo change
++ * too often during combat, and a walking player's bearing to an objective
++ * changes too continuously, for that to be anything but noise.
++ *
++ * The objective list is every objective the command map would draw for
++ * this team, in the order it holds them, because this release has no
++ * "main objective" to single out (see the README). On demand is also what
++ * makes reading the whole list reasonable: it is the spoken equivalent of
++ * a sighted player glancing at the command map, not a running commentary.
+  *
+  * The bearing uses AngleSubtract - the same helper cg_draw.c's mortar
+  * reticle already uses to express one yaw relative to another - because a
+@@ -982,6 +989,27 @@ static void CG_AccessibilityStatus_f( void ) {
+ 		}
+ 	}
+ 
++	{
++		const char *objectiveNames[MAX_OID_TRIGGERS];
++		int objectiveCount = ETA_TeamObjectiveNames( CG_LimboPanel_GetRealTeam(), objectiveNames, MAX_OID_TRIGGERS );
++
++		if ( objectiveCount ) {
++			char text[ETA_MAX_HUD_TEXT_LENGTH + 1];
++			int i;
++
++			Q_strncpyz( text, objectiveCount == 1 ? "Objective: " : "Objectives: ", sizeof( text ) );
++
++			for ( i = 0; i < objectiveCount; i++ ) {
++				if ( i ) {
++					Q_strcat( text, sizeof( text ), ", " );
++				}
++				Q_strcat( text, sizeof( text ), objectiveNames[i] );
++			}
++
++			ETA_HudNarrator_SpeakObjective( text );
++		}
++	}
++
+ 	if ( ETA_NearestObjectiveOrigin( CG_LimboPanel_GetRealTeam(), ps->origin, objectiveOrigin ) ) {
+ 		vec3_t delta, angles;
+ 		float relativeYaw;

@@ -1,0 +1,76 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 0a8980e..9bcefcf 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -2241,10 +2241,10 @@ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
+  *
+  *   - something already under the crosshair that the game offers to use
+  *     (the use icon is showing) is used at once, as the plain key would;
+- *   - otherwise, the nearest thing to use is turned to. Within reach, it
+- *     is used on arrival, quietly - the game's own icon names it. Further
+- *     off, it is named with its direction and distance, and the walk is
+- *     the player's;
++ *   - otherwise, the nearest thing to use is turned to and named, with its
++ *     direction and distance. Within reach, it is used on arrival - unless
++ *     it is a door that will not open for this player. Further off, the
++ *     walk is the player's;
+  *   - pressed again within a few seconds, with still nothing under the
+  *     crosshair, the next one along;
+  *   - with nothing close by at all, the key does what it always did.
+@@ -2321,10 +2321,15 @@ static void CG_AccessibilityActivateDown_f(void)
+ 		return;
+ 	}
+ 
++	/* Within reach: turned to, said, and used on arrival. It was used
++	   quietly, leaving the game's own icon to name it - and a door that
++	   would not open said nothing at all, so the tester heard F pass the
++	   doors by. Now it is always said, and a door that will not open is
++	   not pressed at. */
+ 	if (list[index].meters <= ETA_USE_REACH_METERS)
+ 	{
+-		ETA_AimStartSnap(&list[index], NULL);
+-		eta_use.pending = qtrue;
++		ETA_AimStartSnap(&list[index], list[index].name);
++		eta_use.pending = (qboolean)!list[index].locked;
+ 		return;
+ 	}
+ 
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index a58cc99..15f0885 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4407,6 +4407,22 @@ int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
+ 				continue;
+ 			}
+ 			target.name[0] = (char)toupper((unsigned char)target.name[0]);
++			/* A door that will not open for this player - locked, or
++			   another team's - is said as one: F used to press at it
++			   quietly, nothing happened, and the tester heard F pass the
++			   doors by. Locked the way the door sounds call it. */
++			if (es->eType == ET_MOVER)
++			{
++				qboolean opens = qtrue;
++
++				target.locked = (qboolean)(ETA_HintIsLockedDoor(es->dmgFlags)
++				                           || (!ETA_HintIsDoor(es->dmgFlags) && es->solid == SOLID_BMODEL
++				                               && CG_AccessibilityDoorModel(es->modelindex, &opens) && !opens));
++				if (target.locked)
++				{
++					Q_strncpyz(target.name, "Locked door", sizeof(target.name));
++				}
++			}
+ 			if (es->eType == ET_ITEM)
+ 			{
+ 				target.point[2] += 8.0f;
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 996d01f..63ba962 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3493,6 +3493,7 @@ typedef struct
+ 	float  meters;
+ 	char   name[64];
+ 	qboolean ladder;    ///< one of the map's ladders: F turns to it, and climbs it there
++	qboolean locked;    ///< a door this player cannot open: said, never pressed at
+ } etaAimTarget_t;
+ 
+ int      CG_AccessibilityUseTargets(etaAimTarget_t *list, int max);

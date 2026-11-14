@@ -1,0 +1,215 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 9bcefcf..440a444 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -2233,6 +2233,119 @@ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
+ 	}
+ }
+ 
++/**
++ * @brief Choosing what F turns to, with the bracket keys.
++ *
++ * The tester could not get to the dynamite spot on Oasis's Old City
++ * wall: there were several things to use close together, and F took
++ * whichever was nearest, or whatever the crosshair was already on. So ]
++ * steps through the things to use from nearest to furthest, and [ back,
++ * each said - name, direction, distance, "2 of 4" - without turning the
++ * view. F then turns to the one chosen, and uses it in reach, whatever is
++ * under the crosshair. The choice is kept for half a minute, and is let
++ * go once F has turned to it or it is no longer on the list.
++ */
++#define ETA_CHOOSE_HOLD_MS 30000
++
++static struct
++{
++	qboolean       held;
++	int            at;          /* when it was chosen */
++	etaAimTarget_t target;
++} eta_choose;
++
++/* Where a target is on the list now: by its entity, or for a ladder,
++   which has none, by where it stands. -1 when it is gone. */
++static int ETA_ChooseFind(const etaAimTarget_t *list, int count, const etaAimTarget_t *want)
++{
++	int i;
++
++	for (i = 0; i < count; i++)
++	{
++		if (want->entityNum >= 0 ? list[i].entityNum == want->entityNum
++		    : (list[i].entityNum < 0 && list[i].ladder == want->ladder
++		       && Distance(list[i].point, want->point) < 48.0f))
++		{
++			return i;
++		}
++	}
++
++	return -1;
++}
++
++static void ETA_ChooseStep(int step)
++{
++	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
++	int            count, index;
++
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		return;
++	}
++
++	count = CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS);
++
++	if (count <= 0)
++	{
++		eta_choose.held = qfalse;
++		ETA_Speech_Say("Nothing to use close by");
++		return;
++	}
++
++	index = (eta_choose.held && cg.time >= eta_choose.at && cg.time - eta_choose.at < ETA_CHOOSE_HOLD_MS)
++	        ? ETA_ChooseFind(list, count, &eta_choose.target) : -1;
++
++	if (index < 0)
++	{
++		/* A fresh choice starts at the nearest, or from the far end
++		   going back. */
++		index = step > 0 ? 0 : count - 1;
++	}
++	else
++	{
++		index = (index + step + count) % count;
++	}
++
++	eta_choose.held   = qtrue;
++	eta_choose.at     = cg.time;
++	eta_choose.target = list[index];
++
++	ETA_HudNarrator_HoldPassive(cg.time);
++	ETA_AimSay(va("%s, %d of %d", list[index].name, index + 1, count), list[index].point);
++}
++
++static void CG_AccessibilityUseNext_f(void)
++{
++	ETA_ChooseStep(1);
++}
++
++static void CG_AccessibilityUsePrev_f(void)
++{
++	ETA_ChooseStep(-1);
++}
++
++/* The chosen one, if there still is one: F's answer before anything
++   else. qfalse when nothing is chosen, or it is gone. */
++static qboolean ETA_ChooseTake(const etaAimTarget_t *list, int count, int *index)
++{
++	if (!eta_choose.held || cg.time < eta_choose.at || cg.time - eta_choose.at >= ETA_CHOOSE_HOLD_MS)
++	{
++		eta_choose.held = qfalse;
++		return qfalse;
++	}
++
++	eta_choose.held = qfalse;
++	*index          = ETA_ChooseFind(list, count, &eta_choose.target);
++
++	if (*index < 0)
++	{
++		ETA_Speech_Say(va("%s is no longer close by", eta_choose.target.name));
++		return qfalse;
++	}
++
++	return qtrue;
++}
++
+ /**
+  * @brief The use key, and the one key for everything to use.
+  *
+@@ -2275,6 +2388,27 @@ static void CG_AccessibilityActivateDown_f(void)
+ 		return;
+ 	}
+ 
++	/* Something chosen with the bracket keys comes before anything
++	   else - before what the crosshair is on, and before a ladder in
++	   reach. */
++	if (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL && eta_choose.held)
++	{
++		count = CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS);
++
++		if (ETA_ChooseTake(list, count, &index))
++		{
++			/* Turned to and said; used on arrival when in reach - but a
++			   ladder is climbed with F once there, and a locked door is
++			   never pressed at. */
++			ETA_AimStartSnap(&list[index], list[index].name);
++			eta_use.pending = (qboolean)(!list[index].ladder && !list[index].locked
++			                             && list[index].meters <= ETA_USE_REACH_METERS);
++			eta_aim.cycleIndex = index;
++			eta_aim.cycleAt    = cg.time;
++			return;
++		}
++	}
++
+ 	count = (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL && !hint)
+ 	        ? CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) : 0;
+ 
+@@ -5623,6 +5757,8 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
+ 	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
++	{ "accessibilityUseNext",     CG_AccessibilityUseNext_f },
++	{ "accessibilityUsePrev",     CG_AccessibilityUsePrev_f },
+ 	{ "accessibilitySurroundings", CG_AccessibilitySurroundings_f },
+ 	{ "+accessibilityTurnLeft",   CG_AccessibilityTurnLeftDown_f },
+ 	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 15f0885..4471b3e 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4842,7 +4842,16 @@ void CG_AccessibilitySurroundings(void)
+ 	ETA_HudNarrator_HoldPassive(cg.time);
+ 	ETA_Speech_BeginReport();
+ 
+-	ETA_Speech_Say(ETA_OverheadState() == ETA_OVERHEAD_OPEN_SKY ? "Outdoors" : "Indoors");
++	/* With the place's name: the tester knew they were indoors and not
++	   where. The map's own name for the place when it has one - "Water
++	   Pump", "Allied Command Post" - and the command map square when it
++	   does not. */
++	{
++		const char *place = ETA_LocationName();
++		const char *cover = ETA_OverheadState() == ETA_OVERHEAD_OPEN_SKY ? "Outdoors" : "Indoors";
++
++		ETA_Speech_Say(place ? va("%s, %s", cover, place) : cover);
++	}
+ 
+ 	if (eta_playerCallouts.integer)
+ 	{
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 8f6e8d3..d954085 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9428,7 +9428,13 @@ void UI_AccessibilityInstallBinds(void)
+ 		   still on exactly +activate: the mod's command passes a use
+ 		   straight through when there is something to use, so nothing
+ 		   the key did before is lost. */
+-		{ 'f',            "+accessibilityActivate",    "+activate",  10 }
++		{ 'f',            "+accessibilityActivate",    "+activate",  10 },
++		/* Choosing what F turns to, when several things to use are close
++		   together. The brackets are bound in neither stock config's
++		   right-handed layout; the left-handed one zooms the map on them,
++		   and keeps them. */
++		{ ']',            "accessibilityUseNext",      NULL,         12 },
++		{ '[',            "accessibilityUsePrev",      NULL,         12 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 6315cfc..7b4a397 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -872,6 +872,8 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymarkerwhere",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerobjective",              -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilityusenext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilityuseprev",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },

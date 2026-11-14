@@ -1,0 +1,328 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index f908b77..f1aecbe 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2354,47 +2354,21 @@ static const char *ETA_SurfaceMaterial(int surfaceFlags)
+  *             to know more about the hit than the words describe
+  * @return qtrue when there is something to say
+  */
+-static qboolean ETA_DescribeLookAhead(char *out, size_t outSize, int *distanceMeters, float range, trace_t *outTrace)
++/**
++ * @brief Names whatever a finished trace ran into.
++ *
++ * Split out from the view probe below so the obstacle narration can ask
++ * the same question of a different trace. It matters that they share
++ * this: the words for a door, a person and a stone wall should not
++ * depend on which probe found them.
++ *
++ * @param[in]  trace   a completed trace that hit something
++ * @param[out] out     the name
++ * @param[in]  outSize size of out
++ */
++static void ETA_DescribeTraceHit(const trace_t *trace, char *out, size_t outSize)
+ {
+-	trace_t trace;
+-	vec3_t  start, end, forward;
+-	int     entityNum;
+-
+-	if (!cg.snap)
+-	{
+-		return qfalse;
+-	}
+-
+-	VectorCopy(cg.refdef.vieworg, start);
+-	AngleVectors(cg.refdefViewAngles, forward, NULL, NULL);
+-	VectorMA(start, range, forward, end);
+-
+-	CG_Trace(&trace, start, NULL, NULL, end, cg.snap->ps.clientNum, MASK_SHOT);
+-
+-	if (outTrace)
+-	{
+-		*outTrace = trace;
+-	}
+-
+-	if (trace.fraction == 1.0f)
+-	{
+-		Q_strncpyz(out, "Nothing in range", outSize);
+-		*distanceMeters = -1;
+-		return qtrue;
+-	}
+-
+-	*distanceMeters = (int)(Distance(start, trace.endpos) * ETA_QU_TO_METERS);
+-
+-	/* The skybox is not a thing you can walk into, and a distance to it
+-	   would be the distance to the edge of the map. */
+-	if (trace.surfaceFlags & SURF_SKY)
+-	{
+-		Q_strncpyz(out, "Open sky", outSize);
+-		*distanceMeters = -1;
+-		return qtrue;
+-	}
+-
+-	entityNum = trace.entityNum;
++	int entityNum = trace->entityNum;
+ 
+ 	if (entityNum < MAX_CLIENTS)
+ 	{
+@@ -2406,7 +2380,7 @@ static qboolean ETA_DescribeLookAhead(char *out, size_t outSize, int *distanceMe
+ 		   person at the end of a scope. */
+ 		Q_strcat(out, outSize,
+ 		         ci->team == cgs.clientinfo[cg.clientNum].team ? ", teammate" : ", enemy");
+-		return qtrue;
++		return;
+ 	}
+ 
+ 	if (entityNum != ENTITYNUM_WORLD)
+@@ -2415,32 +2389,32 @@ static qboolean ETA_DescribeLookAhead(char *out, size_t outSize, int *distanceMe
+ 		{
+ 		case ET_MOVER:
+ 			Q_strncpyz(out, "Door", outSize);
+-			return qtrue;
++			return;
+ 		case ET_EXPLOSIVE:
+ 			Q_strncpyz(out, "Explosive", outSize);
+-			return qtrue;
++			return;
+ 		case ET_ITEM:
+ 			Q_strncpyz(out, "Item", outSize);
+-			return qtrue;
++			return;
+ 		default:
+ 			Q_strncpyz(out, "Object", outSize);
+-			return qtrue;
++			return;
+ 		}
+ 	}
+ 
+ 	{
+-		const char *material = ETA_SurfaceMaterial(trace.surfaceFlags);
++		const char *material = ETA_SurfaceMaterial(trace->surfaceFlags);
+ 		const char *kind;
+ 
+-		if (trace.surfaceFlags & SURF_LADDER)
++		if (trace->surfaceFlags & SURF_LADDER)
+ 		{
+ 			kind = "ladder";
+ 		}
+-		else if (trace.plane.normal[2] > 0.7f)
++		else if (trace->plane.normal[2] > 0.7f)
+ 		{
+ 			kind = "ground";
+ 		}
+-		else if (trace.plane.normal[2] < -0.7f)
++		else if (trace->plane.normal[2] < -0.7f)
+ 		{
+ 			kind = "ceiling";
+ 		}
+@@ -2460,6 +2434,48 @@ static qboolean ETA_DescribeLookAhead(char *out, size_t outSize, int *distanceMe
+ 			Com_sprintf(out, outSize, "%c%s", toupper(kind[0]), kind + 1);
+ 		}
+ 	}
++}
++
++static qboolean ETA_DescribeLookAhead(char *out, size_t outSize, int *distanceMeters, float range, trace_t *outTrace)
++{
++	trace_t trace;
++	vec3_t  start, end, forward;
++
++	if (!cg.snap)
++	{
++		return qfalse;
++	}
++
++	VectorCopy(cg.refdef.vieworg, start);
++	AngleVectors(cg.refdefViewAngles, forward, NULL, NULL);
++	VectorMA(start, range, forward, end);
++
++	CG_Trace(&trace, start, NULL, NULL, end, cg.snap->ps.clientNum, MASK_SHOT);
++
++	if (outTrace)
++	{
++		*outTrace = trace;
++	}
++
++	if (trace.fraction == 1.0f)
++	{
++		Q_strncpyz(out, "Nothing in range", outSize);
++		*distanceMeters = -1;
++		return qtrue;
++	}
++
++	*distanceMeters = (int)(Distance(start, trace.endpos) * ETA_QU_TO_METERS);
++
++	/* The skybox is not a thing you can walk into, and a distance to it
++	   would be the distance to the edge of the map. */
++	if (trace.surfaceFlags & SURF_SKY)
++	{
++		Q_strncpyz(out, "Open sky", outSize);
++		*distanceMeters = -1;
++		return qtrue;
++	}
++
++	ETA_DescribeTraceHit(&trace, out, outSize);
+ 
+ 	return qtrue;
+ }
+@@ -3349,13 +3365,50 @@ static void ETA_NarrateFacing(void)
+  * deliberately does nothing while zoomed: that narration is already
+  * answering the same question at the range the player asked for.
+  */
++/**
++ * @brief How far ahead the player's own body is tested for an obstacle.
++ *
++ * Just over a stride. Long enough to arrive slightly before the player
++ * does, short enough that it is describing what is stopping them rather
++ * than what is across the room.
++ */
++#define ETA_OBSTACLE_PROBE_DISTANCE 48.0f
++
++/**
++ * @brief Says what is blocking the way, and only when something is.
++ *
++ * This used to trace a ray from the eye and announce whatever it hit
++ * within a couple of metres. A tester reported it saying "wall, 0
++ * metres" while they walked on perfectly well, and they were right to
++ * call it noise: a ray from the eye answers "what am I looking at",
++ * which is a different question from "what is stopping me".
++ *
++ * Two things it got wrong, and both were common. Stairs: every step has
++ * an upright face, so a ray sees a wall on every staircase in the game
++ * while the player climbs it without difficulty. And any wall beside a
++ * corridor, which is a wall you are looking at rather than one you are
++ * walking into.
++ *
++ * So the probe is now the player's own bounding box, pushed forward the
++ * way the engine pushes it, with its base lifted by the engine's own
++ * step height. If the box can move, nothing is in the way and nothing is
++ * said - a stair riser passes under it, exactly as the player's feet do.
++ * If the box cannot move, the player cannot either, which is the only
++ * moment this is worth saying.
++ *
++ * The distance goes too. When it only fires against something the player
++ * is up against, the number is always nearly zero, and "0 metres" was
++ * the part that read as broken.
++ */
+ static void ETA_NarrateObstacleAhead(void)
+ {
+ 	static char lastDescription[128];
+ 	static int  lastTime;
+ 	char        description[128];
+-	trace_t     trace;
+-	int         distance;
++
++	const playerState_t *ps;
++	trace_t             trace;
++	vec3_t              angles, forward, start, end, mins, maxs;
+ 
+ 	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer)
+ 	{
+@@ -3370,30 +3423,65 @@ static void ETA_NarrateObstacleAhead(void)
+ 		return;
+ 	}
+ 
+-	if (!ETA_DescribeLookAhead(description, sizeof(description), &distance,
+-	                           ETA_LOOK_AHEAD_RANGE_ON_FOOT, &trace))
++	ps = &cg.predictedPlayerState;
++
++	/* In the air there is nothing to be blocked from doing. */
++	if (ps->groundEntityNum == ENTITYNUM_NONE)
+ 	{
++		lastDescription[0] = '\0';
+ 		return;
+ 	}
+ 
+-	/* Looking down at the floor is not an obstacle, and at this range it
+-	   is what the view meets every time the player glances at their feet.
+-	   What is underfoot is the footstep narration's job, and it answers
+-	   from the engine's own footstep type rather than from a probe. */
+-	if (trace.plane.normal[2] > 0.7f)
++	/* Flattened: looking down at your boots must not aim the probe into
++	   the floor, and looking up must not aim it over the obstacle. */
++	angles[PITCH] = 0.0f;
++	angles[YAW]   = cg.refdefViewAngles[YAW];
++	angles[ROLL]  = 0.0f;
++	AngleVectors(angles, forward, NULL, NULL);
++
++	/* The player's own box - so this is crouched when they are crouched
++	   and prone when they are prone - with the base raised by one step.
++	   That lift is the whole fix: it is what the engine gives the player
++	   to get up a stair, so anything that fits under it is not an
++	   obstacle to them and must not be announced as one. */
++	VectorCopy(ps->mins, mins);
++	VectorCopy(ps->maxs, maxs);
++	mins[2] += ETA_DROP_STEP_UNITS;
++
++	if (mins[2] >= maxs[2])
+ 	{
++		/* Prone, or some other posture shorter than a step. Nothing
++		   sensible to sweep, so say nothing rather than guess. */
+ 		lastDescription[0] = '\0';
+ 		return;
+ 	}
+ 
+-	/* Nothing close enough to bump into. Clearing the memory here is what
+-	   makes stepping away and back a fresh announcement. */
+-	if (distance < 0)
++	VectorCopy(ps->origin, start);
++	VectorMA(start, ETA_OBSTACLE_PROBE_DISTANCE, forward, end);
++
++	CG_Trace(&trace, start, mins, maxs, end, ps->clientNum, MASK_PLAYERSOLID);
++
++	if (trace.fraction == 1.0f || trace.startsolid)
+ 	{
++		/* Clear ahead - or already inside something, where a report
++		   would be about geometry rather than about anything the player
++		   can act on. Clearing the memory here is what makes stepping
++		   away and back a fresh announcement. */
+ 		lastDescription[0] = '\0';
+ 		return;
+ 	}
+ 
++	/* Ground is not an obstacle even when the box meets it: that is a
++	   slope the player walks up, and what is underfoot is the footstep
++	   narration's job. */
++	if (trace.plane.normal[2] > 0.7f)
++	{
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	ETA_DescribeTraceHit(&trace, description, sizeof(description));
++
+ 	if (!Q_stricmp(description, lastDescription)
+ 	    && cg.time - lastTime < ETA_OBSTACLE_MIN_INTERVAL)
+ 	{
+@@ -3404,7 +3492,9 @@ static void ETA_NarrateObstacleAhead(void)
+ 	lastTime = cg.time;
+ 
+ 	ETA_Speech_BeginReport();
+-	ETA_HudNarrator_SpeakLookAhead(description, distance);
++	/* No distance: this only speaks about something the player is up
++	   against, so the number would always be nought. */
++	ETA_HudNarrator_SpeakLookAhead(description, -1);
+ 	ETA_Speech_EndReport();
+ }
+ 
+@@ -6238,6 +6328,13 @@ void CG_DrawActive()
+ 	   locally, and the engine can refuse a stance change without saying so. */
+ 	ETA_NarrateStanceChange();
+ 
++	/* Before the objective callout on purpose. A backend that delivers a
++	   new report by cutting off the one in progress leaves whichever
++	   spoke last, and a tester lost an objective distance to a scenery
++	   report. Scenery goes first so the objective is the one that
++	   survives. */
++	ETA_NarrateObstacleAhead();
++
+ 	/* Cheap per frame - a scan of a few dozen command map entries - and
+ 	   the library speaks only on a milestone crossing. */
+ 	ETA_NarrateObjectiveApproach();
+@@ -6251,8 +6348,6 @@ void CG_DrawActive()
+ 	/* After the zoom narration, which stands down for it rather than the
+ 	   other way round: while the binoculars are up they are the answer to
+ 	   this question. */
+-	ETA_NarrateObstacleAhead();
+-
+ 	ETA_NarrateFacing();
+ 
+ 	/* Last of the environment reports, most urgent last: on a backend

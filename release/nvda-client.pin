@@ -1,0 +1,44 @@
+# The NVDA controller client this release bundles.
+#
+# The mod has always spoken through NVDA - windows_nvda.c loads
+# nvdaControllerClient.dll at runtime and calls it if NVDA is running -
+# but the DLL is shipped by NV Access separately from NVDA itself, so
+# every player had to go and find it. Several never did, and the ones
+# who search for a DLL by name land on sites that serve trojans. For a
+# screen reader user that is the worst possible outcome, so the file
+# comes in the archive now.
+#
+# It is NV Access's binary, under the LGPL v2.1, redistributed
+# unmodified. The mod loads it with LoadLibrary rather than linking it,
+# which is the least entangled way to use it, and the licence text that
+# NV Access ships inside their own zip is packed beside it.
+#
+# Pinned by checksum rather than "whatever is current": a release has to
+# be reproducible, and an archive whose contents move under it would
+# break the checksum published with it. Bumping the version here is a
+# reviewable diff, which is the point.
+#
+# HOW TO PIN, when this file says UNPINNED or the version is bumped:
+#   1. Push the change. The "NVDA controller client" CI job downloads the
+#      zip, prints the URL it came from, the zip's SHA256, the archive
+#      listing and the SHA256 of each DLL inside.
+#   2. Copy those values in here.
+#   3. Push again. The same job is now a guard: it fails if any of them
+#      ever stops matching.
+# A release cannot be cut while this file is UNPINNED - build-release.sh
+# refuses - so an unverified binary cannot reach a player by accident.
+
+NVDA_VERSION=2026.1.1
+
+# Established by the CI job on 23 September 2026, from
+#   https://download.nvaccess.org/releases/2026.1.1/nvda_2026.1.1_controllerClient.zip
+# The archive also carries arm64 and arm64ec builds; they are not packed,
+# because the mod itself ships only x86 and x64 libraries and a client
+# nothing can load is just weight in the download.
+#
+# sha256 of the downloaded controllerClient zip
+NVDA_ZIP_SHA256=2a3a70f729be0c48120c5f24a81653202827c40a7986e289ffe2275a2b45011f
+
+# sha256 of the two DLLs inside it
+NVDA_DLL_X64_SHA256=2fe60cf00be929aae32e95c1e1507a20ada4902c8fec273b3cc2d3bf5472932a
+NVDA_DLL_X86_SHA256=ab824a1126fef9135f5e7fedc4ddeb8ebce73a5bfcb6086e1799971d92dca8b4

@@ -1,0 +1,76 @@
+diff --git a/src/ui/ui_menu.c b/src/ui/ui_menu.c
+index 60e2bf0..6d9edfa 100644
+--- a/src/ui/ui_menu.c
++++ b/src/ui/ui_menu.c
+@@ -36,6 +36,11 @@
+ #include "ui_shared.h"
+ #include "ui_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "core/runtime_guard.h"
++#include "menu/menu_narrator.h"
++#endif
++
+ /**
+  * @brief Menu_FadeMenuByName
+  * @param[in] p
+@@ -318,6 +323,44 @@ qboolean Menus_AnyFullScreenVisible(void)
+ 	return qfalse;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Narrates a newly shown popup/confirm dialog by reading every static
++ * text item it declares (its title plus any body labels), in declaration
++ * order. This relies on the SUBWINDOW/SUBWINDOWBLACK/LABEL/LABELWHITE .menu
++ * macros always emitting ITEM_TYPE_TEXT decoration items with a literal
++ * text string - true for every popup shipped in etmain/ui, but not
++ * guaranteed for a hand-rolled popup that doesn't use those macros.
++ */
++static void ETA_NarrateConfirmDialog(menuDef_t *menu)
++{
++	char text[ETA_MAX_MENU_TEXT_LENGTH + 1];
++	int  i;
++
++	text[0] = '\0';
++
++	for (i = 0; i < menu->itemCount; i++)
++	{
++		itemDef_t *item = menu->items[i];
++
++		if (item->type == ITEM_TYPE_TEXT && item->text)
++		{
++			if (text[0] != '\0')
++			{
++				Q_strcat(text, sizeof(text), " ");
++			}
++
++			Q_strcat(text, sizeof(text), item->text);
++		}
++	}
++
++	if (text[0] != '\0')
++	{
++		ETA_MenuNarrator_OnConfirmDialogShown(text);
++	}
++}
++#endif
++
+ /**
+  * @brief Menus_ActivateByName
+  * @param[in] p
+@@ -336,6 +379,14 @@ menuDef_t *Menus_ActivateByName(const char *p, qboolean modalStack)
+ 		{
+ 			m = &Menus[i];
+ 			Menus_Activate(m);
++
++#ifdef FEATURE_ACCESSIBILITY
++			if (m->window.flags & WINDOW_POPUP)
++			{
++				ETA_NarrateConfirmDialog(m);
++			}
++#endif
++
+ 			if (modalStack && (m->window.flags & WINDOW_MODAL))
+ 			{
+ 				if (modalMenuCount >= MAX_MODAL_MENUS)

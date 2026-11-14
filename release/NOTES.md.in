@@ -1,0 +1,85 @@
+Accessibility mode for Wolfenstein: Enemy Territory, version @VERSION@,
+for **Windows and Mac**. It reads the menus and the match aloud, plays
+sounds that tell you where things are, and lets every control be reached
+from the keyboard. It needs **ET: Legacy @ENGINE_TAG@**.
+
+## Download
+
+Under Assets below, take the one for your computer:
+
+- **On Windows:** @ARCHIVE@
+- **On a Mac:** @MAC_ARCHIVE@
+
+You do not need the other files: they are for the game's own updater,
+or GitHub's copy of the source code.
+
+Already playing? The game updates itself: as it starts it says
+*"Checking for updates"*, and asks you before it downloads anything.
+
+## What's new
+
+@SUMMARY@
+
+Every change, back to the first version, is in `CHANGELOG.md` in the
+download.
+
+## Install on Windows
+
+Download **@ARCHIVE@**.
+
+1. You need ET: Legacy @ENGINE_TAG@ from https://www.etlegacy.com/download,
+   and the original game files, `pak0.pk3`, `pak1.pk3` and `pak2.pk3`.
+   The ET: Legacy installer can fetch them.
+2. Unzip the download. It makes one folder.
+3. Copy `@PACKAGE@` from that folder into the `legacy` folder where
+   ET: Legacy is installed. For a normal install that is
+   `C:\Program Files\ETLegacy\legacy`.
+4. If you use NVDA, copy `nvda\x64\nvdaControllerClient.dll` next to
+   `ETLegacy.exe`, or the `x86` one for 32-bit ET: Legacy. Without
+   NVDA, the game speaks through SAPI 5, built into Windows.
+5. Start the game. The menus speak straight away.
+
+## Install on a Mac
+
+Download **@MAC_ARCHIVE@**.
+
+1. You need ET: Legacy @ENGINE_TAG@ for macOS, on Apple Silicon or Intel,
+   and the original game files. Start it once, so it makes its folder.
+2. Open the download. The Mac unzips it into a folder.
+3. In Finder, choose **Go**, then **Go to Folder** (Command Shift G), type
+   `~/Library/Application Support/etlegacy/legacy` and press Return.
+4. Copy `@PACKAGE@` from the unzipped folder into that one.
+5. Start ET: Legacy. With VoiceOver on, the game speaks through
+   VoiceOver; with it off, through the Mac's own voice.
+
+For bots in a game you host, put Omni-bot's `omni-bot` folder in the
+same `legacy` folder; the game then fetches the bots file it needs by
+itself. `INSTALL.md` has the steps, under "Step three: bots".
+
+## After installing
+
+On either system, press **F5** in a match for your status, **F6** to hear
+the last thing again and **F8** to stop the speech. `INSTALL.md` in the
+download explains every key and every sound.
+
+`autoexec.cfg` is optional: copy it only to change the keys or the
+sounds. On Windows it goes in `Documents\ETLegacy\legacy`; on a Mac, in
+the same folder as `@PACKAGE@`.
+
+Do not rename `@PACKAGE@`: the name is what makes the game load it.
+
+## Checking your download
+
+```
+@CHECKSUM_LINE@
+```
+
+On Windows: `certutil -hashfile @ARCHIVE@ SHA256`, and compare. On a
+Mac, in Terminal, in the folder you downloaded to:
+`shasum -a 256 @MAC_ARCHIVE@`, and compare.
+
+## Source
+
+Built from `@COMMIT@` by `release/build-release.sh`, against ET: Legacy
+@ENGINE_TAG@ (`@ENGINE_COMMIT@`), so the package can be rebuilt from
+source.

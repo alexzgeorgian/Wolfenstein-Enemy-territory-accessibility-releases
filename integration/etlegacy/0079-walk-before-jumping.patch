@@ -1,0 +1,75 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index a09cdd0..9668aa7 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2901,6 +2901,7 @@ typedef struct
+ 	int      side;        /* which way round the last opening was: -1, 1, 0 */
+ 	int      saidJump;    /* the jump on the way last told of, by its point */
+ 	qboolean overEdge;    /* steer is across a jump or up a ladder */
++	qboolean jumps;       /* this search may jump: there was no way without */
+ } eta_route_t;
+ 
+ static eta_route_t eta_route;
+@@ -3143,7 +3144,26 @@ static qboolean ETA_RouteOpening(const vec3_t here, float wantYaw, vec3_t out)
+ /**
+  * @brief Starts looking for the way from where the player is now.
+  */
+-static void ETA_RoutePlan(void)
++/**
++ * @brief The same question with jumping left out.
++ *
++ * The way is looked for on foot first, and only when there is none is it
++ * looked for again with jumps. A jump the player cannot see the edge of
++ * is a fall waiting to happen, and on the real Oasis the first search -
++ * which counted a jump as two metres more walking - sent the Allied way
++ * up a one-metre ledge with an ordinary step beside it. The search is
++ * built to find a good way quickly, not the very best, and a cost alone
++ * did not keep it off the ledge; leaving jumps out until they are needed
++ * does.
++ */
++static int ETA_RouteMoveOnFoot(void *context, const float from[3], float to[3])
++{
++	int kind = ETA_RouteMove(context, from, to);
++
++	return kind == ETA_PATH_JUMP ? ETA_PATH_NONE : kind;
++}
++
++static void ETA_RoutePlanWith(qboolean jumps)
+ {
+ 	float start[3], goal[3];
+ 
+@@ -3164,6 +3184,12 @@ static void ETA_RoutePlan(void)
+ 	eta_route.done      = qfalse;
+ 	eta_route.along     = 0;
+ 	eta_route.saidJump  = -1;
++	eta_route.jumps     = jumps;
++}
++
++static void ETA_RoutePlan(void)
++{
++	ETA_RoutePlanWith(qfalse);
+ }
+ 
+ /**
+@@ -3352,12 +3378,20 @@ static void ETA_RouteFrame(void)
+ 
+ 		do
+ 		{
+-			state = ETA_PathFinder_Step(ETA_ROUTE_BUDGET_STEP, ETA_RouteMove, NULL);
++			state = ETA_PathFinder_Step(ETA_ROUTE_BUDGET_STEP,
++			                            eta_route.jumps ? ETA_RouteMove : ETA_RouteMoveOnFoot, NULL);
+ 		}
+ 		while (state == ETA_PATH_SEARCHING
+ 		       && trap_Milliseconds() - began < ETA_ROUTE_BUDGET_MS);
+ 	}
+ 
++	/* No way there on foot: look again, letting the way jump. */
++	if (!eta_route.jumps && (state == ETA_PATH_FAILED || state == ETA_PATH_PARTIAL))
++	{
++		ETA_RoutePlanWith(qtrue);
++		state = ETA_PathFinder_State();
++	}
++
+ 	if (state == ETA_PATH_FAILED
+ 	    && (cg.time - eta_route.startedAt > ETA_ROUTE_RETRY_MS || cg.time < eta_route.startedAt))
+ 	{

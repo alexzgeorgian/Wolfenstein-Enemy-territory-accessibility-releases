@@ -1,0 +1,746 @@
+diff --git a/Omnibot/Common/BotLoadLibrary.cpp b/Omnibot/Common/BotLoadLibrary.cpp
+index 501fd98..c2185a3 100644
+--- a/Omnibot/Common/BotLoadLibrary.cpp
++++ b/Omnibot/Common/BotLoadLibrary.cpp
+@@ -364,6 +364,24 @@ void *Omnibot_LL(const char *file)
+ eomnibot_error Omnibot_LoadLibrary(int version, const char *lib, const char *path)
+ {
+ 	eomnibot_error r = BOT_ERROR_NONE;
++#if defined(__APPLE__)
++	// [Accessibility]: the Mac's Omni-bot is omnibot_et_mac.so, one file for
++	// Apple Silicon and Intel, as Omni-bot and No Quarter's release ship it.
++	// The Linux names No Quarter looks for next are skipped: a Mac cannot
++	// load them, and on an Intel Mac the first of them would throw away the
++	// library found here.
++	g_BotLibrary = Omnibot_LL(OB_VA("%s/%s_mac.so", path ? path : ".", lib));
++	if(!g_BotLibrary)
++	{
++		g_BotLibrary = Omnibot_LL(OB_VA("./%s_mac.so", lib));
++	}
++	if(!g_BotLibrary)
++	{
++		char *homeDir = getenv("HOME");
++		if(homeDir)
++			g_BotLibrary = Omnibot_LL(OB_VA("%s/omni-bot/%s_mac.so", homeDir, lib));
++	}
++#else
+ 	// [NQ 1.3.1 - Linux 64-bit]: Check for .x86_64.so first on 64-bit Linux platforms
+ #if defined(__x86_64__) || defined(__amd64__)
+ 	g_BotLibrary = Omnibot_LL(OB_VA("%s/%s.x86_64.so", path ? path : ".", lib));
+@@ -404,6 +422,7 @@ eomnibot_error Omnibot_LoadLibrary(int version, const char *lib, const char *pat
+ 		if(homeDir)
+ 			g_BotLibrary = Omnibot_LL(OB_VA("%s.so", lib));
+ 	}
++#endif
+ 	if(!g_BotLibrary)
+ 	{
+ 		g_OmnibotLibPath.clear();
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 90dced4..7893d21 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -287,6 +287,12 @@ if(BUILD_SERVER_MOD)
+         PREFIX ""
+         OUTPUT_NAME "qagame${LIB_SUFFIX}${ARCH}"
+     )
++
++    # [Accessibility]: ET: Legacy on the Mac loads its mod libraries as
++    # qagame_mac, with no extension, for Apple Silicon and Intel alike.
++    if(APPLE)
++        set_target_properties(qagame PROPERTIES OUTPUT_NAME "qagame_mac" SUFFIX "")
++    endif()
+ endif()
+ 
+ # ==============================================================================
+@@ -373,6 +379,12 @@ if(BUILD_CLIENT_MOD)
+         OUTPUT_NAME "cgame${LIB_SUFFIX}${ARCH}"
+     )
+ 
++    # [Accessibility]: ET: Legacy on the Mac loads its mod libraries as
++    # cgame_mac, with no extension, for Apple Silicon and Intel alike.
++    if(APPLE)
++        set_target_properties(cgame PROPERTIES OUTPUT_NAME "cgame_mac" SUFFIX "")
++    endif()
++
+     # ==============================================================================
+     # UI (User Interface Module)
+     # ==============================================================================
+@@ -407,4 +419,10 @@ if(BUILD_CLIENT_MOD)
+         PREFIX ""
+         OUTPUT_NAME "ui${LIB_SUFFIX}${ARCH}"
+     )
++
++    # [Accessibility]: ET: Legacy on the Mac loads its mod libraries as
++    # ui_mac, with no extension, for Apple Silicon and Intel alike.
++    if(APPLE)
++        set_target_properties(ui PROPERTIES OUTPUT_NAME "ui_mac" SUFFIX "")
++    endif()
+ endif()
+diff --git a/src/cgame/cg_accessibility.c b/src/cgame/cg_accessibility.c
+index 39db366..501e7fa 100644
+--- a/src/cgame/cg_accessibility.c
++++ b/src/cgame/cg_accessibility.c
+@@ -20,6 +20,12 @@
+ #include "hud/hud_narrator.h"
+ #include "speech/speech_manager.h"
+ 
++#ifdef __APPLE__
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/xattr.h>
++#endif
++
+ /*
+ =====================================================================
+ Settings
+@@ -1466,6 +1472,111 @@ static int eta_loadingBriefingUntil;
+ static int eta_loadingMilestones;
+ static qboolean eta_loadingReadySaid = qtrue;
+ 
++#ifdef __APPLE__
++/*
++ * On a Mac the briefing waits for the end of the load. The game loads
++ * without once letting the Mac's own event loop run, and VoiceOver and
++ * the system voice both need it to: what was said as the load began was
++ * lost. So the map and its briefing are kept and said once the load is
++ * over - a second after it, when the Mac has finished announcing the
++ * game's window coming back - each as a line of its own, waiting for the
++ * one before it: on a Mac a new line cuts off the one being said.
++ */
++#define ETA_LOADED_WAIT_MS 1000
++#define ETA_LOADED_GAP_MS 500
++static char eta_loadingTitle[256];
++static char eta_loadingBriefing[ETA_MAX_SPEECH_TEXT_LENGTH + 1];
++static int eta_loadedAt;
++static qboolean eta_macBotsChecked;
++
++/*
++ * Why the bots did not come, in a game the player hosts with
++ * omnibot_enable on, said after the briefing; NULL when nothing is
++ * wrong that can be seen from here. The game module looks for
++ * omnibot_et_mac.so in omnibot_path, then the game's folder, then
++ * omni-bot in the home folder (BotLoadLibrary.cpp), so this looks in
++ * the same places, in the same order. Omni-bot is unsigned and comes
++ * from the web: while the Mac's quarantine mark is on it, the Mac
++ * refuses to load it and puts up a window of its own over the game,
++ * and the game carries on with no bots and nothing said.
++ */
++static const char *ETA_MacBotsProblem(void) {
++	char value[MAX_CVAR_VALUE_STRING];
++	char path[1024];
++	const char *home = getenv("HOME");
++	const char *found = NULL;
++	FILE *library;
++	char *c;
++
++	trap_Cvar_VariableStringBuffer("sv_running", value, sizeof(value));
++	if (atoi(value) == 0) {
++		return NULL; /* someone else's server */
++	}
++	trap_Cvar_VariableStringBuffer("omnibot_enable", value, sizeof(value));
++	if (atoi(value) == 0) {
++		return NULL; /* no bots asked for */
++	}
++
++	trap_Cvar_VariableStringBuffer("omnibot_path", value, sizeof(value));
++	for (c = value; *c; c++) {
++		if (*c == '\\') {
++			*c = '/';
++		}
++	}
++	if (value[0]) {
++		Com_sprintf(path, sizeof(path), "%s/omnibot_et_mac.so", value);
++		if ((library = fopen(path, "rb")) != NULL) {
++			fclose(library);
++			found = path;
++		}
++	}
++	if (!found && (library = fopen("./omnibot_et_mac.so", "rb")) != NULL) {
++		fclose(library);
++		Q_strncpyz(path, "./omnibot_et_mac.so", sizeof(path));
++		found = path;
++	}
++	if (!found && home) {
++		Com_sprintf(path, sizeof(path), "%s/omni-bot/omnibot_et_mac.so", home);
++		if ((library = fopen(path, "rb")) != NULL) {
++			fclose(library);
++			found = path;
++		}
++	}
++
++	if (!found) {
++		return "No bots: Omni-bot was not found. Copy the omni-bot folder from the No Quarter download into your home folder, as the guide says, then host again.";
++	}
++	{
++		/* The mark stays on a file the player allowed in System Settings;
++		   allowing it sets the mark's user-approved flag, 0x40, and the
++		   Mac then loads it. Only a mark without that flag still blocks. */
++		char mark[128];
++		ssize_t markLength = getxattr(found, "com.apple.quarantine", mark, sizeof(mark) - 1, 0, 0);
++
++		if (markLength >= 0) {
++			mark[markLength] = '\0';
++			if (!(strtoul(mark, NULL, 16) & 0x40)) {
++				return "No bots: the Mac is blocking Omni-bot, because it came from the web. Run the Terminal line in the bots part of the guide, then host again.";
++			}
++		}
++	}
++	return NULL;
++}
++
++/* Whether any bot is in the game: then nothing stopped them, whatever the
++   files look like. */
++static qboolean ETA_BotsPresent(void) {
++	int i;
++
++	for (i = 0; i < cgs.maxclients && i < MAX_CLIENTS; i++) {
++		if (cgs.clientinfo[i].infoValid && cgs.clientinfo[i].botSkill > 0) {
++			return qtrue;
++		}
++	}
++	return qfalse;
++}
++#endif
++
+ static void ETA_LoadingSay(const char *text) {
+ 	ETA_Speech_Say(text);
+ 	eta_loadingBriefingUntil = trap_Milliseconds() + ETA_Speech_EstimateDurationMs(text);
+@@ -1496,7 +1607,12 @@ void CG_AccessibilityLoadingBegin(void) {
+ 	Q_CleanStr(name);
+ 
+ 	CG_AccessibilitySpeakableText(description, briefing, sizeof(briefing));
++#ifdef __APPLE__
++	Com_sprintf(eta_loadingTitle, sizeof(eta_loadingTitle), "Loaded. %s. %s.", name, CG_LoadPanel_GameTypeName(cgs.gametype));
++	Q_strncpyz(text, briefing, sizeof(text));
++#else
+ 	Com_sprintf(text, sizeof(text), "Loading %s. %s. %s", name, CG_LoadPanel_GameTypeName(cgs.gametype), briefing);
++#endif
+ 
+ 	/* Too long for one line: end at the last whole sentence that fits. */
+ 	if (strlen(text) >= ETA_MAX_SPEECH_TEXT_LENGTH) {
+@@ -1507,12 +1623,24 @@ void CG_AccessibilityLoadingBegin(void) {
+ 		}
+ 	}
+ 
++#ifdef __APPLE__
++	Q_strncpyz(eta_loadingBriefing, text, sizeof(eta_loadingBriefing));
++	eta_loadingBriefingUntil = 0;
++	eta_loadedAt = 0;
++	eta_macBotsChecked = qfalse;
++#else
+ 	ETA_LoadingSay(text);
++#endif
+ }
+ 
+ void CG_AccessibilityLoadingProgress(void) {
+ 	int used, expected, percent, quarter;
+ 
++#ifdef __APPLE__
++	/* Figures said mid-load would be lost on a Mac like the briefing. */
++	return;
++#endif
++
+ 	if (eta_loadingReadySaid) {
+ 		return;
+ 	}
+@@ -1545,6 +1673,55 @@ static void ETA_LoadingFrame(void) {
+ 		return;
+ 	}
+ 
++#ifdef __APPLE__
++	/* A second after the load: "Loaded", the map and its type; then the
++	   briefing; then the team and class key below - each its own line. */
++	if (eta_loadingTitle[0]) {
++		if (!eta_loadedAt) {
++			eta_loadedAt = trap_Milliseconds();
++			return;
++		}
++		if (trap_Milliseconds() - eta_loadedAt < ETA_LOADED_WAIT_MS) {
++			return;
++		}
++		ETA_LoadingSay(eta_loadingTitle);
++		eta_loadingBriefingUntil += ETA_LOADED_GAP_MS;
++		eta_loadingTitle[0] = '\0';
++		return;
++	}
++	if (eta_loadingBriefing[0]) {
++		ETA_LoadingSay(eta_loadingBriefing);
++		eta_loadingBriefingUntil += ETA_LOADED_GAP_MS;
++		eta_loadingBriefing[0] = '\0';
++		return;
++	}
++	if (!eta_macBotsChecked) {
++		const char *problem = ETA_BotsPresent() ? NULL : ETA_MacBotsProblem();
++
++		eta_macBotsChecked = qtrue;
++		if (problem) {
++			ETA_LoadingSay(problem);
++			eta_loadingBriefingUntil += ETA_LOADED_GAP_MS;
++			return;
++		}
++	}
++	eta_loadingReadySaid = qtrue;
++	if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR) {
++		return;
++	}
++	trap_Key_KeysForBinding("openlimbomenu", &key1, &key2);
++	if (key1 != -1) {
++		char keyName[32];
++
++		trap_Key_KeynumToStringBuf(key1, keyName, sizeof(keyName));
++		Q_strupr(keyName);
++		ETA_Speech_Say(va("Press %s to choose your team and class", keyName));
++	} else {
++		ETA_Speech_Say("Open the limbo menu to choose your team and class");
++	}
++	return;
++#endif
++
+ 	eta_loadingReadySaid = qtrue;
+ 
+ 	if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR) {
+diff --git a/src/cgame/cg_osfile.h b/src/cgame/cg_osfile.h
+index e14150c..5068d81 100644
+--- a/src/cgame/cg_osfile.h
++++ b/src/cgame/cg_osfile.h
+@@ -29,7 +29,7 @@
+        #define S_IRUSR _S_IREAD
+        #define S_IWUSR _S_IWRITE
+ 	#define S_IFDIR _S_IFDIR
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__APPLE__)
+        #include <sys/stat.h>
+ #endif // WIN32
+ 
+diff --git a/src/game/g_client.c b/src/game/g_client.c
+index 59f7bb2..bb1a614 100644
+--- a/src/game/g_client.c
++++ b/src/game/g_client.c
+@@ -1690,7 +1690,7 @@ qboolean CGAMEFileExists( void ) {
+ 	// (the old code always looked for cgame_mp_x86.dll, so a 64-bit listen-server host
+ 	// could be flagged by the localhost check when only the x64 DLL was present).
+ 	trap_Cvar_VariableStringBuffer("fs_homepath", homepath, sizeof(homepath));
+-#ifdef __MACOS__
++#if defined(__MACOS__) || defined(__APPLE__)
+ 	Q_strcat(homepath, sizeof(homepath), "/nq/cgame_mac");
+ 	if ( !FileExists(homepath) ) return qfalse;
+ #endif
+diff --git a/src/game/q_shared.h b/src/game/q_shared.h
+index db5ddcb..2d4b929 100644
+--- a/src/game/q_shared.h
++++ b/src/game/q_shared.h
+@@ -267,6 +267,25 @@ void Sys_PumpEvents( void );
+ 
+ #endif
+ 
++//======================= MACOS DEFINES =================================
++
++// [Accessibility]: today's macOS, built with Apple's clang for Apple Silicon
++// and Intel. The MACOS_X and __MACOS__ blocks above are the PowerPC Macs of
++// the original game, which no compiler now defines.
++#if defined(__APPLE__) && !defined(MACOS_X) && !defined(__MACOS__)
++
++#define	MAC_STATIC
++
++#if defined(__aarch64__) || defined(__arm64__)
++	#define	CPUSTRING	"macos-arm64"
++#else
++	#define	CPUSTRING	"macos-x86_64"
++#endif
++
++#define	PATH_SEP '/'
++
++#endif
++
+ //======================= LINUX DEFINES =================================
+ 
+ // the mac compiler can't handle >32k of locals, so we
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 98fed97..1f26eff 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -45,9 +45,19 @@ static void UI_StopServerRefresh( void );
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "core/accessibility_runtime.h"
+ #include "menu/menu_narrator.h"
++#ifdef __APPLE__
++#include <dlfcn.h>
++#include <stdio.h>
++#include <sys/xattr.h>
++#endif
+ 
+ static void UI_AccessibilityConsoleFrame( void );
+ static void UI_AccessibilitySay( const char *text );
++#ifdef __APPLE__
++static void UI_AccessibilitySayLater( const char *text );
++static void UI_AccessibilityMacInstallGame( void );
++static void UI_AccessibilityMacLastSession( void );
++#endif
+ static const char *UI_AccessibilityFeederRow( int feederID, int index );
+ #endif
+ static void UI_DoServerRefresh( void );
+@@ -6800,6 +6810,10 @@ void _UI_Init( qboolean inGameLoad ) {
+ 	ETA_MenuNarrator_Init();
+ 	UI_AccessibilityInstallBinds();
+ 	ETA_FeederRowText = UI_AccessibilityFeederRow;
++#ifdef __APPLE__
++	UI_AccessibilityMacLastSession();
++	UI_AccessibilityMacInstallGame();
++#endif
+ 
+ 	/* The first name of each pair is what a player binds. The second is
+ 	   how the cgame hands the request over when a menu is open mid-match;
+@@ -6994,6 +7008,9 @@ void _UI_SetActiveMenu( uiMenuCommand_t menu ) {
+ 					else {
+ 						Menus_ActivateByName( "popupError", qtrue );
+ 					}
++#if defined(FEATURE_ACCESSIBILITY) && defined(__APPLE__)
++					UI_AccessibilitySayLater( va( "Error. %s", UI_Cvar_VariableString( "com_errorMessage" ) ) );
++#endif
+ 				}
+ 			}
+ 
+@@ -7893,11 +7910,343 @@ static void UI_AccessibilitySay( const char *text ) {
+  * it by mistake and never knew. Only before a match: in one, the cgame's
+  * own speech covers it.
+  */
++#ifdef __APPLE__
++/*
++ * On a Mac, a line kept for once the menus have settled. When a game
++ * ends in an error, the menus are started again and the error popup
++ * opens in the same stretch, without the Mac's event loop running, and
++ * VoiceOver and the system voice both need it to: the popup's reading
++ * was lost, and the player was back at the main menu with no reason
++ * given. So the error is said again a second after the menus are
++ * drawing, as the Mac loading screen is.
++ */
++#define UI_ETA_SETTLED_WAIT_MS 1000
++static char uiEtaSayLater[MAX_STRING_CHARS];
++static int uiEtaSayLaterFrom;
++
++static void UI_AccessibilitySayLater( const char *text ) {
++	char line[MAX_STRING_CHARS];
++
++	/* A second line kept before the first is said joins it, not replaces it. */
++	Q_strncpyz( line, text, sizeof(line) );
++	Q_CleanStr( line );
++	if( uiEtaSayLater[0] ) {
++		Q_strcat( uiEtaSayLater, sizeof(uiEtaSayLater), " " );
++		Q_strcat( uiEtaSayLater, sizeof(uiEtaSayLater), line );
++	}
++	else {
++		Q_strncpyz( uiEtaSayLater, line, sizeof(uiEtaSayLater) );
++	}
++	uiEtaSayLaterFrom = 0;
++}
++
++/*
++ * The game's own log, kept on the Mac, and what it says about the last
++ * time the game shut. When a map ends the game on a Mac, the game quits
++ * with nothing said, and its reason is in the console that went with it.
++ * So the log is kept from the menus on - logfile 2 writes each line as it
++ * is printed, so the lines before a crash survive it - and as the menus
++ * next start, a log that ends in a crash or a fatal error is read back
++ * aloud: the error, and the last lines before it. The log is then kept as
++ * etconsole-last.log, for sending on, as the game starts a new one.
++ */
++#define UI_ETA_LOG_TAIL 16384
++#define UI_ETA_LOG_LINES 4
++
++static qboolean UI_AccessibilityLogLineCounts( const char *line ) {
++	/* Banners and blank lines say nothing. */
++	for( ; *line; line++ ) {
++		if( *line != ' ' && *line != '*' && *line != '-' && *line != '=' && *line != '\r' ) {
++			return qtrue;
++		}
++	}
++	return qfalse;
++}
++
++/* A log line as it is said: without the dashes and stars round banners. */
++static const char *UI_AccessibilityLogLineSaid( const char *line ) {
++	static char trimmed[MAX_STRING_CHARS];
++	int length;
++
++	while( *line == ' ' || *line == '-' || *line == '*' || *line == '=' ) {
++		line++;
++	}
++	Q_strncpyz( trimmed, line, sizeof(trimmed) );
++	for( length = strlen( trimmed ); length > 0; length-- ) {
++		char c = trimmed[length - 1];
++
++		if( c != ' ' && c != '-' && c != '*' && c != '=' && c != '\r' ) {
++			break;
++		}
++	}
++	trimmed[length] = '\0';
++	return trimmed;
++}
++
++static void UI_AccessibilityMacLastSession( void ) {
++	static char tail[UI_ETA_LOG_TAIL + 1];
++	char homepath[MAX_OSPATH];
++	char gamedir[MAX_QPATH];
++	char path[MAX_OSPATH];
++	char kept[MAX_OSPATH + 16];
++	char said[MAX_STRING_CHARS];
++	/* What the engine prints as it goes down: a crash, a fatal error, a
++	   game module the Mac would not load. A plain quit prints none. */
++	const char *markers[] = { "Received signal", "DOUBLE SIGNAL", "Server fatal crashed",
++							  "failed to load library", NULL };
++	char *lines[1024];
++	int lineCount = 0, failure = -1, before, i, m, found;
++	long size;
++	FILE *log;
++
++	trap_Cvar_VariableStringBuffer( "fs_homepath", homepath, sizeof(homepath) );
++	trap_Cvar_VariableStringBuffer( "fs_game", gamedir, sizeof(gamedir) );
++	if( !homepath[0] ) {
++		return;
++	}
++	if( !gamedir[0] ) {
++		Q_strncpyz( gamedir, "nq", sizeof(gamedir) );
++	}
++	Com_sprintf( path, sizeof(path), "%s/%s/etconsole.log", homepath, gamedir );
++	Com_sprintf( kept, sizeof(kept), "%s/%s/etconsole-last.log", homepath, gamedir );
++
++	log = fopen( path, "rb" );
++	if( log ) {
++		size_t got;
++
++		fseek( log, 0, SEEK_END );
++		size = ftell( log );
++		fseek( log, size > UI_ETA_LOG_TAIL ? size - UI_ETA_LOG_TAIL : 0, SEEK_SET );
++		got = fread( tail, 1, UI_ETA_LOG_TAIL, log );
++		tail[got] = '\0';
++		fclose( log );
++
++		/* Split into lines, in place. */
++		for( i = 0; tail[i] && lineCount < (int)(sizeof(lines) / sizeof(lines[0])); ) {
++			lines[lineCount++] = &tail[i];
++			while( tail[i] && tail[i] != '\n' ) {
++				i++;
++			}
++			if( tail[i] ) {
++				tail[i++] = '\0';
++			}
++		}
++
++		/* The last sign of the end. */
++		for( i = lineCount - 1; i >= 0 && failure < 0; i-- ) {
++			for( m = 0; markers[m]; m++ ) {
++				if( strstr( lines[i], markers[m] ) ) {
++					failure = i;
++					break;
++				}
++			}
++		}
++
++		if( failure >= 0 ) {
++			/* On a crash the engine shuts the client before it names the
++			   signal, so what the game was doing is before that. */
++			for( before = failure; before > 0 && failure - before < 80; before-- ) {
++				if( strstr( lines[before - 1], "CL_Shutdown" ) ) {
++					before--;
++					break;
++				}
++			}
++			if( before <= 0 || failure - before >= 80 ) {
++				before = failure;
++			}
++
++			Com_sprintf( said, sizeof(said), "Last time, the game shut down. It said: %s.", UI_AccessibilityLogLineSaid( lines[failure] ) );
++			Q_strcat( said, sizeof(said), " Before that:" );
++			for( i = before - 1, found = 0; i >= 0 && found < UI_ETA_LOG_LINES; i-- ) {
++				if( UI_AccessibilityLogLineCounts( lines[i] ) ) {
++					found++;
++				}
++			}
++			for( i++; i < before; i++ ) {
++				if( UI_AccessibilityLogLineCounts( lines[i] ) ) {
++					Q_strcat( said, sizeof(said), " " );
++					Q_strcat( said, sizeof(said), UI_AccessibilityLogLineSaid( lines[i] ) );
++					Q_strcat( said, sizeof(said), "." );
++				}
++			}
++			Com_Printf( "Accessibility: %s\n", said );
++			UI_AccessibilitySayLater( said );
++		}
++
++		remove( kept );
++		rename( path, kept );
++	}
++
++	/* Kept from now on, unless the player chose otherwise. */
++	if( !trap_Cvar_VariableValue( "logfile" ) ) {
++		trap_Cvar_Set( "logfile", "2" );
++	}
++}
++
++static void UI_AccessibilitySayLaterFrame( void ) {
++	if( !uiEtaSayLater[0] ) {
++		return;
++	}
++	/* Counted from the first frame drawn, not from when it was kept. */
++	if( !uiEtaSayLaterFrom ) {
++		uiEtaSayLaterFrom = trap_Milliseconds();
++		return;
++	}
++	if( trap_Milliseconds() - uiEtaSayLaterFrom < UI_ETA_SETTLED_WAIT_MS ) {
++		return;
++	}
++	UI_AccessibilitySay( uiEtaSayLater );
++	uiEtaSayLater[0] = '\0';
++}
++
++/*
++ * No Quarter's game module for the Mac, written out of this mod's pk3
++ * into the mod's folder, where the game loads it from to run a game the
++ * player hosts. No Quarter ships no Mac version, so this mod brings one,
++ * and it used to be a file to copy in by hand. A file downloaded from the
++ * web carries the Mac's quarantine mark, and the Mac would not load it -
++ * the error said the file was missing while it sat in the folder - and
++ * on one tester's Mac "Open Anyway" never offered to let it. A file the
++ * game writes itself carries no mark. The game does the same for cgame_mac
++ * and ui_mac, from this same pk3, but not for the game module, which it
++ * only looks for loose in the folder.
++ *
++ * Written when missing, different, or carrying the mark; left alone when
++ * it is this build's already. Written beside it and renamed over it, so a
++ * write cut short never leaves half a library in its place.
++ */
++#define UI_ETA_MAC_GAME_IN_PAK "eta/qagame_mac"
++
++/*
++ * Whether the Mac will load the game module, tried as the menus start.
++ * When it will not, every map - hosted from the menus or started with
++ * /map - ends the game with an error that says the file is missing, and
++ * the console is the only place the Mac's reason appears. So it is said
++ * aloud, once the menus have settled, in the Mac's own words. Loaded and
++ * let go again at once: nothing in it runs but its constructors.
++ */
++static void UI_AccessibilityMacCheckGame( const char *path ) {
++	void *library = dlopen( path, RTLD_NOW | RTLD_LOCAL );
++	char reason[512];
++
++	if( library ) {
++		void *entry = dlsym( library, "vmMain" );
++
++		dlclose( library );
++		if( entry ) {
++			Com_Printf( "Accessibility: %s loads\n", path );
++			return;
++		}
++		Q_strncpyz( reason, "it has no vmMain", sizeof(reason) );
++	}
++	else {
++		const char *error = dlerror();
++
++		Q_strncpyz( reason, error ? error : "no reason given", sizeof(reason) );
++	}
++
++	Com_Printf( "^3Accessibility: the Mac will not load %s: %s\n", path, reason );
++	UI_AccessibilitySayLater( va( "Maps will not start: the Mac will not load No Quarter's game module. The Mac says: %s", reason ) );
++}
++
++static void UI_AccessibilityMacInstallGame( void ) {
++	static byte packed[65536];
++	static byte local[65536];
++	char homepath[MAX_OSPATH];
++	char gamedir[MAX_QPATH];
++	char path[MAX_OSPATH];
++	char temp[MAX_OSPATH + 8];
++	fileHandle_t f = 0;
++	FILE *existing;
++	FILE *out;
++	int length, left;
++	qboolean same, failed = qfalse;
++
++	length = trap_FS_FOpenFile( UI_ETA_MAC_GAME_IN_PAK, &f, FS_READ );
++	if( length <= 0 || !f ) {
++		if( f ) {
++			trap_FS_FCloseFile( f );
++		}
++		return; /* a pk3 built without it */
++	}
++
++	trap_Cvar_VariableStringBuffer( "fs_homepath", homepath, sizeof(homepath) );
++	trap_Cvar_VariableStringBuffer( "fs_game", gamedir, sizeof(gamedir) );
++	if( !homepath[0] ) {
++		trap_FS_FCloseFile( f );
++		return;
++	}
++	if( !gamedir[0] ) {
++		Q_strncpyz( gamedir, "nq", sizeof(gamedir) );
++	}
++	Com_sprintf( path, sizeof(path), "%s/%s/qagame_mac", homepath, gamedir );
++	Com_sprintf( temp, sizeof(temp), "%s.new", path );
++
++	existing = fopen( path, "rb" );
++	same = existing && getxattr( path, "com.apple.quarantine", NULL, 0, 0, 0 ) < 0;
++
++	out = fopen( temp, "wb" );
++	if( !out ) {
++		Com_Printf( "^3Accessibility: could not write %s\n", temp );
++		if( existing ) {
++			fclose( existing );
++		}
++		trap_FS_FCloseFile( f );
++		UI_AccessibilityMacCheckGame( path );
++		return;
++	}
++
++	for( left = length; left > 0; ) {
++		int chunk = left < (int)sizeof(packed) ? left : (int)sizeof(packed);
++
++		trap_FS_Read( packed, chunk, f );
++		if( (int)fwrite( packed, 1, chunk, out ) != chunk ) {
++			failed = qtrue;
++			break;
++		}
++		if( same && ( (int)fread( local, 1, chunk, existing ) != chunk || memcmp( packed, local, chunk ) ) ) {
++			same = qfalse;
++		}
++		left -= chunk;
++	}
++	if( same && fgetc( existing ) != EOF ) {
++		same = qfalse; /* the one there is longer */
++	}
++
++	trap_FS_FCloseFile( f );
++	if( existing ) {
++		fclose( existing );
++	}
++	if( fclose( out ) != 0 ) {
++		failed = qtrue;
++	}
++
++	if( failed || same ) {
++		remove( temp );
++		if( failed ) {
++			Com_Printf( "^3Accessibility: could not write %s\n", temp );
++		}
++	}
++	else if( rename( temp, path ) != 0 ) {
++		remove( temp );
++		Com_Printf( "^3Accessibility: could not put the game module at %s\n", path );
++	}
++	else {
++		Com_Printf( "Accessibility: wrote No Quarter's game module for the Mac to %s\n", path );
++	}
++	UI_AccessibilityMacCheckGame( path );
++}
++#endif
++
+ static void UI_AccessibilityConsoleFrame( void ) {
+ 	static qboolean wasOpen;
+ 	uiClientState_t cstate;
+ 	qboolean open = ( trap_Key_GetCatcher() & KEYCATCH_CONSOLE ) ? qtrue : qfalse;
+ 
++#ifdef __APPLE__
++	UI_AccessibilitySayLaterFrame();
++#endif
++
+ 	trap_GetClientState( &cstate );
+ 	if( cstate.connState == CA_ACTIVE ) {
+ 		wasOpen = open;

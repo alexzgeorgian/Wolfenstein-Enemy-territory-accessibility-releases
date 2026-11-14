@@ -1,0 +1,114 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 442bdf0..43e6fc0 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -4049,43 +4049,76 @@ static ETA_Interaction ETA_InteractionForHint(int icon)
+ #define ETA_HINT_SETTLE_MS 250
+ 
+ /**
+- * @brief Says how a construction is coming along while it is being built.
++ * @brief Says how a construction is coming along, and when it is done.
+  *
+  * The tester finished a construction and said afterwards that they had
+  * known to keep holding the key only because they remembered the bar
+  * filling on screen. The bar was already arriving - the game sends a
+  * constructible's progress as the value beside the cursor icon, which
+  * is the same number the HUD draws - and nothing said it out loud once
+- * the work had started. The interaction report speaks the figure once,
+- * when the icon first settles, and then goes quiet for the whole climb.
++ * the work had started.
+  *
+  * Milestones rather than a running count, for the reason the objective
+  * distance uses them: a number that changes every frame is a voice that
+  * never stops.
+  *
+- * There is deliberately no "complete". G_ConstructiblePlayerBuild sets
+- * the progress back to zero the instant a construction finishes, so a
+- * value that has dropped is indistinguishable from a player who let go
+- * of the key - and announcing "built" over something still half
+- * standing is the kind of confident wrongness this mod exists to avoid.
+- * A construction that is an objective has its finish announced by the
+- * objective narration, from the map script's own record.
++ * The completion callout was missing from the first attempt at this, on
++ * the reasoning that there was no honest signal for it - and that was
++ * simply wrong. G_ConstructiblePlayerBuild does set the progress back to
++ * zero in the same frame it crosses 250, so a dropped value really is
++ * indistinguishable from a player letting go, and this still refuses to
++ * read anything into that. But it also stamps lastTaskAchievedTime, and
++ * G_CheckForCursorHints then sends HINT_COMPLETED with a value of 255
++ * for the next three quarters of a second. That is what fills the bar to
++ * the top on a sighted player's screen. It is an explicit event from the
++ * engine, addressed to the one player who did the work, and the second
++ * report - "it stops at 75 instead of reaching 100" - was describing
++ * exactly the announcement that event should have produced.
++ *
++ * HINT_COMPLETED covers any finished task, not only building, which is
++ * why it is only spoken when this was already tracking a climb. The
++ * interaction report still ignores it: it holds the previous icon rather
++ * than naming a new thing to interact with, which is a different
++ * question from whether the work finished.
+  */
+ static void ETA_NarrateBuildProgress(void)
+ {
+-	static qboolean building = qfalse;
++	static qboolean building  = qfalse;
++	static qboolean announced = qfalse;
++	qboolean        shown;
+ 	qboolean        active;
+ 	int             percent;
+ 
+ 	if (!cg.snap || !eta_interactionCallouts.integer)
+ 	{
+-		building = qfalse;
++		building  = qfalse;
++		announced = qfalse;
+ 		ETA_HudNarrator_ResetBuildProgress();
+ 		return;
+ 	}
+ 
+-	active = (qboolean)(cg.cursorHintTime != 0 && cg.cursorHintFade > 0
+-	                    && (cg.time - cg.cursorHintTime) < cg.cursorHintFade
++	/* The same window CG_DrawCursorhint draws inside, so the words and
++	   the icon appear and go quiet together. */
++	shown = (qboolean)(cg.cursorHintTime != 0 && cg.cursorHintFade > 0
++	                   && (cg.time - cg.cursorHintTime) < cg.cursorHintFade);
++
++	if (shown && cg.cursorHintIcon == HINT_COMPLETED)
++	{
++		/* Only for a climb this was actually following. The same event
++		   fires for defusing, for repairing a gun, for planting a mine -
++		   and calling one of those a finished construction would be the
++		   confident wrongness this was written to avoid. */
++		if (building && !announced)
++		{
++			announced = qtrue;
++			ETA_HudNarrator_SpeakBuildComplete();
++			ETA_HudNarrator_ResetBuildProgress();
++		}
++
++		return;
++	}
++
++	active = (qboolean)(shown
+ 	                    && (cg.cursorHintIcon == HINT_BUILD
+ 	                        || cg.cursorHintIcon == HINT_CONSTRUCTIBLE)
+ 	                    && cg.cursorHintValue > 0);
+@@ -4096,14 +4129,16 @@ static void ETA_NarrateBuildProgress(void)
+ 		   coming back to it is announced rather than met with silence. */
+ 		if (building)
+ 		{
+-			building = qfalse;
++			building  = qfalse;
++			announced = qfalse;
+ 			ETA_HudNarrator_ResetBuildProgress();
+ 		}
+ 
+ 		return;
+ 	}
+ 
+-	building = qtrue;
++	building  = qtrue;
++	announced = qfalse;
+ 
+ 	/* The same figure the status bar under the icon draws, from the same
+ 	   value, so the words and the bar cannot disagree. */

@@ -1,0 +1,71 @@
+diff --git a/src/game/g_main.c b/src/game/g_main.c
+index 7ba5e71..4fb9de1 100644
+--- a/src/game/g_main.c
++++ b/src/game/g_main.c
+@@ -2874,15 +2874,21 @@ static void ServerCheck( void ) {
+ 	unsigned int i;
+ 	qboolean msgWhine = qfalse;
+ 	qboolean shutdown = qfalse;
++	// [Accessibility]: why the server will not start, for the error that says so
++	char shutdownReason[MAX_STRING_CHARS] = "";
+ 
+ 	G_Printf("--- Starting " EOTS_SHORTNAME " server check ... ---\n" );
+ 
+ 	trap_Cvar_VariableStringBuffer( "version", versionStr, sizeof(versionStr) );
+ 
+ /* TODO: double check sever version*/
+-#ifdef __MACOS__
++// [Accessibility]: ET: Legacy on today's Mac reports itself as 2.60d, the
++// last Mac version of the original game, as the old PowerPC Macs did; only
++// __APPLE__ is defined on it, not __MACOS__.
++#if defined(__MACOS__) || defined(__APPLE__)
+ 	if ( !strstr( versionStr, "2.60d") ) {
+ 		G_Printf( "^1Error: NoQuarter EoTS doesn't support ET version %s. Upgrade to 2.60d on Mac systems.\n", versionStr);
++		Q_strcat( shutdownReason, sizeof(shutdownReason), va( "It does not support this game version, %s. ", versionStr ) );
+ 		shutdown = qtrue;
+ 		msgWhine = qtrue;
+ 	}
+@@ -2906,6 +2912,7 @@ static void ServerCheck( void ) {
+ 	if ( !strstr( versionStr, "2.60b") && !strstr( versionStr, "OpenWolf") ) {
+ 		G_Printf( "^1Error: NoQuarter EoTS doesn't support this ET version/engine %s..\n", versionStr);
+ 		G_Printf( "^1Use ET 2.60b for Win/Linux or 2.60d for Mac or use ET:Xreal/OpenWolf");
++		Q_strcat( shutdownReason, sizeof(shutdownReason), va( "It does not support this game version, %s. ", versionStr ) );
+ 		shutdown = qtrue;
+ 		msgWhine = qtrue;
+ 	}
+@@ -2914,11 +2921,13 @@ static void ServerCheck( void ) {
+ 	trap_Cvar_VariableStringBuffer( "fs_game", versionStr, sizeof(versionStr) );
+ 	if ( !Q_stricmp(versionStr, "etmain" ) ) {
+ 		G_Printf( "^1Error: Server installed in etmain directory, NoQuarter EoTS will not work!\n" );
++		Q_strcat( shutdownReason, sizeof(shutdownReason), "It is installed in the etmain folder; it needs a folder of its own called nq. " );
+ 		msgWhine = qtrue;
+ 		shutdown = qtrue;
+ 	}
+ 	else if ( Q_stricmp(versionStr, "nq" ) != 0 ) {
+ 		G_Printf("^1Error: Wrong mod directory, should be 'nq'\n" );
++		Q_strcat( shutdownReason, sizeof(shutdownReason), va( "Its folder is called %s; it must be called nq. ", versionStr ) );
+ 		msgWhine = qtrue;
+ 		shutdown = qtrue;
+ 	}
+@@ -2926,6 +2935,7 @@ static void ServerCheck( void ) {
+ 	trap_Cvar_VariableStringBuffer( "sv_pure", versionStr, sizeof(versionStr) );
+ 	if ( atoi(versionStr) < 0 ) {
+ 		G_Printf("^1Error: Server is not pure!! NoQuarter EoTS will not work properly!\n" );
++		Q_strcat( shutdownReason, sizeof(shutdownReason), "The server's sv_pure setting is below zero. " );
+ 		msgWhine = qtrue;
+ 		shutdown = qtrue;
+ 	}
+@@ -2995,8 +3005,11 @@ static void ServerCheck( void ) {
+ 
+ 	if (shutdown) {
+ 		G_Printf("--- Software failure: Guru Meditation error! See previous errors. ---\n" );
+-		G_ShutdownGame(0);
+-		exit(1);
++		// [Accessibility]: an error, not exit(). exit() ended the whole game
++		// on a listen server - the player's own game, window and all - with
++		// the reason only in the console; the error stops the server, takes
++		// the player back to the menus, and the error popup says why.
++		G_Error( "No Quarter cannot start a server. %s", shutdownReason );
+ 	}
+ 
+ 	// create msg in banner

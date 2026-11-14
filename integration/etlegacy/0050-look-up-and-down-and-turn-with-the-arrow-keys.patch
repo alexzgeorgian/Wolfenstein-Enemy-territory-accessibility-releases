@@ -1,0 +1,196 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 43e6fc0..05399bf 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3342,6 +3342,65 @@ static void ETA_NarrateFacing(void)
+ 	}
+ }
+ 
++/**
++ * @brief Says what the player is looking at when they aim up or down.
++ *
++ * The cardinal callout answers "which way am I facing", and it is a yaw
++ * report: it says north and south and says nothing at all about the other
++ * axis. A player who tips the view up gets no acknowledgement that
++ * anything happened, and no way to tell a ceiling a foot above them from
++ * open sky.
++ *
++ * Saying the angle - "forty degrees up" - would be honest and useless.
++ * Forty degrees up is the sky in a field and a ceiling in a cellar, and
++ * the player wants to know which. So the pitch is only the trigger: what
++ * gets spoken is the same trace the binoculars use, along the line the
++ * player is actually looking down, and it comes back with the words that
++ * narration already has - "Open sky", "Concrete ground, 3 meters",
++ * "Wooden ceiling", "Nothing in range".
++ *
++ * It fires when the aim settles into a new band rather than while it is
++ * moving, for the reason the facing callout does: a sweep from the floor
++ * to the sky passes through everything in between, and narrating the
++ * journey buries the destination.
++ */
++static void ETA_NarrateLookAround(void)
++{
++	char description[128];
++	int  distance;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_facingCallouts.integer)
++	{
++		ETA_HudNarrator_ResetLookPitch();
++		return;
++	}
++
++	/* While zoomed, the zoom narration is already answering this question
++	   at the range the player chose, and it re-reads on every change
++	   rather than only when the aim settles. Two voices on one trace. */
++	if (cg.zoomedBinoc || cg.zoomed)
++	{
++		ETA_HudNarrator_ResetLookPitch();
++		return;
++	}
++
++	/* Predicted, like the yaw: the look is a local action and the
++	   snapshot lags it by a round trip. */
++	if (!ETA_HudNarrator_UpdateLookPitch(cg.predictedPlayerState.viewangles[PITCH], cg.time))
++	{
++		return;
++	}
++
++	if (!ETA_DescribeLookAhead(description, sizeof(description), &distance, ETA_LOOK_AHEAD_RANGE, NULL))
++	{
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakLookAhead(description, distance);
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief How long the obstacle ahead stays announced before it is news again.
+  *
+@@ -6986,6 +7045,12 @@ void CG_DrawActive()
+ 		   answer to this question. */
+ 		ETA_NarrateFacing();
+ 
++		/* Beside the cardinal callout and for the same reason: together
++		   they are the two halves of "where am I pointing", and both
++		   stand down while an answer the player asked for is still
++		   being spoken. */
++		ETA_NarrateLookAround();
++
+ 		/* Most urgent last: on a backend that delivers a new report by
+ 		   cutting off the one in progress, a frame that produces several
+ 		   leaves the hazard spoken rather than the heading. */
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index c6ff762..b9e68e4 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8797,23 +8797,65 @@ static void UI_AccessibilityInstallBinds(void)
+ 		{ K_KP_SLASH, "weapalt",                 NULL,            3 },
+ 		/* The command map survey. These only do anything while the map
+ 		   key is held, so in a stock install they cost nothing: the
+-		   arrow keys and the navigation cluster above them are bound to
+-		   nothing at all in default.cfg.
+-
+-		   They are NOT free in default_left.cfg, which puts movement on
+-		   the arrows - so the rule above does the work here rather than
+-		   an exception being carved out. A player on that layout keeps
+-		   their movement keys and binds the survey wherever suits
+-		   them. Walking while trying to read the map would be worse
+-		   than having to bind a key. */
+-		{ K_UPARROW,   "accessibilityMapNorth", NULL,            4 },
+-		{ K_DOWNARROW, "accessibilityMapSouth", NULL,            4 },
+-		{ K_RIGHTARROW,"accessibilityMapEast",  NULL,            4 },
+-		{ K_LEFTARROW, "accessibilityMapWest",  NULL,            4 },
++		   navigation cluster is bound to nothing at all in default.cfg.
++
++		   They are NOT free in default_left.cfg, which puts movement
++		   and leaning here - so the rule above does the work rather
++		   than an exception being carved out. A player on that layout
++		   keeps their keys and binds the survey wherever suits them. */
+ 		{ K_PGUP,      "accessibilityMapUp",    NULL,            4 },
+ 		{ K_PGDN,      "accessibilityMapDown",  NULL,            4 },
+ 		{ K_HOME,      "accessibilityMapHere",  NULL,            4 },
+-		{ K_END,       "accessibilityMapNext",  NULL,            4 }
++		{ K_END,       "accessibilityMapNext",  NULL,            4 },
++		/* Turning and looking.
++
++		   Stock ET binds no key to either. Aiming is the mouse and only
++		   the mouse: the whole right-handed default config contains no
++		   +left, +right, +lookup or +lookdown, and the left-handed one
++		   reaches them only through +mlook. So a player without a mouse
++		   could walk around a map and never once change which way they
++		   were pointing - which makes every direction the narration
++		   says unusable, because there is nothing to act on it with.
++
++		   That is worth more than the map survey's claim on these keys,
++		   which is why the survey moves to the keypad below. The four
++		   rows name what the survey put here so the move happens for
++		   players who already have it; an arrow they rebound themselves
++		   is left alone, and so is a left-handed layout's movement. */
++		{ K_UPARROW,   "+lookup",               "accessibilityMapNorth", 5 },
++		{ K_DOWNARROW, "+lookdown",             "accessibilityMapSouth", 5 },
++		{ K_RIGHTARROW,"+right",                "accessibilityMapEast",  5 },
++		{ K_LEFTARROW, "+left",                 "accessibilityMapWest",  5 },
++		/* There is deliberately no row here putting the view back
++		   level, and it is not an oversight. ET: Legacy has no
++		   centerview: the command exists in no table in the tree, and
++		   the "centerview" its own default_left.cfg binds to HOME has
++		   been a dead bind for as long as that file has shipped. Only
++		   the client can write cl.viewangles and this mod is cgame and
++		   ui, so there is nothing honest to bind. The look report is
++		   what stands in for it - aim down until it says the ground.
++
++		   The survey's four directions, moved onto the keypad cluster,
++		   which has the same shape under the other hand.
++
++		   These are not free: the stock config puts selectbuddy on
++		   them, which picks a fireteam member out by slot number. That
++		   is a real command and losing five of its eight slots is a
++		   real cost - it is taken deliberately, because selectbuddy
++		   needs a fireteam, a roster the player knows the order of and
++		   a second command to follow it, while reading the map is how a
++		   blind player finds out where anything is at all. KP_END and
++		   KP_HOME keep slots 0 and 6, and the whole cluster rebinds
++		   like any other key. */
++		{ K_KP_UPARROW,   "accessibilityMapNorth", "selectbuddy 7", 5 },
++		{ K_KP_DOWNARROW, "accessibilityMapSouth", "selectbuddy 1", 5 },
++		{ K_KP_RIGHTARROW,"accessibilityMapEast",  "selectbuddy 5", 5 },
++		{ K_KP_LEFTARROW, "accessibilityMapWest",  "selectbuddy 3", 5 },
++		/* Middle of the cluster for "where am I", which is what it
++		   points at. HOME above keeps it too; this is the one the
++		   left-handed layout can actually have, since that config
++		   already uses HOME. */
++		{ K_KP_5,         "accessibilityMapHere",  "selectbuddy 4", 5 }
+ 	};
+ 
+ 	vmCvar_t installed;
+@@ -8858,10 +8900,25 @@ static void UI_AccessibilityInstallBinds(void)
+ 		}
+ 		else if (binds[i].replaces && !Q_stricmp(current, binds[i].replaces))
+ 		{
+-			/* The one case where an existing binding is replaced, and only
+-			   when it is still exactly the command named above.
++			/* The only case where an existing binding is replaced, and
++			   only when it is still exactly the command named above -
++			   so a key the player has touched since is never taken.
++
++			   Three kinds of command are named there, and each had to
++			   be argued for; tests/keyboard_reachable_test.py holds the
++			   list and fails the build on a fourth appearing without
++			   one, because naming what is already on a key is otherwise
++			   a way to take any key at all, movement included.
++
++			   The first kind is the mod's own earlier binds, moved to
++			   make room. Nothing is lost: the command lands on another
++			   key in the same table.
++
++			   The second is selectbuddy, which is not inert and is
++			   discussed at the rows that take it.
+ 
+-			   Those two commands cannot do anything. CG_WeaponBank_f rejects
++			   The third is the weapon banks. Those two commands cannot
++			   do anything. CG_WeaponBank_f rejects
+ 			   any bank outside 1..MAX_WEAP_BANKS_MP-1, so "weaponbank 10" -
+ 			   which the stock config binds to 0 - is thrown out before it
+ 			   reaches the table; and bank 9's row in weapBanksMultiPlayer is

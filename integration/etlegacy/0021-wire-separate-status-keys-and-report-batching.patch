@@ -1,0 +1,311 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index c9e7ec6..5a25de4 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -365,6 +365,119 @@ static void CG_AccessibilityStopSpeech_f(void)
+ 	ETA_Speech_Stop();
+ }
+ 
++/**
++ * @brief The current weapon's loaded rounds, or -1 when it has none to
++ * report - a knife, or a weapon the engine gives no ammo value for.
++ * @param[out] ammo
++ * @return qtrue when ammo was written.
++ */
++static qboolean CG_AccessibilityAmmoValue(int *ammo)
++{
++	int clips, akimboammo, maxammo;
++
++	if (!cg.snap || !IS_VALID_WEAPON((weapon_t)cg.snap->ps.weapon))
++	{
++		return qfalse;
++	}
++
++	CG_PlayerAmmoValue(ammo, &clips, &akimboammo, &maxammo, NULL);
++
++	return (qboolean)(*ammo >= 0);
++}
++
++/**
++ * @brief Speaks the team's current main objective, how far off it is and
++ * which way to turn for it.
++ *
++ * Shared by the full status report and the objectives key, so the two
++ * cannot drift into describing the same objective differently. The caller
++ * opens the report; this only contributes parts to it.
++ *
++ * The route correction reuses the bearing ETA_NarrateObjectiveChange
++ * (cg_playerstate.c) already computes for the objective-direction cue, via
++ * AngleSubtract rather than AngleNormalize360 - the same helper
++ * cg_commandmap.c's CG_DrawCompassIcon uses to place a compass icon
++ * relative to view yaw - because a signed [-180, 180] "which way to turn"
++ * reads more naturally aloud than a 0-359 clock position. The +-15 degree
++ * "ahead" band is a judgment call, not a value found in this engine.
++ */
++static void CG_AccessibilityNarrateObjective(void)
++{
++	playerState_t *ps;
++	oidInfo_t     *objective;
++	vec3_t        delta, angles;
++	float         relativeYaw;
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	ps        = &cg.snap->ps;
++	objective = CG_MainObjectiveForTeam(cgs.clientinfo[cg.clientNum].team);
++
++	if (!objective)
++	{
++		return;
++	}
++
++	ETA_HudNarrator_SpeakObjective(objective->name);
++
++	ETA_NavigationSystem_AnnounceDistance((int)(Distance(ps->origin, objective->origin) * ETA_QU_TO_METERS));
++
++	VectorSubtract(objective->origin, ps->origin, delta);
++	vectoangles(delta, angles);
++	relativeYaw = AngleSubtract(angles[YAW], ps->viewangles[YAW]);
++
++	if (fabsf(relativeYaw) <= 15.0f)
++	{
++		ETA_NavigationSystem_AnnounceRouteCorrection("Objective is ahead");
++	}
++	else if (relativeYaw > 0.0f)
++	{
++		ETA_NavigationSystem_AnnounceRouteCorrection("Turn left toward the objective");
++	}
++	else
++	{
++		ETA_NavigationSystem_AnnounceRouteCorrection("Turn right toward the objective");
++	}
++}
++
++/**
++ * @brief CG_AccessibilityHealth_f
++ * Health alone, for a key the player can reach without leaving the
++ * movement keys. The full status report answers the same question but
++ * takes several seconds to get there, which is no use in a firefight.
++ */
++static void CG_AccessibilityHealth_f(void)
++{
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	ETA_HudNarrator_SpeakHealth(cg.snap->ps.stats[STAT_HEALTH]);
++}
++
++/**
++ * @brief CG_AccessibilityAmmo_f
++ * Loaded rounds alone. Paired with the health command above: between them
++ * they answer the two questions that decide whether to keep fighting.
++ */
++static void CG_AccessibilityAmmo_f(void)
++{
++	int ammo;
++
++	if (CG_AccessibilityAmmoValue(&ammo))
++	{
++		ETA_HudNarrator_SpeakAmmo(ammo);
++	}
++	else
++	{
++		ETA_Speech_Say("No ammo");
++	}
++}
++
+ /**
+  * @brief CG_AccessibilityStatus_f
+  * On-demand "query basic match state" command for the accessibility HUD
+@@ -391,7 +504,11 @@ static void CG_AccessibilityStatus_f(void)
+ {
+ 	playerState_t *ps = &cg.snap->ps;
+ 	weapon_t      weap;
+-	oidInfo_t     *objective;
++
++	/* One report, one spoken line. Six separate Say calls were six separate
++	   utterances, and the SAPI backend purges before each one - so a player
++	   not running NVDA heard the last fragment and nothing before it. */
++	ETA_Speech_BeginReport();
+ 
+ 	ETA_HudNarrator_SpeakHealth(ps->stats[STAT_HEALTH]);
+ 
+@@ -411,34 +528,9 @@ static void CG_AccessibilityStatus_f(void)
+ 		}
+ 	}
+ 
+-	objective = CG_MainObjectiveForTeam(cgs.clientinfo[cg.clientNum].team);
+-
+-	if (objective)
+-	{
+-		vec3_t delta, angles;
+-		float  relativeYaw;
+-
+-		ETA_HudNarrator_SpeakObjective(objective->name);
++	CG_AccessibilityNarrateObjective();
+ 
+-		ETA_NavigationSystem_AnnounceDistance((int)(Distance(ps->origin, objective->origin) * ETA_QU_TO_METERS));
+-
+-		VectorSubtract(objective->origin, ps->origin, delta);
+-		vectoangles(delta, angles);
+-		relativeYaw = AngleSubtract(angles[YAW], ps->viewangles[YAW]);
+-
+-		if (fabsf(relativeYaw) <= 15.0f)
+-		{
+-			ETA_NavigationSystem_AnnounceRouteCorrection("Objective is ahead");
+-		}
+-		else if (relativeYaw > 0.0f)
+-		{
+-			ETA_NavigationSystem_AnnounceRouteCorrection("Turn left toward the objective");
+-		}
+-		else
+-		{
+-			ETA_NavigationSystem_AnnounceRouteCorrection("Turn right toward the objective");
+-		}
+-	}
++	ETA_Speech_EndReport();
+ }
+ #endif
+ 
+@@ -447,6 +539,19 @@ static void CG_AccessibilityStatus_f(void)
+  */
+ static void CG_objectivesDown_f(void)
+ {
++#ifdef FEATURE_ACCESSIBILITY
++	/* The objectives key already means "what am I meant to be doing" - it
++	   just answered it by drawing a panel. Speaking it here augments the
++	   key the player already presses instead of claiming another one, and
++	   leaves the panel behaviour below exactly as it was. */
++	if (!cg.demoPlayback && cgs.objectives.show != SHOW_ON)
++	{
++		ETA_Speech_BeginReport();
++		CG_AccessibilityNarrateObjective();
++		ETA_Speech_EndReport();
++	}
++#endif
++
+ 	if (!cg.demoPlayback)
+ 	{
+ 		if (cgs.objectives.show == SHOW_SHUTDOWN && cg.time < cgs.objectives.fadeTime)
+@@ -3735,6 +3840,8 @@ static consoleCommand_t commands[] =
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	{ "accessibilityStatus",    CG_AccessibilityStatus_f     },
++	{ "accessibilityHealth",    CG_AccessibilityHealth_f     },
++	{ "accessibilityAmmo",      CG_AccessibilityAmmo_f       },
+ 	{ "accessibilityRepeat",    CG_AccessibilityRepeat_f     },
+ 	{ "accessibilityStopSpeech",CG_AccessibilityStopSpeech_f },
+ #endif
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index dc86662..38741fb 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -43,6 +43,7 @@
+ #include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ /**
+@@ -542,7 +543,25 @@ void CG_TransitionPlayerState(playerState_t *ps, playerState_t *ops)
+ #ifdef FEATURE_ACCESSIBILITY
+ 		if (IS_VALID_WEAPON((weapon_t)ps->weapon))
+ 		{
++			int ammo, clips, akimboammo, maxammo;
++
++			/* The name alone does not answer the question the player is
++			   actually asking when they press a weapon key mid-match, which
++			   is whether the thing they just drew is loaded. Both in one
++			   line, because two lines would cut each other off. */
++			ETA_Speech_BeginReport();
++
+ 			ETA_HudNarrator_SpeakWeapon(GetWeaponTableData((weapon_t)ps->weapon)->desc);
++
++			CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
++
++			/* A knife has no ammo value; saying nothing is right there. */
++			if (ammo >= 0)
++			{
++				ETA_HudNarrator_SpeakAmmo(ammo);
++			}
++
++			ETA_Speech_EndReport();
+ 		}
+ #endif
+ 
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 45b0d52..76e5f37 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8754,10 +8754,18 @@ static void UI_RunCinematicFrame(int handle)
+  * F7 and F11-F12 and leaves these three alone - so claiming them takes
+  * nothing away from a default install.
+  *
+- * Two rules keep this from being a key thief. An existing binding is never
+- * replaced, whatever it is, so a player who uses F5 for something else keeps
+- * it. And eta_bindsInstalled, archived, records that this ran, so a player
+- * who deliberately unbinds one does not find it back next launch.
++ * Two rules keep this from being a key thief. An existing binding is not
++ * replaced - with one exception, below - so a player who uses F5 for
++ * something else keeps it. And eta_bindsInstalled, archived, records that
++ * this ran, so a player who deliberately unbinds one does not find it back
++ * next launch.
++ *
++ * The exception is 9 and 0. Every letter A-Z is bound by the stock config,
++ * so there was no free key within reach of the movement hand - but those two
++ * number keys are bound to commands that cannot do anything (see below), and
++ * a key that does nothing is worth more to a blind player as health and ammo
++ * than it is as a dead weapon bank. Only those exact commands are replaced,
++ * and a test holds the engine to still making them dead.
+  */
+ static void UI_AccessibilityInstallBinds(void)
+ {
+@@ -8765,11 +8773,14 @@ static void UI_AccessibilityInstallBinds(void)
+ 	{
+ 		int        key;
+ 		const char *command;
++		const char *replaces;
+ 	} binds[] =
+ 	{
+-		{ K_F5, "accessibilityStatus"     },
+-		{ K_F6, "accessibilityRepeat"     },
+-		{ K_F8, "accessibilityStopSpeech" }
++		{ K_F5, "accessibilityStatus",     NULL            },
++		{ K_F6, "accessibilityRepeat",     NULL            },
++		{ K_F8, "accessibilityStopSpeech", NULL            },
++		{ '9',  "accessibilityHealth",     "weaponbank 9"  },
++		{ '0',  "accessibilityAmmo",       "weaponbank 10" }
+ 	};
+ 
+ 	vmCvar_t installed;
+@@ -8793,6 +8804,24 @@ static void UI_AccessibilityInstallBinds(void)
+ 		{
+ 			trap_Key_SetBinding(binds[i].key, binds[i].command);
+ 		}
++		else if (binds[i].replaces && !Q_stricmp(current, binds[i].replaces))
++		{
++			/* The one case where an existing binding is replaced, and only
++			   when it is still exactly the command named above.
++
++			   Those two commands cannot do anything. CG_WeaponBank_f rejects
++			   any bank outside 1..MAX_WEAP_BANKS_MP-1, so "weaponbank 10" -
++			   which the stock config binds to 0 - is thrown out before it
++			   reaches the table; and bank 9's row in weapBanksMultiPlayer is
++			   empty, so "weaponbank 9" resolves to no weapon. Both keys are
++			   inert in the stock game.
++
++			   That is an assumption about the engine, so it is not left as
++			   one: tests/weapon_bank_test.py fails the build if either bank
++			   ever stops being dead, rather than letting this quietly steal a
++			   key that started doing something. */
++			trap_Key_SetBinding(binds[i].key, binds[i].command);
++		}
+ 	}
+ 
+ 	trap_Cvar_Set("eta_bindsInstalled", "1");

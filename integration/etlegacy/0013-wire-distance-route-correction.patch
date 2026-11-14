@@ -1,0 +1,68 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 964e9c6..38d98a6 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -38,6 +38,7 @@
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "hud/hud_narrator.h"
++#include "navigation/navigation_system.h"
+ #endif
+ 
+ char *Binding_FromName(const char *cvar);
+@@ -297,9 +298,22 @@ oidInfo_t *CG_MainObjectiveForTeam(team_t team)
+  * On-demand "query basic match state" command for the accessibility HUD
+  * narrator (Milestone 4's exit condition). Bindable to a key; narrates
+  * health, the active weapon and its ammo, and the player's team's current
+- * main objective in one status report rather than announcing every stat
+- * change automatically, since health/ammo change too often during combat
+- * for that to be anything but noise.
++ * main objective - plus, per Milestone 6, the distance to that objective
++ * and a simple turn-left/right/ahead route correction - in one status
++ * report rather than announcing any of this automatically, since several
++ * of these (health/ammo, and a walking player's bearing to the objective)
++ * change too often during play for that to be anything but noise.
++ *
++ * The route correction reuses the same objective bearing
++ * ETA_NarrateObjectiveChange (cg_playerstate.c) already computes for the
++ * objective-direction audio cue, just via AngleSubtract instead of
++ * AngleNormalize360 - the same helper cg_commandmap.c's CG_DrawCompassIcon
++ * already uses to place a compass icon relative to view yaw - since a
++ * signed [-180, 180] "which way to turn" value reads more naturally as
++ * spoken text than a 0-359 clock position does. The +-15 degree "ahead"
++ * band is a judgment call, not a value found anywhere in the engine: no
++ * comparable on-course tolerance exists elsewhere in this codebase to
++ * measure it against.
+  */
+ static void CG_AccessibilityStatus_f(void)
+ {
+@@ -329,7 +343,29 @@ static void CG_AccessibilityStatus_f(void)
+ 
+ 	if (objective)
+ 	{
++		vec3_t delta, angles;
++		float  relativeYaw;
++
+ 		ETA_HudNarrator_SpeakObjective(objective->name);
++
++		ETA_NavigationSystem_AnnounceDistance((int)(Distance(ps->origin, objective->origin) * ETA_QU_TO_METERS));
++
++		VectorSubtract(objective->origin, ps->origin, delta);
++		vectoangles(delta, angles);
++		relativeYaw = AngleSubtract(angles[YAW], ps->viewangles[YAW]);
++
++		if (fabsf(relativeYaw) <= 15.0f)
++		{
++			ETA_NavigationSystem_AnnounceRouteCorrection("Objective is ahead");
++		}
++		else if (relativeYaw > 0.0f)
++		{
++			ETA_NavigationSystem_AnnounceRouteCorrection("Turn left toward the objective");
++		}
++		else
++		{
++			ETA_NavigationSystem_AnnounceRouteCorrection("Turn right toward the objective");
++		}
+ 	}
+ }
+ #endif

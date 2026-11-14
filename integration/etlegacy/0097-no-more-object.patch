@@ -1,0 +1,260 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 7d04142..94a66a7 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2373,6 +2373,171 @@ static const char *ETA_SurfaceMaterial(int surfaceFlags)
+  * @param[out] out     the name
+  * @param[in]  outSize size of out
+  */
++/**
++ * @brief The objective a thing belongs to, when one is close: its name,
++ * or NULL. Most of the map's moving and buildable parts - a wall to blow,
++ * a bridge to build, the clip round a gun nest - are an objective's.
++ */
++#define ETA_OBJECT_OBJECTIVE_UNITS 400.0f   /* about ten metres */
++
++static const char *ETA_ObjectiveNear(const vec3_t point)
++{
++	etaObjective_t objective;
++
++	if (!CG_AccessibilityNearestObjective(cgs.clientinfo[cg.clientNum].team, point, &objective)
++	    || !objective.name || !objective.name[0]
++	    || Distance(point, objective.origin) > ETA_OBJECT_OBJECTIVE_UNITS)
++	{
++		return NULL;
++	}
++
++	return objective.name;
++}
++
++/**
++ * @brief What a thing is from its kind, when it has no name of its own.
++ *
++ * The tester heard "Object" on several maps, again and again: anything
++ * the trace met that was not a player, the map's walls or a thing with a
++ * name was called that. The game knows what most of them are - a gun
++ * nest, a cabinet, a landmine, a construction, somebody's body - and so
++ * they are said as that, with the objective they belong to where there
++ * is one. qfalse for a part of the map that is only there - a barrier, a
++ * gate's frame, the invisible clip round a construction - which the
++ * caller says as the wall or ground it is.
++ */
++static qboolean ETA_EntityKindName(const entityState_t *es, const vec3_t at, char *out, size_t outSize)
++{
++	const char *objective = ETA_ObjectiveNear(at);
++	const char *what      = NULL;
++
++	switch (es->eType)
++	{
++	case ET_MISSILE:
++		switch (es->weapon)
++		{
++		case WP_LANDMINE:
++			what = "Landmine";
++			break;
++		case WP_DYNAMITE:
++			what = "Dynamite";
++			break;
++		case WP_SATCHEL:
++			what = "Satchel charge";
++			break;
++		case WP_SMOKE_BOMB:
++		case WP_SMOKE_MARKER:
++			what = "Smoke grenade";
++			break;
++		default:
++			what = "Grenade";
++			break;
++		}
++		break;
++	case ET_MG42_BARREL:
++		what = "Mounted machine gun";
++		break;
++	case ET_AAGUN:
++		what = "Anti-aircraft gun";
++		break;
++	case ET_CABINET_H:
++	case ET_HEALER:
++		what = "Health cabinet";
++		break;
++	case ET_CABINET_A:
++	case ET_SUPPLIER:
++		what = "Ammo cabinet";
++		break;
++	case ET_CORPSE:
++		what = "Body";
++		break;
++	case ET_ALARMBOX:
++		what = "Alarm box";
++		break;
++	case ET_FLAMEBARREL:
++		what = "Barrel";
++		break;
++	case ET_TRAP:
++		what = "Trap";
++		break;
++	case ET_CONSTRUCTIBLE:
++	case ET_CONSTRUCTIBLE_INDICATOR:
++	case ET_CONSTRUCTIBLE_MARKER:
++		if (objective)
++		{
++			Com_sprintf(out, outSize, "%s, construction", objective);
++			out[0] = (char)toupper((unsigned char)out[0]);
++			return qtrue;
++		}
++		what = "Construction";
++		break;
++	case ET_EXPLOSIVE:
++	case ET_EXPLOSIVE_INDICATOR:
++		if (objective)
++		{
++			Com_sprintf(out, outSize, "%s, dynamite target", objective);
++			out[0] = (char)toupper((unsigned char)out[0]);
++			return qtrue;
++		}
++		what = "Dynamite target";
++		break;
++	case ET_OID_TRIGGER:
++	case ET_WOLF_OBJECTIVE:
++	case ET_COMMANDMAP_MARKER:
++		if (objective)
++		{
++			Q_strncpyz(out, objective, outSize);
++			out[0] = (char)toupper((unsigned char)out[0]);
++			return qtrue;
++		}
++		return qfalse;
++	case ET_MOVER:
++		/* A door is named before this; a moving part with a model has
++		   its model's name. What is left is the map itself, moving. */
++		return qfalse;
++	default:
++		return qfalse;
++	}
++
++	Q_strncpyz(out, what, outSize);
++	return qtrue;
++}
++
++/* The surface a trace met, in words: "Wooden wall", "Gravel ground". */
++static void ETA_DescribeSurface(const trace_t *trace, char *out, size_t outSize)
++{
++	const char *material = ETA_SurfaceMaterial(trace->surfaceFlags);
++	const char *kind;
++
++	if (trace->surfaceFlags & SURF_LADDER)
++	{
++		kind = "ladder";
++	}
++	else if (trace->plane.normal[2] > 0.7f)
++	{
++		kind = "ground";
++	}
++	else if (trace->plane.normal[2] < -0.7f)
++	{
++		kind = "ceiling";
++	}
++	else
++	{
++		kind = "wall";
++	}
++
++	if (material)
++	{
++		Com_sprintf(out, outSize, "%s %s", material, kind);
++	}
++	else
++	{
++		/* No material word, so the surface kind carries the sentence
++		   and has to start it. */
++		Com_sprintf(out, outSize, "%c%s", toupper(kind[0]), kind + 1);
++	}
++}
++
+ static void ETA_DescribeTraceHit(const trace_t *trace, char *out, size_t outSize)
+ {
+ 	int entityNum = trace->entityNum;
+@@ -2392,63 +2557,43 @@ static void ETA_DescribeTraceHit(const trace_t *trace, char *out, size_t outSize
+ 
+ 	if (entityNum != ENTITYNUM_WORLD)
+ 	{
++		const entityState_t *es = &cg_entities[entityNum].currentState;
++		const char          *objective;
++		char                 surface[64];
++
+ 		/* A named thing is its name - "Truck" at the end of the scope
+ 		   rather than "Object". */
+-		if (CG_AccessibilityObjectName(&cg_entities[entityNum].currentState, out, outSize))
++		if (CG_AccessibilityObjectName(es, out, outSize))
+ 		{
+ 			out[0] = (char)toupper(out[0]);
+ 			return;
+ 		}
+ 
+-		switch (cg_entities[entityNum].currentState.eType)
++		if (ETA_EntityKindName(es, trace->endpos, out, outSize))
+ 		{
+-		case ET_MOVER:
+-			Q_strncpyz(out, "Door", outSize);
+-			return;
+-		case ET_EXPLOSIVE:
+-			Q_strncpyz(out, "Explosive", outSize);
+-			return;
+-		case ET_ITEM:
+-			Q_strncpyz(out, "Item", outSize);
+-			return;
+-		default:
+-			Q_strncpyz(out, "Object", outSize);
+ 			return;
+ 		}
+-	}
+-
+-	{
+-		const char *material = ETA_SurfaceMaterial(trace->surfaceFlags);
+-		const char *kind;
+-
+-		if (trace->surfaceFlags & SURF_LADDER)
+-		{
+-			kind = "ladder";
+-		}
+-		else if (trace->plane.normal[2] > 0.7f)
+-		{
+-			kind = "ground";
+-		}
+-		else if (trace->plane.normal[2] < -0.7f)
+-		{
+-			kind = "ceiling";
+-		}
+-		else
+-		{
+-			kind = "wall";
+-		}
+ 
+-		if (material)
++		/* The map's own structure, only built so it can move or be
++		   blown or built: said as the wall or ground it is, with the
++		   objective it is part of when there is one close by -
++		   "Old City Wall, wall" - never "Object". */
++		ETA_DescribeSurface(trace, surface, sizeof(surface));
++		objective = ETA_ObjectiveNear(trace->endpos);
++		if (objective)
+ 		{
+-			Com_sprintf(out, outSize, "%s %s", material, kind);
++			surface[0] = (char)tolower((unsigned char)surface[0]);
++			Com_sprintf(out, outSize, "%s, %s", objective, surface);
++			out[0] = (char)toupper((unsigned char)out[0]);
+ 		}
+ 		else
+ 		{
+-			/* No material word, so the surface kind carries the sentence
+-			   and has to start it. */
+-			Com_sprintf(out, outSize, "%c%s", toupper(kind[0]), kind + 1);
++			Q_strncpyz(out, surface, outSize);
+ 		}
++		return;
+ 	}
++
++	ETA_DescribeSurface(trace, out, outSize);
+ }
+ 
+ static qboolean ETA_DescribeLookAhead(char *out, size_t outSize, int *distanceMeters, float range, trace_t *outTrace)

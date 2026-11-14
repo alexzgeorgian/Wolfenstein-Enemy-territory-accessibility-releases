@@ -1,0 +1,610 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 7e47e65..203db07 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -39,6 +39,7 @@
+ #include "map/map_survey.h"
+ #include "navigation/navigation_system.h"
+ #include "navigation/place_classifier.h"
++#include "navigation/sniper_spots.h"
+ #include "speech/speech_manager.h"
+ #endif
+ 
+@@ -4044,6 +4045,348 @@ static void ETA_MapCellPlaces(int column, int row, int layer, char *out, size_t
+ 	ETA_PlaceSurvey_Describe(&survey, out, outSize);
+ }
+ 
++/**
++ * @brief Sniper spots: raised places with a long view, found by looking.
++ *
++ * The tester asked for help choosing a good place to use the sniper
++ * rifle from. A sighted player finds one by looking up at the roofs and
++ * balconies and judging what each one would see. This does the same
++ * with the map's walls and floors: across the whole map, every 128
++ * units, every floor a player could stand on that is up off the ground -
++ * a floor with another below it, or one at the edge of a drop - is stood
++ * on with the place probe, and if it is a roof, a balcony, a ledge or an
++ * upper floor, the view from a standing player's eyes is looked down in
++ * sixteen directions: each piece of ground out there, whether a standing
++ * enemy on it could be seen, and how far below it lies.
++ * navigation/sniper_spots.c judges the views and keeps the best.
++ *
++ * A whole map is thousands of looks, so it is done a millisecond a frame
++ * from the first frame of the map, and the list is ready in well under a
++ * minute; asked for sooner, the spots found so far are offered.
++ */
++#define ETA_SPOT_SPACING   128.0f   /* between the points looked at, about 3 metres */
++#define ETA_SPOT_STEP      192.0f   /* between the looks along each direction, about 5 metres */
++#define ETA_SPOT_LOOK      3072.0f  /* how far each direction is looked down, about 78 metres */
++#define ETA_SPOT_EYE       64.0f    /* a standing player's eyes over the floor */
++#define ETA_SPOT_CHEST     40.0f    /* an enemy's chest over the ground */
++#define ETA_SPOT_RAISED    96.0f    /* a drop this deep beside the floor: up off the ground */
++#define ETA_SPOT_BUDGET_MS 1
++
++static struct
++{
++	qboolean     started, done;
++	int          column, row, columns, rows;
++	ETA_SpotList list;
++	int          order[ETA_SPOT_MAX];
++	int          count, index, lastPress;
++	int          marked;      /* the spot under the marker, or -1 */
++	qboolean     judged;      /* whether the way there has been looked at */
++	int          checking;    /* the spot whose way down is being looked for, or -1 */
++	int          checkSteps;
++} eta_spots;
++
++/* Down from a little over a floor, at a point beside it: how far down
++   the next floor is, or a long way when there is none. */
++static float ETA_SpotDropAt(const vec3_t floor, float dx, float dy)
++{
++	trace_t trace;
++	vec3_t  start, end;
++
++	VectorSet(start, floor[0] + dx, floor[1] + dy, floor[2] + 18.0f);
++	VectorSet(end, start[0], start[1], floor[2] - 1024.0f);
++	trap_CM_BoxTrace(&trace, start, end, NULL, NULL, 0, MASK_PLAYERSOLID);
++
++	if (trace.startsolid)
++	{
++		return 0.0f;   /* a wall beside it, not a drop */
++	}
++	return trace.fraction >= 1.0f ? 1024.0f : floor[2] - trace.endpos[2];
++}
++
++static void ETA_SpotLook(const vec3_t floor, ETA_SpotView *view)
++{
++	vec3_t eye;
++	int    d;
++
++	ETA_SpotView_Clear(view);
++	VectorSet(eye, floor[0], floor[1], floor[2] + ETA_SPOT_EYE);
++
++	for (d = 0; d < ETA_SPOT_DIRECTIONS; d++)
++	{
++		float bearing = (float)d * (360.0f / ETA_SPOT_DIRECTIONS) * (float)M_PI / 180.0f;
++		float dx = sinf(bearing), dy = cosf(bearing);
++		float out;
++
++		for (out = ETA_SPOT_STEP; out <= ETA_SPOT_LOOK; out += ETA_SPOT_STEP)
++		{
++			trace_t trace;
++			vec3_t  at, below, ground, target;
++			qboolean seen;
++
++			VectorSet(at, eye[0] + dx * out, eye[1] + dy * out, eye[2]);
++			VectorSet(below, at[0], at[1], at[2] - 2048.0f);
++			trap_CM_BoxTrace(&trace, at, below, NULL, NULL, 0, MASK_SOLID);
++
++			if (trace.startsolid || trace.fraction >= 1.0f
++			    || (trace.surfaceFlags & (SURF_NODRAW | SURF_SKY)))
++			{
++				continue;   /* inside a building, or nothing there */
++			}
++			VectorCopy(trace.endpos, ground);
++
++			VectorSet(target, ground[0], ground[1], ground[2] + ETA_SPOT_CHEST);
++			trap_CM_BoxTrace(&trace, eye, target, NULL, NULL, 0, MASK_SOLID);
++			seen = (qboolean)(trace.fraction >= 1.0f);
++
++			/* A wall right in front: nothing further that way is seen.
++			   The edge of the spot's own floor hiding the ground just
++			   below it is not a wall - that is every roof and ledge. */
++			if (!seen && trace.fraction * Distance(eye, target) < 2.0f * ETA_SPOT_STEP
++			    && trace.endpos[2] > floor[2] + 18.0f)
++			{
++				break;
++			}
++
++			ETA_SpotView_Add(view, d, out * ETA_QU_TO_METERS, seen,
++			                 (floor[2] - ground[2]) * ETA_QU_TO_METERS, ETA_SPOT_STEP * ETA_QU_TO_METERS);
++		}
++	}
++}
++
++/* One point of the map: its floors, and any spot among them. */
++static void ETA_SpotScanPoint(float x, float y)
++{
++	vec3_t floors[ETA_PLACE_SURVEY_FLOORS];
++	int    count = ETA_SurveyFloors(x, y, floors, ETA_PLACE_SURVEY_FLOORS);
++	int    k;
++
++	for (k = 0; k < count; k++)
++	{
++		qboolean  raised = (qboolean)(k < count - 1 && floors[k][2] - floors[count - 1][2] >= ETA_SPOT_RAISED);
++		ETA_Place place;
++		vec3_t    origin;
++
++		/* The lowest floor is up off the ground only at the edge of a
++		   drop - a terrace, the top of a wall. */
++		if (!raised)
++		{
++			raised = (qboolean)(ETA_SpotDropAt(floors[k], 96.0f, 0.0f) >= ETA_SPOT_RAISED
++			                    || ETA_SpotDropAt(floors[k], -96.0f, 0.0f) >= ETA_SPOT_RAISED
++			                    || ETA_SpotDropAt(floors[k], 0.0f, 96.0f) >= ETA_SPOT_RAISED
++			                    || ETA_SpotDropAt(floors[k], 0.0f, -96.0f) >= ETA_SPOT_RAISED);
++		}
++		if (!raised)
++		{
++			continue;
++		}
++
++		VectorSet(origin, floors[k][0], floors[k][1], floors[k][2] + 24.0f);
++		CG_AccessibilityPlace(origin, &place);
++
++		if (place.kind == ETA_PLACE_ROOFTOP || place.kind == ETA_PLACE_BALCONY
++		    || place.kind == ETA_PLACE_LEDGE || place.kind == ETA_PLACE_UPPER_FLOOR)
++		{
++			ETA_SpotView   view;
++			ETA_SpotRating rating;
++
++			ETA_SpotLook(floors[k], &view);
++			rating = ETA_Spot_Rate(&view);
++			ETA_SpotList_Offer(&eta_spots.list, origin, place.kind, &rating);
++		}
++	}
++}
++
++/**
++ * @brief A little more of the map looked over, every frame, until done.
++ */
++static void ETA_SpotScanFrame(void)
++{
++	int began;
++
++	if (eta_spots.done || !cg.snap)
++	{
++		return;
++	}
++
++	if (!eta_spots.started)
++	{
++		eta_spots.started  = qtrue;
++		eta_spots.marked   = -1;
++		eta_spots.checking = -1;
++		eta_spots.columns = (int)((cg.mapcoordsMaxs[0] - cg.mapcoordsMins[0]) / ETA_SPOT_SPACING);
++		eta_spots.rows    = (int)((cg.mapcoordsMins[1] - cg.mapcoordsMaxs[1]) / ETA_SPOT_SPACING);
++		ETA_SpotList_Clear(&eta_spots.list);
++
++		if (!cg.mapcoordsValid || eta_spots.columns <= 0 || eta_spots.rows <= 0)
++		{
++			eta_spots.done = qtrue;
++			return;
++		}
++	}
++
++	began = trap_Milliseconds();
++
++	while (trap_Milliseconds() - began < ETA_SPOT_BUDGET_MS)
++	{
++		/* mapcoordsMins[1] is the north edge; rows run south from it. */
++		ETA_SpotScanPoint(cg.mapcoordsMins[0] + ((float)eta_spots.column + 0.5f) * ETA_SPOT_SPACING,
++		                  cg.mapcoordsMins[1] - ((float)eta_spots.row + 0.5f) * ETA_SPOT_SPACING);
++
++		if (++eta_spots.column >= eta_spots.columns)
++		{
++			eta_spots.column = 0;
++			if (++eta_spots.row >= eta_spots.rows)
++			{
++				eta_spots.done = qtrue;
++				return;
++			}
++		}
++	}
++}
++
++/**
++ * @brief Whether each spot can be got up to, looked for from the spot.
++ *
++ * About a third of the high places that see far on Oasis are the tops of
++ * walls and of houses nobody can climb. Looking for the way up to one of
++ * those searches the whole map before it gives up, which is many
++ * seconds; looking the other way, for a way down from it that could be
++ * walked back up, is over as soon as its few squares of roof are tried.
++ * So once the map has been looked over, while there is no marker out,
++ * each spot is searched from: steps a player could take toward it,
++ * walked backwards. A spot shut in on its own is left off the list; one
++ * whose search goes on spreading over the map is one a player can reach.
++ */
++#define ETA_SPOT_CHECK_STEPS 1500   /* squares tried: past this, the spot is on the map at large */
++
++static int ETA_RouteMoveExact(void *context, const float from[3], float to[3]);
++static int ETA_RouteMove(void *context, const float from[3], float to[3]);
++
++static int ETA_RouteMoveBackExact(void *context, const float from[3], float to[3])
++{
++	static const vec3_t footMins = { -ETA_ROUTE_HALF_WIDTH, -ETA_ROUTE_HALF_WIDTH, -24.0f };
++	static const vec3_t footMaxs = { ETA_ROUTE_HALF_WIDTH, ETA_ROUTE_HALF_WIDTH, 24.0f - 18.0f };
++	/* Where a step onto this square could come from: level with it or a
++	   jump below, or up to a drop above. Each is looked for in turn, the
++	   floor found from each checked by stepping forward from it. */
++	static const float above[3] = { 18.0f, 60.0f, 18.0f + ETA_ROUTE_MAX_DROP };
++	trace_t trace;
++	vec3_t  start, end;
++	float   back[3], here[3];
++	int     kind, i;
++
++	for (i = 0; i < 3; i++)
++	{
++		VectorSet(start, to[0], to[1], from[2] + above[i]);
++		VectorSet(end, to[0], to[1], from[2] - 18.0f - ETA_ROUTE_MAX_DROP);
++		trap_CM_BoxTrace(&trace, start, end, footMins, footMaxs, 0, MASK_PLAYERSOLID);
++		if (trace.startsolid || trace.allsolid || trace.fraction >= 1.0f || trace.plane.normal[2] < 0.7f)
++		{
++			continue;
++		}
++
++		VectorCopy(trace.endpos, back);
++		VectorCopy(from, here);
++
++		kind = ETA_RouteMove(context, back, here);
++		if (kind == ETA_PATH_NONE || fabsf(here[2] - from[2]) > 24.0f
++		    || (here[0] - from[0]) * (here[0] - from[0]) + (here[1] - from[1]) * (here[1] - from[1]) > 24.0f * 24.0f)
++		{
++			continue;
++		}
++
++		to[2] = back[2];
++		return kind;
++	}
++
++	return ETA_PATH_NONE;
++}
++
++/* Shifted across the way, as a step forward is: a narrow passage is a
++   way back as well as a way on. */
++static int ETA_RouteMoveBack(void *context, const float from[3], float to[3])
++{
++	static const float shifts[5] = { 0.0f, ETA_ROUTE_SHIFT, -ETA_ROUTE_SHIFT,
++		                             2.0f * ETA_ROUTE_SHIFT, -2.0f * ETA_ROUTE_SHIFT };
++	float dx = to[0] - from[0], dy = to[1] - from[1];
++	float ax = dx < 0.0f ? -dx : dx, ay = dy < 0.0f ? -dy : dy;
++	int   across = ax > 2.0f * ay ? 1 : ay > 2.0f * ax ? 0 : -1;
++	int   i;
++
++	for (i = 0; i < (across < 0 ? 1 : 5); i++)
++	{
++		float tried[3];
++		int   kind;
++
++		VectorCopy(to, tried);
++		if (across >= 0)
++		{
++			tried[across] += shifts[i];
++		}
++
++		kind = ETA_RouteMoveBackExact(context, from, tried);
++		if (kind != ETA_PATH_NONE)
++		{
++			VectorCopy(tried, to);
++			return kind;
++		}
++	}
++
++	return ETA_PATH_NONE;
++}
++
++static void ETA_SpotCheckFrame(void)
++{
++	int began, i;
++
++	if (!eta_spots.done || eta_marker.active || !cg.snap
++	    || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		eta_spots.checking = -1;   /* the way-finder is the marker's; start again later */
++		return;
++	}
++
++	if (eta_spots.checking < 0)
++	{
++		for (i = 0; i < eta_spots.list.count && eta_spots.list.spots[i].checked; i++)
++		{
++		}
++		if (i >= eta_spots.list.count)
++		{
++			return;
++		}
++
++		eta_spots.checking   = i;
++		eta_spots.checkSteps = 0;
++		ETA_PathFinder_Begin(eta_spots.list.spots[i].origin, cg.predictedPlayerState.origin, ETA_ROUTE_CELL,
++		                     ETA_MARKER_ARRIVE_METERS / ETA_QU_TO_METERS, 0);
++	}
++
++	began = trap_Milliseconds();
++
++	while (trap_Milliseconds() - began < ETA_SPOT_BUDGET_MS)
++	{
++		ETA_Spot      *spot  = &eta_spots.list.spots[eta_spots.checking];
++		ETA_PathState  state = ETA_PathFinder_Step(ETA_ROUTE_BUDGET_STEP, ETA_RouteMoveBack, NULL);
++
++		eta_spots.checkSteps += ETA_ROUTE_BUDGET_STEP;
++
++		if (state == ETA_PATH_SEARCHING && eta_spots.checkSteps < ETA_SPOT_CHECK_STEPS)
++		{
++			continue;
++		}
++
++		/* Found the player, or still spreading: on the map at large.
++		   Everywhere reachable from it tried, and the player not among
++		   it: shut in. */
++		spot->checked     = 1;
++		spot->unreachable = (state == ETA_PATH_PARTIAL || state == ETA_PATH_FAILED) ? 1 : 0;
++		eta_spots.checking = -1;
++		ETA_PathFinder_Reset();
++		return;
++	}
++}
++
+ /**
+  * @brief Whether the player is in the marked square right now.
+  */
+@@ -4413,6 +4756,146 @@ void CG_AccessibilityMarkerObjective(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief Puts the marker on the nearest sniper spot, or the next one.
++ *
++ * Pressed again within a few seconds, the next spot further off, as the
++ * objective key steps through the objectives. Each is said with what it
++ * looks out over - "Rooftop, sees 60 meters to the south-east, 6 meters
++ * up" - and the marker's sound then leads the way there, up the stairs
++ * or the ladder. Arriving says which way to look.
++ */
++void CG_AccessibilitySniperSpot(void)
++{
++	const ETA_Spot *spot;
++	char            text[128];
++	int             distance;
++	qboolean        cycling;
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++
++	if (cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		ETA_Speech_Say("Only in play: spawn first, then ask for a sniper spot");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	cycling = (qboolean)(eta_spots.lastPress && cg.time >= eta_spots.lastPress
++	                     && cg.time - eta_spots.lastPress < ETA_MARKER_CYCLE_MS);
++
++	if (!cycling || eta_spots.count <= 0)
++	{
++		eta_spots.count = ETA_SpotList_Nearest(&eta_spots.list, cg.predictedPlayerState.origin,
++		                                       eta_spots.order, ETA_SPOT_MAX);
++		eta_spots.index = 0;
++	}
++	else
++	{
++		eta_spots.index = (eta_spots.index + 1) % eta_spots.count;
++	}
++
++	if (eta_spots.count <= 0)
++	{
++		eta_spots.lastPress = 0;
++		ETA_Speech_Say(eta_spots.done ? "No sniper spots found on this map"
++		                              : "Still looking over the map for sniper spots. Ask again in a moment");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	eta_spots.lastPress = cg.time;
++	eta_spots.marked    = eta_spots.order[eta_spots.index];
++	eta_spots.judged    = qfalse;
++	spot                = &eta_spots.list.spots[eta_spots.marked];
++
++	memset(&eta_marker, 0, sizeof(eta_marker));
++	eta_marker.objective = qtrue;
++	eta_marker.leftIt    = qtrue;
++	VectorCopy(spot->origin, eta_marker.origin);
++	Q_strncpyz(eta_marker.name, va("sniper spot, look %s", ETA_Spot_Compass(spot->rating.bearing)),
++	           sizeof(eta_marker.name));
++	eta_marker.active = qtrue;
++	ETA_RouteForget();
++	distance = ETA_MarkerDistance();
++	ETA_NavigationSystem_StartMarkerApproach(distance);
++
++	ETA_Spot_Text(spot->kind, &spot->rating, text, sizeof(text));
++	ETA_Speech_Say(va("Sniper spot %d of %d%s: %s", eta_spots.index + 1, eta_spots.count,
++	                  eta_spots.done ? "" : ", more still being looked for", text));
++	ETA_NavigationSystem_AnnounceMarkerDistance(distance);
++	ETA_NavigationSystem_AnnounceHeight((eta_marker.origin[2] - cg.predictedPlayerState.origin[2]) * ETA_QU_TO_METERS);
++	ETA_MarkerSpeakWay();
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief Whether the way up to the sniper spot under the marker was found.
++ *
++ * A roof can look out a long way and have no way onto it at all: on
++ * Oasis about a third of the raised places that see far are the tops of
++ * walls and of houses nobody can climb. Looking for the way to every one
++ * of them is minutes of searching, so it is looked for only for the spot
++ * chosen - the search the marker makes anyway. When that search gives
++ * up right underneath the spot, there is no way up from here: the player
++ * is told, the marker taken away, and the spot left off the list.
++ */
++#define ETA_SPOT_UNDER_UNITS 320.0f   /* given up this close to it, flat: underneath */
++
++static void ETA_SpotJudgeWay(void)
++{
++	ETA_Spot *spot;
++	float     end[3];
++	int       points;
++
++	if (eta_spots.judged || eta_spots.marked < 0 || eta_spots.marked >= eta_spots.list.count
++	    || !eta_marker.active || !eta_route.jumps)
++	{
++		return;
++	}
++
++	spot = &eta_spots.list.spots[eta_spots.marked];
++	if (!VectorCompare(spot->origin, eta_marker.origin))
++	{
++		eta_spots.marked = -1;   /* the marker was put somewhere else */
++		return;
++	}
++
++	if (ETA_PathFinder_State() == ETA_PATH_FOUND)
++	{
++		eta_spots.judged = qtrue;
++		return;
++	}
++
++	points = ETA_PathFinder_PointCount();
++	if (ETA_PathFinder_State() != ETA_PATH_PARTIAL || points <= 0)
++	{
++		return;
++	}
++
++	eta_spots.judged = qtrue;
++	ETA_PathFinder_Point(points - 1, end);
++
++	if ((end[0] - spot->origin[0]) * (end[0] - spot->origin[0])
++	    + (end[1] - spot->origin[1]) * (end[1] - spot->origin[1]) < ETA_SPOT_UNDER_UNITS * ETA_SPOT_UNDER_UNITS
++	    && spot->origin[2] - end[2] > 64.0f)
++	{
++		spot->unreachable = 1;
++		eta_marker.active = qfalse;
++		ETA_RouteForget();
++		eta_spots.lastPress = 0;
++
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say("No way up to that sniper spot from here. It is left off the list; ask for the next");
++		ETA_Speech_EndReport();
++	}
++}
++
+ /**
+  * @brief Says where the marker is from here.
+  */
+@@ -4471,6 +4954,11 @@ void CG_AccessibilityMarkerReset(void)
+ {
+ 	memset(&eta_marker, 0, sizeof(eta_marker));
+ 	ETA_RouteForget();
++
++	/* And the sniper spots, which are looked for again on the new map. */
++	memset(&eta_spots, 0, sizeof(eta_spots));
++	eta_spots.marked   = -1;
++	eta_spots.checking = -1;
+ }
+ 
+ 
+@@ -4529,6 +5017,9 @@ void CG_AccessibilityMarkerFrame(void)
+ 	qboolean arrived;
+ 	int      distance;
+ 
++	ETA_SpotScanFrame();
++	ETA_SpotCheckFrame();
++
+ 	if (!eta_marker.active || !cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
+ 	{
+ 		return;
+@@ -4580,6 +5071,11 @@ void CG_AccessibilityMarkerFrame(void)
+ 	}
+ 
+ 	ETA_RouteFrame();
++	ETA_SpotJudgeWay();
++	if (!eta_marker.active)
++	{
++		return;
++	}
+ 
+ 	if (eta_markerCues.integer)
+ 	{
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 440a444..659f92c 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1601,6 +1601,14 @@ static void CG_AccessibilityMarkerObjective_f(void)
+ 	CG_AccessibilityMarkerObjective();
+ }
+ 
++/* The marker on the nearest sniper spot, or the next one: a raised place
++   that looks out a long way, found in the map's own walls and floors. */
++static void CG_AccessibilitySniperSpot_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	CG_AccessibilitySniperSpot();
++}
++
+ /**
+  * @brief "What is around me" - see cg_draw.c.
+  */
+@@ -5759,6 +5767,7 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
+ 	{ "accessibilityUseNext",     CG_AccessibilityUseNext_f },
+ 	{ "accessibilityUsePrev",     CG_AccessibilityUsePrev_f },
++	{ "accessibilitySniperSpot",  CG_AccessibilitySniperSpot_f },
+ 	{ "accessibilitySurroundings", CG_AccessibilitySurroundings_f },
+ 	{ "+accessibilityTurnLeft",   CG_AccessibilityTurnLeftDown_f },
+ 	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index c4aa09c..e4b77f5 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3445,6 +3445,7 @@ void CG_AccessibilityMarkerPlace(void);
+ void CG_AccessibilityMarkerWhere(void);
+ void CG_AccessibilityMarkerClear(void);
+ void CG_AccessibilityMarkerObjective(void);
++void CG_AccessibilitySniperSpot(void);
+ void CG_AccessibilityMarkerReset(void);
+ void CG_AccessibilityMarkerFrame(void);
+ void CG_AccessibilityMarkerApproach(void);
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index d954085..d5b0493 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9434,7 +9434,11 @@ void UI_AccessibilityInstallBinds(void)
+ 		   right-handed layout; the left-handed one zooms the map on them,
+ 		   and keeps them. */
+ 		{ ']',            "accessibilityUseNext",      NULL,         12 },
+-		{ '[',            "accessibilityUsePrev",      NULL,         12 }
++		{ '[',            "accessibilityUsePrev",      NULL,         12 },
++		/* The marker on a sniper spot. The slash is bound in neither
++		   stock config; it sits under the right hand beside the
++		   brackets, and on a laptop without a number pad. */
++		{ '/',            "accessibilitySniperSpot",   NULL,         13 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 7b4a397..ae73e21 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -874,6 +874,7 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymarkerobjective",              -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilityusenext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilityuseprev",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitysniperspot",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },

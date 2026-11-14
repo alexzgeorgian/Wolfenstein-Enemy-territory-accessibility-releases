@@ -1,0 +1,79 @@
+diff --git a/src/ui/ui_menu.c b/src/ui/ui_menu.c
+index 63d47d4..bc2fd4a 100644
+--- a/src/ui/ui_menu.c
++++ b/src/ui/ui_menu.c
+@@ -1184,6 +1184,40 @@ static qboolean Menu_HandleMouseESC(menuDef_t *menu, const int key, const qboole
+ 	return qtrue;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Has the mouse cursor moved since the last time this was asked?
++ *
++ * Deliberately exact rather than a tolerance: the question is whether the
++ * player touched the mouse at all, and any real movement crosses more than
++ * zero. A cursor resting untouched answers qfalse forever, which is the
++ * whole point - keyboard focus then survives every key press.
++ *
++ * The first call answers qtrue, so a menu opened with the cursor already
++ * over something still picks that up once, exactly as it did before.
++ *
++ * @param[in] x
++ * @param[in] y
++ * @return qtrue when the cursor is somewhere new
++ */
++static qboolean ETA_MenuCursorMoved(float x, float y)
++{
++	static qboolean seen = qfalse;
++	static float    lastX, lastY;
++
++	if (seen && lastX == x && lastY == y)
++	{
++		return qfalse;
++	}
++
++	seen  = qtrue;
++	lastX = x;
++	lastY = y;
++
++	return qtrue;
++}
++#endif
++
+ /**
+  * @brief Menu_HandleKey
+  * @param[in] menu
+@@ -1202,7 +1236,32 @@ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down)
+ 	// driven by the selected row instead of the last hovered button.
+ 	if (item == NULL || item->type != ITEM_TYPE_LISTBOX || !Menu_IsListBoxNavigationKey(key))
+ 	{
+-		Menu_HandleMouseMove(menu, DC->cursorx, DC->cursory);       // fix for focus not resetting on unhidden buttons
++#ifdef FEATURE_ACCESSIBILITY
++		/* A cursor that has not moved must not take focus off the item the
++		   keyboard put it on.
++
++		   This line re-runs mouse-move focus on every key press, from
++		   wherever the cursor happens to sit. With a hand on the mouse that
++		   is right - the cursor is where you are looking. Playing from the
++		   keyboard alone it is a trap: the cursor never moves, so it wins
++		   every time, and the item the arrow keys selected loses focus the
++		   instant a key is pressed.
++
++		   On the join-server screen that is not cosmetic. Its server list
++		   carries `onEnter { uiScript JoinServer }`, so a player who has
++		   arrowed to "REFRESH LIST" - and has just been told they are on it
++		   - presses Enter, focus jumps to the list under the parked cursor,
++		   and they connect to whichever server was highlighted. A tester
++		   lost a session to exactly that.
++
++		   The cursor still wins the moment it actually moves, so nothing
++		   changes for anyone using a mouse. ET: Legacy already carved out
++		   the same exception for listbox navigation, just above. */
++		if (ETA_MenuCursorMoved(DC->cursorx, DC->cursory))
++#endif
++		{
++			Menu_HandleMouseMove(menu, DC->cursorx, DC->cursory);   // fix for focus not resetting on unhidden buttons
++		}
+ 	}
+ 
+ 	// enter key handling for the window supercedes item enter handling

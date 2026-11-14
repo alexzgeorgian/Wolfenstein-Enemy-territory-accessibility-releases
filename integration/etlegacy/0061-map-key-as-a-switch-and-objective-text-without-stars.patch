@@ -1,0 +1,244 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 32e8fa9..bb8d4c0 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -1689,9 +1689,78 @@ int CG_AccessibilityObjectiveState(team_t team, int number)
+ /**
+  * @brief The map's description of one numbered objective, or NULL.
+  */
++/**
++ * @brief Map text as it should be heard.
++ *
++ * ET's objective and map descriptions break their lines with '*' - the
++ * panel draws each one on a line of its own - and a tester heard the
++ * stars read out as characters. Each break becomes the end of a
++ * sentence, runs of them and of spaces collapse to one, and nothing is
++ * left at either end.
++ */
++void CG_AccessibilitySpeakableText(const char *in, char *out, size_t outSize)
++{
++	size_t   used      = 0;
++	qboolean lineBreak = qfalse;
++
++	if (!outSize)
++	{
++		return;
++	}
++
++	while (in && *in && used + 3 < outSize)
++	{
++		char c = *in++;
++
++		if (c == '*' || c == '\n' || c == '\r')
++		{
++			lineBreak = qtrue;
++			continue;
++		}
++
++		if (c == ' ' && (used == 0 || lineBreak || out[used - 1] == ' '))
++		{
++			continue;
++		}
++
++		if (lineBreak)
++		{
++			while (used > 0 && out[used - 1] == ' ')
++			{
++				used--;
++			}
++
++			if (used > 0)
++			{
++				if (!strchr(".!?:;,", out[used - 1]))
++				{
++					out[used++] = '.';
++				}
++
++				out[used++] = ' ';
++			}
++
++			lineBreak = qfalse;
++		}
++
++		out[used++] = c;
++	}
++
++	while (used > 0 && out[used - 1] == ' ')
++	{
++		used--;
++	}
++
++	out[used] = '\0';
++}
++
+ const char *CG_AccessibilityObjectiveDescription(team_t team, int number)
+ {
+-	const char *text;
++	/* Two, so a caller holding one while asking for another keeps it. */
++	static char spoken[2][MAX_STRING_CHARS];
++	static int  next;
++	const char  *text;
++	char        *out;
+ 
+ 	if (number < 1 || number > MAX_OBJECTIVES)
+ 	{
+@@ -1701,7 +1770,17 @@ const char *CG_AccessibilityObjectiveDescription(team_t team, int number)
+ 	text = (team == TEAM_AXIS) ? cg.objDescription_Axis[number - 1]
+ 	                           : cg.objDescription_Allied[number - 1];
+ 
+-	return (text && text[0]) ? text : NULL;
++	if (!text || !text[0])
++	{
++		return NULL;
++	}
++
++	out  = spoken[next];
++	next = (next + 1) % 2;
++
++	CG_AccessibilitySpeakableText(text, out, sizeof(spoken[0]));
++
++	return out[0] ? out : NULL;
+ }
+ 
+ /**
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 17331fd..8aa94d7 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -673,7 +673,6 @@ static void CG_AccessibilityNarrateObjectiveText(void)
+ 	char       text[384];
+ 	const char *source;
+ 	team_t     team;
+-	int        i;
+ 
+ 	if (!cg.snap)
+ 	{
+@@ -695,15 +694,7 @@ static void CG_AccessibilityNarrateObjectiveText(void)
+ 		source = cg.objMapDescription_Neutral;
+ 	}
+ 
+-	Q_strncpyz(text, source, sizeof(text));
+-
+-	for (i = 0; text[i]; i++)
+-	{
+-		if (text[i] == '*')
+-		{
+-			text[i] = ',';
+-		}
+-	}
++	CG_AccessibilitySpeakableText(source, text, sizeof(text));
+ 
+ 	if (!text[0])
+ 	{
+@@ -1464,11 +1455,35 @@ static void CG_AutomapZoomOut_f(void)
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++static void CG_AutomapCollapse(void);
++#endif
++
+ /**
+  * @brief CG_AutomapExpandDown_f
+  */
+ static void CG_AutomapExpandDown_f(void)
+ {
++#ifdef FEATURE_ACCESSIBILITY
++	/* The map key as a switch rather than a button to hold. The survey
++	   walks the map with the other hand, and a tester asked not to have
++	   to keep one finger on the map key the whole time to do it: one
++	   press opens the map, the next closes it. Holding it still works -
++	   the release is simply not what closes it any more. Said out loud,
++	   because an open map and a closed one sound the same. */
++	if (eta_mapToggle.integer && cgs.autoMapExpanded)
++	{
++		CG_AutomapCollapse();
++		ETA_Speech_Say("Map closed");
++		return;
++	}
++
++	if (eta_mapToggle.integer && !cgs.autoMapExpanded)
++	{
++		ETA_Speech_Say("Map open");
++	}
++#endif
++
+ 	if (!cgs.autoMapExpanded)
+ 	{
+ 		cgs.autoMapExpanded = qtrue;
+@@ -1926,9 +1941,9 @@ static void CG_AccessibilityTurnRightUp_f(void)
+ #endif
+ 
+ /**
+- * @brief CG_AutomapExpandUp_f
++ * @brief Puts the expanded command map away.
+  */
+-static void CG_AutomapExpandUp_f(void)
++static void CG_AutomapCollapse(void)
+ {
+ 	if (cgs.autoMapExpanded)
+ 	{
+@@ -1949,6 +1964,23 @@ static void CG_AutomapExpandUp_f(void)
+ 	}
+ }
+ 
++/**
++ * @brief CG_AutomapExpandUp_f
++ */
++static void CG_AutomapExpandUp_f(void)
++{
++#ifdef FEATURE_ACCESSIBILITY
++	/* Letting go of the map key leaves the map up when it is a switch;
++	   the next press closes it. */
++	if (eta_mapToggle.integer)
++	{
++		return;
++	}
++#endif
++
++	CG_AutomapCollapse();
++}
++
+ /**
+  * @brief CG_ToggleAutomap_f
+  */
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 2d3b182..82671f4 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3416,6 +3416,7 @@ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObj
+  */
+ int CG_AccessibilityObjectiveCount(team_t team);
+ int CG_AccessibilityObjectiveState(team_t team, int number);
++void CG_AccessibilitySpeakableText(const char *in, char *out, size_t outSize);
+ const char *CG_AccessibilityObjectiveDescription(team_t team, int number);
+ int CG_AccessibilityCurrentObjective(team_t team);
+ qboolean CG_AccessibilityObjectiveByNumber(team_t team, int number, etaObjective_t *out);
+@@ -3484,6 +3485,7 @@ extern vmCvar_t eta_crosshairCues;
+ extern vmCvar_t eta_markerCues;
+ extern vmCvar_t eta_turnSteps;
+ extern vmCvar_t eta_openingCallouts;
++extern vmCvar_t eta_mapToggle;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+ 
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index c028e20..e71e179 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2203,6 +2203,7 @@ vmCvar_t eta_crosshairCues;
+ vmCvar_t eta_markerCues;
+ vmCvar_t eta_turnSteps;
+ vmCvar_t eta_openingCallouts;
++vmCvar_t eta_mapToggle;
+ 
+ /**
+  * @brief The four sounds this mod brings with it, and why they are not
+@@ -2382,6 +2383,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_markerCues,          "eta_markerCues",          "1" },
+ 	{ &eta_turnSteps,           "eta_turnSteps",           "1" },
+ 	{ &eta_openingCallouts,     "eta_openingCallouts",     "1" },
++	{ &eta_mapToggle,           "eta_mapToggle",           "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+ 	{ &eta_speechPitch,         "eta_speechPitch",         "0" },

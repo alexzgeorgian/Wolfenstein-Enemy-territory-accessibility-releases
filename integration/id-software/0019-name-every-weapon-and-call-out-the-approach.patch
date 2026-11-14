@@ -1,0 +1,196 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index cdf3407..1b6f57c 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1114,7 +1114,7 @@ static void CG_AccessibilityStatus_f( void ) {
+ 	if ( item ) {
+ 		int ammo, clips, akimboammo;
+ 
+-		ETA_HudNarrator_SpeakWeapon( item->pickup_name );
++		ETA_HudNarrator_SpeakWeapon( CG_AccessibilityWeaponName( (weapon_t)ps->weapon ) );
+ 
+ 		CG_PlayerAmmoValue( &ammo, &clips, &akimboammo );
+ 
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 1f68aee..9fe06c6 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "hud/hud_narrator.h"
++#include "navigation/navigation_system.h"
+ #endif
+ 
+ #define STATUSBARHEIGHT 452
+@@ -4600,6 +4601,49 @@ void CG_DrawMiscGamemodels( void ) {
+  * why standing up from prone is heard as "Crouched" then "Standing" -
+  * that is the engine's own behaviour, not an artifact of this narration.
+  */
++/**
++ * Calls out the distance to the objective as the player closes on it.
++ *
++ * The on-demand report answers "how far is it" when asked. This answers
++ * "am I getting there", which is the question a player actually has while
++ * walking - and which otherwise takes two key presses and two remembered
++ * numbers to answer.
++ *
++ * The milestones and their hysteresis live in the shared library
++ * (ETA_NavigationSystem_UpdateApproach), so both integrations announce at
++ * the same points; this only supplies the distance and says when the
++ * target changed. Reset on a change of objective because distance to a
++ * different objective is not progress toward this one.
++ */
++static void ETA_NarrateObjectiveApproach( void ) {
++	static int lastEntNum = -1;
++	const playerState_t *ps;
++	etaObjective_t objective;
++
++	if ( !cg.snap || !eta_objectiveCallouts.integer ) {
++		return;
++	}
++
++	ps = &cg.predictedPlayerState;
++
++	if ( ps->pm_type != PM_NORMAL ) {
++		return;
++	}
++
++	if ( !ETA_CurrentObjective( CG_LimboPanel_GetRealTeam(), ps->origin, &objective ) ) {
++		lastEntNum = -1;
++		ETA_NavigationSystem_ResetApproach();
++		return;
++	}
++
++	if ( objective.entityNum != lastEntNum ) {
++		lastEntNum = objective.entityNum;
++		ETA_NavigationSystem_ResetApproach();
++	}
++
++	ETA_NavigationSystem_UpdateApproach( (int)( Distance( ps->origin, objective.origin ) * ETA_QU_TO_METERS ) );
++}
++
+ static void ETA_NarrateStanceChange( void ) {
+ 	static ETA_Stance spoken = (ETA_Stance)-1;
+ 	const playerState_t *ps;
+@@ -4737,6 +4781,7 @@ void CG_DrawActive( stereoFrame_t stereoView ) {
+ 	/* Every active frame, so a stance change is caught however it came
+ 	   about - the player's own key, or the engine refusing to let them up. */
+ 	ETA_NarrateStanceChange();
++	ETA_NarrateObjectiveApproach();
+ #endif
+ 
+ 	if ( !cg.showGameView ) {
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 55cc9ec..4e4666b 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2403,6 +2403,8 @@ typedef struct {
+ } etaObjective_t;
+ 
+ void CG_AccessibilityNarrateObjective( void );
++const char *CG_AccessibilityWeaponName( weapon_t weap );
++extern vmCvar_t eta_objectiveCallouts;
+ 
+ qboolean ETA_MapObjectiveAt( const mapEntityData_t *mEnt, vec3_t origin, int *oidIndex );
+ qboolean ETA_CurrentObjective( team_t team, const vec3_t from, etaObjective_t *out );
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index db9ec5d..58a2afe 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -319,6 +319,9 @@ vmCvar_t cl_demooffset;
+ vmCvar_t cl_waverecording;
+ vmCvar_t cl_wavefilename;
+ vmCvar_t cl_waveoffset;
++#ifdef FEATURE_ACCESSIBILITY
++vmCvar_t eta_objectiveCallouts;
++#endif
+ vmCvar_t cg_recording_statusline;
+ 
+ typedef struct {
+@@ -543,6 +546,9 @@ cvarTable_t cvarTable[] = {
+ 	{ &cl_wavefilename, "cl_wavefilename", "", CVAR_ROM },
+ 	{ &cl_waveoffset, "cl_waveoffset", "0", CVAR_ROM },
+ 	{ &cg_recording_statusline, "cg_recording_statusline", "9", CVAR_ARCHIVE },
++#ifdef FEATURE_ACCESSIBILITY
++	{ &eta_objectiveCallouts, "eta_objectiveCallouts", "1", CVAR_ARCHIVE },
++#endif
+ };
+ 
+ int cvarTableSize = sizeof( cvarTable ) / sizeof( cvarTable[0] );
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 599e498..5efe891 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -655,11 +655,7 @@ void CG_TransitionPlayerState( playerState_t *ps, playerState_t *ops ) {
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	if ( ps->weapon != ops->weapon ) {
+-		gitem_t *item = BG_FindItemForWeaponSafe( (weapon_t)ps->weapon );
+-
+-		if ( item ) {
+-			ETA_HudNarrator_SpeakWeapon( item->pickup_name );
+-		}
++		ETA_HudNarrator_SpeakWeapon( CG_AccessibilityWeaponName( (weapon_t)ps->weapon ) );
+ 	}
+ #endif
+ 
+diff --git a/src/cgame/cg_weapons.c b/src/cgame/cg_weapons.c
+index f08fbee..ce4e183 100644
+--- a/src/cgame/cg_weapons.c
++++ b/src/cgame/cg_weapons.c
+@@ -35,6 +35,54 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Names the mod supplies where the engine's own string is an internal
++ * token rather than something to say out loud.
++ *
++ * This release has no weapon description field, so the item's pickup name
++ * is the only name there is, and for almost everything it is a good one -
++ * "Grenade", "Binoculars", "Landmine", "Smoke Bomb". These two are the
++ * exceptions:
++ *
++ *   WP_MEDKIT       pickup_name is "medicheal"
++ *   WP_SMOKE_MARKER pickup_name is "smokeGrenade"
++ *
++ * Both are things a player holds and switches to, so neither can be left
++ * reading out its token. Nothing else belongs here.
++ */
++static const struct {
++	weapon_t weapon;
++	const char *name;
++} eta_weaponNameFallbacks[] = {
++	{ WP_MEDKIT,       "Health pack"  },
++	{ WP_SMOKE_MARKER, "Smoke marker" }
++};
++
++/**
++ * What to call a weapon out loud. Never returns NULL or an empty string:
++ * silence is indistinguishable from the mod being broken.
++ */
++const char *CG_AccessibilityWeaponName( weapon_t weap ) {
++	gitem_t *item;
++	size_t i;
++
++	for ( i = 0; i < sizeof( eta_weaponNameFallbacks ) / sizeof( eta_weaponNameFallbacks[0] ); i++ ) {
++		if ( eta_weaponNameFallbacks[i].weapon == weap ) {
++			return eta_weaponNameFallbacks[i].name;
++		}
++	}
++
++	item = BG_FindItemForWeaponSafe( weap );
++
++	if ( item && item->pickup_name && item->pickup_name[0] ) {
++		return item->pickup_name;
++	}
++
++	return "Weapon";
++}
++#endif
++
+ vec3_t ejectBrassCasingOrigin;
+ 
+ //----(SA)

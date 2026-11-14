@@ -1,0 +1,51 @@
+#include "ui/menudef.h"
+#include "ui/eta_menudef.h"
+#include "ui/menumacros.h"
+
+// Accessibility - Sound //
+//
+// How loud each of the mod's own sounds is, the game's announcer, and
+// players' voice chats.
+// The tester asked for these on a page of their own, apart from SPEECH,
+// which is the screen reader's. Each runs from 0, silent, to 100, the
+// level it always had; turning a sound off altogether is on ENVIRONMENT.
+
+#define WINDOW_X      16
+#define WINDOW_Y      16
+#define WINDOW_WIDTH  608
+#define WINDOW_HEIGHT 448
+#define GROUP_NAME    "grpOptionsAccessibilitySound"
+
+menuDef {
+	name        "options_accessibility_sound"
+	visible     0
+	fullscreen  0
+	rect WINDOW_X WINDOW_Y WINDOW_WIDTH WINDOW_HEIGHT
+	style WINDOW_STYLE_FILLED
+
+	onESC {
+		close options_accessibility_sound ;
+		open  options_accessibility
+	}
+
+// Window //
+	WINDOW("SOUND", 150)
+
+// Volumes //
+#define VOLUME_Y SUBWINDOW_OPTION_Y_START
+#define VOLUME_H SUBWINDOW_OPTION_COMPUTE_H(10)
+	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X1_START, VOLUME_Y, SUBWINDOW_OPTION_HEADER_WIDTH_L, VOLUME_H, "VOLUMES")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 1), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Marker volume:", .2, 8, "eta_markerVolume" 100 0 100, "The ping from the way to your marker")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 2), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Objective sounds volume:", .2, 8, "eta_siteVolume" 100 0 100, "The hammer taps, fuse hiss, bell and engine from construction sites, demolition targets, flags and the tank")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 3), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Door sounds volume:", .2, 8, "eta_doorVolume" 100 0 100, "The creak on doors")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 4), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Ladder sounds volume:", .2, 8, "eta_ladderVolume" 100 0 100, "The knocks from ladders")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 5), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Crosshair sounds volume:", .2, 8, "eta_crosshairVolume" 100 0 100, "The tick while your crosshair is on somebody")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 6), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Alert sounds volume:", .2, 8, "eta_cueVolume" 100 0 100, "Low health, something to use, where damage came from, the objective's direction, and the landmine beep")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 7), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Pickup sounds volume:", .2, 8, "eta_pickupVolume" 100 0 100, "The sounds from health packs, ammo packs and weapons lying close by")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 8), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Announcer volume:", .2, 8, "eta_announcerVolume" 100 0 100, "The map's recorded voice telling you what happened to an objective. 100 is the game's own level")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 9), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Bump sounds volume:", .2, 8, "eta_bumpVolume" 100 0 100, "The thud of walking into a wall, and the knock of walking into a thing")
+	SLIDER(SUBWINDOW_OPTION_X1_START, SUBWINDOW_OPTION_COMPUTE_Y(VOLUME_Y, 10), SUBWINDOW_OPTION_WIDTH_L, SUBWINDOW_OPTION_HEIGHT, "Voice chat volume:", .2, 8, "eta_voiceVolume" 100 0 100, "Players and bots calling out - Medic!, Need ammo and the rest. Their words are still read in the chat. 100 is the game's own level")
+
+// Buttons //
+	BUTTON(SUBWINDOW_OPTION_HEADER_X1_START, WINDOW_HEIGHT - 22, .33 * (WINDOW_WIDTH - 24), 18, "BACK", .3, 14, close options_accessibility_sound ; open options_accessibility)
+}

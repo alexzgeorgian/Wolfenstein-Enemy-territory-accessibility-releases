@@ -1,0 +1,900 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index b23fdd7..d020a10 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -34,6 +34,12 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#include "map/map_survey.h"
++#include "speech/speech_manager.h"
++#endif
++
+ static mapEntityData_t mapEntities[MAX_GENTITIES];
+ static int             mapEntityCount = 0;
+ static qboolean        expanded       = qfalse;
+@@ -1708,6 +1714,650 @@ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObj
+ 
+ 	return qfalse;
+ }
++
++/**
++ * @brief The command map's grid, and how big it is in squares.
++ *
++ * Read straight out of the engine rather than worked out again here.
++ * The point of speaking "C,3" is that it is the same C,3 a teammate
++ * reads off their screen and types into chat; a second copy of the grid
++ * arithmetic would agree today and drift the day the density rule
++ * changed, and a survey naming squares nobody else can find is worse
++ * than no survey at all.
++ *
++ * The count of squares is the range BG_GetLocationString can actually
++ * produce. It clamps negatives to zero, so the part-square before the
++ * first grid line belongs to column A, and the part-square past the
++ * last line belongs to the final column - which is why this counts
++ * lines and adds one rather than dividing the map up evenly.
++ *
++ * @param[out] start  world position of the grid's origin corner
++ * @param[out] step   size of one square, in world units
++ * @param[out] columns
++ * @param[out] rows
++ * @return qfalse when the map has no usable grid
++ */
++/**
++ * @brief How long the list of what is in one square may get.
++ *
++ * A busy square on a stock map holds an objective, a spawn and a
++ * handful of people. Beyond that the sentence is longer than a player
++ * will listen to anyway.
++ */
++#define ETA_MAP_CONTENTS_MAX 256
++
++static qboolean ETA_MapGrid(vec2_t start, vec2_t step, int *columns, int *rows)
++{
++	BG_GetLocationGrid(start, step);
++
++	if (step[0] <= 0.0f || step[1] <= 0.0f)
++	{
++		return qfalse;
++	}
++
++	/* cg.mapcoordsMins[1] is the *north* edge: the y axis runs the other
++	   way from the x axis here, which is also why the row arithmetic
++	   below subtracts rather than adds. CG_DrawGrid makes the same
++	   assumption a few hundred lines above. */
++	*columns = (int)((cg.mapcoordsMaxs[0] - start[0]) / step[0]) + 1;
++	*rows    = (int)((start[1] - cg.mapcoordsMaxs[1]) / step[1]) + 1;
++
++	if (*columns < 1 || *rows < 1)
++	{
++		return qfalse;
++	}
++
++	return qtrue;
++}
++
++/**
++ * @brief Which square a world position falls in.
++ *
++ * Deliberately the same expression as BG_GetLocationString, negative
++ * clamp included, so the square this reports for the player is the one
++ * the location narration would name for them.
++ */
++static void ETA_MapCellFor(float x, float y, int *column, int *row)
++{
++	vec2_t start, step;
++	int    columns, rows;
++
++	*column = 0;
++	*row    = 0;
++
++	if (!ETA_MapGrid(start, step, &columns, &rows))
++	{
++		return;
++	}
++
++	*column = (int)((x - start[0]) / step[0]);
++	*row    = (int)((start[1] - y) / step[1]);
++
++	if (*column < 0)
++	{
++		*column = 0;
++	}
++	if (*row < 0)
++	{
++		*row = 0;
++	}
++	if (*column >= columns)
++	{
++		*column = columns - 1;
++	}
++	if (*row >= rows)
++	{
++		*row = rows - 1;
++	}
++}
++
++/**
++ * @brief The middle of a square, in world coordinates.
++ *
++ * The distance and bearing the survey speaks are to here. A square is a
++ * place rather than a thing, so its middle is the honest target - and
++ * it is what a player walking toward the square should aim at.
++ */
++static void ETA_MapCellCentre(int column, int row, vec2_t out)
++{
++	vec2_t start, step;
++	int    columns, rows;
++
++	out[0] = out[1] = 0.0f;
++
++	if (!ETA_MapGrid(start, step, &columns, &rows))
++	{
++		return;
++	}
++
++	out[0] = start[0] + ((float)column + 0.5f) * step[0];
++	out[1] = start[1] - ((float)row + 0.5f) * step[1];
++}
++
++/**
++ * @brief Where a command map entry actually is in the world.
++ *
++ * Two sources, and which one is used matters enough to say out loud.
++ *
++ * mEnt->x / mEnt->y are what the server sent, quantized to 128-unit
++ * steps by CG_ParseMapEntity - a little over three meters. That is
++ * plenty for placing an icon and coarse for a spoken distance, but for
++ * anything outside the player's snapshot it is the only thing that
++ * exists, and the alternative is saying nothing at all.
++ *
++ * Where the entry is a player who *is* in the snapshot, their real
++ * position is right there in cg_entities, so it is used instead. That
++ * is not extra information - it is the same player, located properly.
++ *
++ * @param[in]  mEnt
++ * @param[out] origin
++ * @return qtrue when this entry has a position worth using
++ */
++static qboolean ETA_MapEntityOrigin(const mapEntityData_t *mEnt, vec3_t origin)
++{
++	int oidIndex = -1;
++
++	/* Objectives resolve through the same path the narration already
++	   uses, which reaches the real entity and its true position. */
++	if (CG_AccessibilityMapObjectiveAt(mEnt, origin, &oidIndex))
++	{
++		return qtrue;
++	}
++
++	if ((mEnt->type == ME_PLAYER || mEnt->type == ME_PLAYER_REVIVE
++	     || mEnt->type == ME_PLAYER_OBJECTIVE || mEnt->type == ME_PLAYER_DISGUISED)
++	    && mEnt->data >= 0 && mEnt->data < MAX_CLIENTS
++	    && cg_entities[mEnt->data].currentValid)
++	{
++		VectorCopy(cg_entities[mEnt->data].lerpOrigin, origin);
++		return qtrue;
++	}
++
++	origin[0] = (float)mEnt->x;
++	origin[1] = (float)mEnt->y;
++	origin[2] = (float)mEnt->z;
++
++	return qtrue;
++}
++
++/**
++ * @brief Whether an entry is on the floor the survey is looking at.
++ *
++ * On a map built in layers a roof and a cellar sit in the same square,
++ * and merging them would have the survey report enemies overhead as
++ * though they were in the room.
++ */
++static qboolean ETA_MapEntityOnLayer(const mapEntityData_t *mEnt, int layer)
++{
++	if (!cgs.ccLayers)
++	{
++		return qtrue;
++	}
++
++	return (qboolean)(CG_CurLayerForZ(mEnt->z) == layer);
++}
++
++/**
++ * @brief Adds one phrase to the contents list, with its comma.
++ */
++static void ETA_MapAppend(char *out, size_t outSize, const char *text)
++{
++	if (out[0])
++	{
++		Q_strcat(out, (int)outSize, ", ");
++	}
++
++	Q_strcat(out, (int)outSize, text);
++}
++
++/**
++ * @brief Adds "one thing" / "two things" for a count.
++ */
++static void ETA_MapAppendCount(char *out, size_t outSize, int count,
++                               const char *singular, const char *plural)
++{
++	char phrase[64];
++
++	if (count <= 0)
++	{
++		return;
++	}
++
++	if (count == 1)
++	{
++		Com_sprintf(phrase, sizeof(phrase), "one %s", singular);
++	}
++	else
++	{
++		Com_sprintf(phrase, sizeof(phrase), "%d %s", count, plural);
++	}
++
++	ETA_MapAppend(out, outSize, phrase);
++}
++
++/**
++ * @brief What is standing in one square of the map.
++ *
++ * Everything here comes out of the command map's own entity list, which
++ * is what the server chose to send this player's team: teammates,
++ * enemies their team has actually spotted, mines their team has
++ * detected, the objectives, the spawn points. Nothing is looked up
++ * anywhere else, and the filters a player has set on their map are
++ * honoured - so this says what is on their screen and never more.
++ *
++ * The order is deliberate and is not the order the list happens to be
++ * in. Enemies first, because an enemy is the thing that ends the run
++ * and a long sentence can be cut off by the next keypress. Objectives
++ * next, because that is what the survey is usually being asked. Then
++ * the furniture.
++ *
++ * @param[in]  column
++ * @param[in]  row
++ * @param[in]  layer
++ * @param[out] out
++ * @param[in]  outSize
++ * @return qtrue when there is anything there at all
++ */
++static qboolean ETA_MapCellContents(int column, int row, int layer, char *out, size_t outSize)
++{
++	char   objectives[ETA_MAP_CONTENTS_MAX];
++	char   spawns[ETA_MAP_CONTENTS_MAX];
++	int    i;
++	int    teammates = 0, enemies = 0, mines = 0, revives = 0;
++	team_t team      = cgs.clientinfo[cg.clientNum].team;
++
++	out[0]        = '\0';
++	objectives[0] = '\0';
++	spawns[0]     = '\0';
++
++	for (i = 0; i < mapEntityCount; i++)
++	{
++		const mapEntityData_t *mEnt = &mapEntities[i];
++		vec3_t                origin;
++		int                   entColumn, entRow;
++		int                   oidIndex = -1;
++
++		if (!ETA_MapEntityOnLayer(mEnt, layer))
++		{
++			continue;
++		}
++
++		if (!ETA_MapEntityOrigin(mEnt, origin))
++		{
++			continue;
++		}
++
++		ETA_MapCellFor(origin[0], origin[1], &entColumn, &entRow);
++
++		if (entColumn != column || entRow != row)
++		{
++			continue;
++		}
++
++		switch (mEnt->type)
++		{
++		case ME_PLAYER:
++		case ME_PLAYER_REVIVE:
++		case ME_PLAYER_OBJECTIVE:
++		case ME_PLAYER_DISGUISED:
++			/* A disguised covert operative counts as whatever a sighted
++			   player would believe they are, decided by the engine's own
++			   check - the same rule the crosshair cue follows. Seeing
++			   through the disguise here would be an advantage no player
++			   has ever had. */
++			if (mEnt->team == team && !CG_DisguiseMapCheck((mapEntityData_t *)mEnt))
++			{
++				if (mEnt->type == ME_PLAYER_REVIVE)
++				{
++					revives++;
++				}
++				else
++				{
++					teammates++;
++				}
++			}
++			else if (mEnt->team != team)
++			{
++				enemies++;
++			}
++			break;
++		case ME_LANDMINE:
++			if (!(cgs.ccFilter & CC_FILTER_LANDMINES))
++			{
++				mines++;
++			}
++			break;
++		case ME_CONSTRUCT:
++		case ME_DESTRUCT:
++		case ME_DESTRUCT_2:
++		case ME_TANK:
++		case ME_TANK_DEAD:
++		case ME_COMMANDMAP_MARKER:
++			if (CG_AccessibilityMapObjectiveAt(mEnt, origin, &oidIndex)
++			    && oidIndex >= 0 && oidIndex < MAX_OID_TRIGGERS
++			    && cgs.oidInfo[oidIndex].name[0])
++			{
++				char name[64];
++
++				Q_strncpyz(name, cgs.oidInfo[oidIndex].name, sizeof(name));
++				Q_CleanStr(name);
++
++				if (name[0])
++				{
++					ETA_MapAppend(objectives, sizeof(objectives), name);
++				}
++			}
++			break;
++		default:
++			break;
++		}
++	}
++
++	/* Spawn points are their own list, not part of the entity one. */
++	if (!(cgs.ccFilter & CC_FILTER_SPAWNS))
++	{
++		for (i = 1; i < cg.spawnCount; i++)
++		{
++			int spawnColumn, spawnRow;
++
++			if (cg.spawnTeams[i] & 256)
++			{
++				continue;
++			}
++
++			if (cgs.ccLayers
++			    && CG_CurLayerForZ((int)cg.spawnCoordsUntransformed[i][2]) != layer)
++			{
++				continue;
++			}
++
++			ETA_MapCellFor(cg.spawnCoordsUntransformed[i][0],
++			               cg.spawnCoordsUntransformed[i][1],
++			               &spawnColumn, &spawnRow);
++
++			if (spawnColumn != column || spawnRow != row)
++			{
++				continue;
++			}
++
++			if (cg.spawnPoints[i][0])
++			{
++				char name[MAX_SPAWNDESC + 16];
++
++				Q_strncpyz(name, cg.spawnPoints[i], sizeof(name));
++				Q_CleanStr(name);
++
++				if (name[0])
++				{
++					Q_strcat(name, sizeof(name), " spawn");
++					ETA_MapAppend(spawns, sizeof(spawns), name);
++				}
++			}
++		}
++	}
++
++	/* Assembled in this order on purpose, and the order is the design.
++	   Speech delivers a new line by cutting off the one in progress, and
++	   a player walking the grid presses the next key before a long
++	   sentence finishes - so whatever must survive being cut off has to
++	   be said first. An enemy is what ends the run; the objective is
++	   what the survey is usually being asked; the furniture can wait. */
++	ETA_MapAppendCount(out, outSize, enemies, "enemy", "enemies");
++
++	if (objectives[0])
++	{
++		ETA_MapAppend(out, outSize, objectives);
++	}
++
++	if (spawns[0])
++	{
++		ETA_MapAppend(out, outSize, spawns);
++	}
++
++	ETA_MapAppendCount(out, outSize, revives, "teammate waiting for a revive",
++	                   "teammates waiting for a revive");
++	ETA_MapAppendCount(out, outSize, mines, "landmine", "landmines");
++	ETA_MapAppendCount(out, outSize, teammates, "teammate", "teammates");
++
++	return (qboolean)(out[0] != '\0');
++}
++
++/**
++ * @brief The survey cursor, and where the player was when it opened.
++ */
++static ETA_MapCursor eta_mapCursor;
++
++/**
++ * @brief Speaks the square the cursor is on.
++ *
++ * Distance and bearing are to the middle of the square, because a
++ * square is a place rather than a thing. Both are left out for the
++ * square the player is standing in - there is no distance to give and
++ * no direction to turn - which is also how they hear that they have
++ * found themselves on the map.
++ */
++static void ETA_MapSpeakCell(void)
++{
++	char   contents[ETA_MAP_CONTENTS_MAX];
++	vec2_t centre;
++	vec3_t to;
++	int    playerColumn, playerRow;
++	int    distance = -1, bearing = -1;
++
++	if (!ETA_MapSurvey_IsOpen(&eta_mapCursor) || !cg.snap)
++	{
++		return;
++	}
++
++	ETA_MapCellContents(eta_mapCursor.column, eta_mapCursor.row,
++	                    eta_mapCursor.layer, contents, sizeof(contents));
++
++	ETA_MapCellFor(cg.predictedPlayerState.origin[0],
++	               cg.predictedPlayerState.origin[1],
++	               &playerColumn, &playerRow);
++
++	if (playerColumn != eta_mapCursor.column || playerRow != eta_mapCursor.row
++	    || (cgs.ccLayers
++	        && CG_CurLayerForZ((int)cg.predictedPlayerState.origin[2]) != eta_mapCursor.layer))
++	{
++		ETA_MapCellCentre(eta_mapCursor.column, eta_mapCursor.row, centre);
++
++		to[0] = centre[0] - cg.predictedPlayerState.origin[0];
++		to[1] = centre[1] - cg.predictedPlayerState.origin[1];
++		to[2] = 0.0f;
++
++		distance = (int)(VectorLength(to) * ETA_QU_TO_METERS);
++		bearing  = (int)(ETA_HudNarrator_BearingFromYaw(vectoyaw(to)) + 0.5f) % 360;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakMapCell(ETA_MapSurvey_CellName(&eta_mapCursor),
++	                             contents[0] ? contents : NULL,
++	                             distance, bearing);
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief Opens the survey on the square the player is standing in.
++ *
++ * Starting under the player's own feet rather than at a corner is what
++ * makes the first announcement mean something: it says where they are,
++ * in the grid the rest of the team is using, and every step from there
++ * is relative to somewhere they already understand.
++ *
++ * @return qtrue when the survey is usable
++ */
++static qboolean ETA_MapSurveyOpen(void)
++{
++	vec2_t start, step;
++	int    columns, rows;
++	int    column, row, layer = 0;
++
++	if (!cg.snap || !ETA_MapGrid(start, step, &columns, &rows))
++	{
++		return qfalse;
++	}
++
++	if (!ETA_MapSurvey_Open(&eta_mapCursor, columns, rows,
++	                        cgs.ccLayers ? cgs.ccLayers : 1))
++	{
++		return qfalse;
++	}
++
++	ETA_MapCellFor(cg.predictedPlayerState.origin[0],
++	               cg.predictedPlayerState.origin[1], &column, &row);
++
++	if (cgs.ccLayers)
++	{
++		layer = CG_CurLayerForZ((int)cg.predictedPlayerState.origin[2]);
++	}
++
++	ETA_MapSurvey_MoveTo(&eta_mapCursor, column, row, layer);
++
++	return qtrue;
++}
++
++/**
++ * @brief Walks the cursor one square, and says what is there.
++ *
++ * A step that runs off the edge is announced as one. On a grid the
++ * player cannot see, a keypress that does nothing and a keypress that
++ * did not register are the same event, and they would press it again.
++ */
++void CG_AccessibilityMapStep(int step)
++{
++	if (!eta_mapCallouts.integer || !cgs.autoMapExpanded)
++	{
++		return;
++	}
++
++	if (!ETA_MapSurvey_IsOpen(&eta_mapCursor) && !ETA_MapSurveyOpen())
++	{
++		return;
++	}
++
++	if (!ETA_MapSurvey_Step(&eta_mapCursor, (ETA_MapStep)step))
++	{
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakMapEdge();
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	ETA_MapSpeakCell();
++}
++
++/**
++ * @brief Up or down a floor, on a map built in layers.
++ */
++void CG_AccessibilityMapLayer(int delta)
++{
++	if (!eta_mapCallouts.integer || !cgs.autoMapExpanded)
++	{
++		return;
++	}
++
++	if (!ETA_MapSurvey_IsOpen(&eta_mapCursor) && !ETA_MapSurveyOpen())
++	{
++		return;
++	}
++
++	if (!ETA_MapSurvey_StepLayer(&eta_mapCursor, delta))
++	{
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakMapEdge();
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakMapLayer(eta_mapCursor.layer, eta_mapCursor.layerCount);
++	ETA_Speech_EndReport();
++
++	ETA_MapSpeakCell();
++}
++
++/**
++ * @brief Puts the cursor back on the player.
++ */
++void CG_AccessibilityMapHome(void)
++{
++	if (!eta_mapCallouts.integer || !cgs.autoMapExpanded)
++	{
++		return;
++	}
++
++	if (!ETA_MapSurveyOpen())
++	{
++		return;
++	}
++
++	ETA_MapSpeakCell();
++}
++
++/**
++ * @brief Jumps to the next square with anything in it.
++ *
++ * Reading order - along each row, then down to the next - because that
++ * is the order the squares are named in and the only one a player can
++ * predict. It wraps once round the whole map and stops where it
++ * started, so a map with nothing left on it says so rather than
++ * spinning.
++ */
++void CG_AccessibilityMapNext(void)
++{
++	char contents[ETA_MAP_CONTENTS_MAX];
++	int  cells, i;
++	int  index;
++
++	if (!eta_mapCallouts.integer || !cgs.autoMapExpanded)
++	{
++		return;
++	}
++
++	if (!ETA_MapSurvey_IsOpen(&eta_mapCursor) && !ETA_MapSurveyOpen())
++	{
++		return;
++	}
++
++	cells = eta_mapCursor.columnCount * eta_mapCursor.rowCount;
++	index = eta_mapCursor.row * eta_mapCursor.columnCount + eta_mapCursor.column;
++
++	for (i = 1; i <= cells; i++)
++	{
++		int next   = (index + i) % cells;
++		int column = next % eta_mapCursor.columnCount;
++		int row    = next / eta_mapCursor.columnCount;
++
++		if (!ETA_MapCellContents(column, row, eta_mapCursor.layer,
++		                         contents, sizeof(contents)))
++		{
++			continue;
++		}
++
++		ETA_MapSurvey_MoveTo(&eta_mapCursor, column, row, eta_mapCursor.layer);
++		ETA_MapSpeakCell();
++		return;
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say("Nothing else on this floor");
++	ETA_Speech_EndReport();
++}
++
++/**
++ * @brief Closes the survey when the map key is released.
++ *
++ * The cursor is deliberately not kept. Opening the map again starts
++ * from where the player is standing, which by then is somewhere else -
++ * and a cursor restored to a square they have since walked away from
++ * would be describing the battlefield relative to a position they no
++ * longer hold.
++ */
++void CG_AccessibilityMapClosed(void)
++{
++	ETA_MapSurvey_Close(&eta_mapCursor);
++}
+ #endif
+ 
+ /**
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index cf9b0e6..f5c5278 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -38,6 +38,7 @@
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "hud/hud_narrator.h"
++#include "map/map_survey.h"
+ #include "navigation/navigation_system.h"
+ #include "speech/speech_manager.h"
+ #endif
+@@ -1363,6 +1364,58 @@ static void CG_AutomapExpandDown_f(void)
+ 	}
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief The command map survey, on the arrow keys and the navigation
++ * cluster above them.
++ *
++ * Every one of these does nothing unless the command map is actually
++ * up, which is what lets the arrow keys carry a second job without
++ * taking anything away from the game: while the map key is not held
++ * they fall through to whatever the player has bound there, and in a
++ * stock install that is nothing at all.
++ */
++static void CG_AccessibilityMapNorth_f(void)
++{
++	CG_AccessibilityMapStep(ETA_MAP_STEP_NORTH);
++}
++
++static void CG_AccessibilityMapSouth_f(void)
++{
++	CG_AccessibilityMapStep(ETA_MAP_STEP_SOUTH);
++}
++
++static void CG_AccessibilityMapEast_f(void)
++{
++	CG_AccessibilityMapStep(ETA_MAP_STEP_EAST);
++}
++
++static void CG_AccessibilityMapWest_f(void)
++{
++	CG_AccessibilityMapStep(ETA_MAP_STEP_WEST);
++}
++
++static void CG_AccessibilityMapUp_f(void)
++{
++	CG_AccessibilityMapLayer(1);
++}
++
++static void CG_AccessibilityMapDown_f(void)
++{
++	CG_AccessibilityMapLayer(-1);
++}
++
++static void CG_AccessibilityMapHere_f(void)
++{
++	CG_AccessibilityMapHome();
++}
++
++static void CG_AccessibilityMapNext_f(void)
++{
++	CG_AccessibilityMapNext();
++}
++#endif
++
+ /**
+  * @brief CG_AutomapExpandUp_f
+  */
+@@ -1371,6 +1424,11 @@ static void CG_AutomapExpandUp_f(void)
+ 	if (cgs.autoMapExpanded)
+ 	{
+ 		cgs.autoMapExpanded = qfalse;
++#ifdef FEATURE_ACCESSIBILITY
++		/* The survey lives only while the map is up, exactly as the map
++		   itself does. */
++		CG_AccessibilityMapClosed();
++#endif
+ 		if (cg.time - cgs.autoMapExpandTime < cg_commandMapTime.integer)
+ 		{
+ 			cgs.autoMapExpandTime = cg.time - (cg_commandMapTime.integer - (cg.time - cgs.autoMapExpandTime));
+@@ -4026,6 +4084,14 @@ static consoleCommand_t commands[] =
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ 	{ "accessibilityStatus",    CG_AccessibilityStatus_f     },
++	{ "accessibilityMapNorth",  CG_AccessibilityMapNorth_f   },
++	{ "accessibilityMapSouth",  CG_AccessibilityMapSouth_f   },
++	{ "accessibilityMapEast",   CG_AccessibilityMapEast_f    },
++	{ "accessibilityMapWest",   CG_AccessibilityMapWest_f    },
++	{ "accessibilityMapUp",     CG_AccessibilityMapUp_f      },
++	{ "accessibilityMapDown",   CG_AccessibilityMapDown_f    },
++	{ "accessibilityMapHere",   CG_AccessibilityMapHere_f    },
++	{ "accessibilityMapNext",   CG_AccessibilityMapNext_f    },
+ 	{ "accessibilityHealth",    CG_AccessibilityHealth_f     },
+ 	{ "accessibilityAmmo",      CG_AccessibilityAmmo_f       },
+ 	{ "accessibilityRepeat",    CG_AccessibilityRepeat_f     },
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index b33b816..8042efb 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3411,6 +3411,16 @@ qboolean CG_AccessibilityObjectiveByEntityNum(team_t team, int entityNum, etaObj
+ void CG_AccessibilityNarrateObjective(void);
+ void CG_AccessibilitySpeakLocation(void);
+ 
++/*
++ * Walking the command map by keyboard. See cg_commandmap.c - the step
++ * argument is an ETA_MapStep.
++ */
++void CG_AccessibilityMapStep(int step);
++void CG_AccessibilityMapLayer(int delta);
++void CG_AccessibilityMapHome(void);
++void CG_AccessibilityMapNext(void);
++void CG_AccessibilityMapClosed(void);
++
+ /**
+  * @brief The mod's own looping sounds, shipped inside the pk3.
+  */
+@@ -3434,6 +3444,7 @@ extern vmCvar_t eta_environmentCallouts;
+ extern vmCvar_t eta_facingCallouts;
+ extern vmCvar_t eta_locationCallouts;
+ extern vmCvar_t eta_interactionCallouts;
++extern vmCvar_t eta_mapCallouts;
+ 
+ /**
+  * Quake units to meters, for the accessibility navigation system's
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index b43c195..8a87483 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2192,6 +2192,7 @@ vmCvar_t eta_environmentCallouts;
+ vmCvar_t eta_facingCallouts;
+ vmCvar_t eta_locationCallouts;
+ vmCvar_t eta_interactionCallouts;
++vmCvar_t eta_mapCallouts;
+ vmCvar_t eta_doorCues;
+ vmCvar_t eta_crosshairCues;
+ 
+@@ -2349,6 +2350,7 @@ static void ETA_InitAccessibility(void)
+ 	trap_Cvar_Register(&eta_facingCallouts, "eta_facingCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_locationCallouts, "eta_locationCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_interactionCallouts, "eta_interactionCallouts", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_mapCallouts, "eta_mapCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_doorCues, "eta_doorCues", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_crosshairCues, "eta_crosshairCues", "1", CVAR_ARCHIVE);
+ 
+diff --git a/src/game/bg_misc.c b/src/game/bg_misc.c
+index 82e1f78..2fac38a 100644
+--- a/src/game/bg_misc.c
++++ b/src/game/bg_misc.c
+@@ -4782,6 +4782,34 @@ static char coord[6];
+  * @param[in] ypos
+  * @return
+  */
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Hands out the grid BG_InitLocations worked out.
++ *
++ * The accessibility map survey walks this grid square by square and
++ * speaks each one's name, and it needs the inverse of
++ * BG_GetLocationString below - given a square, where is it in the world
++ * - which cannot be had from the string.
++ *
++ * It is exposed rather than recomputed on the mod's side for one
++ * reason: the whole value of speaking "C,3" is that it is the same C,3
++ * the rest of the team sees in chat. A second copy of this arithmetic
++ * would agree today and drift the first time the grid density rule
++ * changed, and a survey naming squares nobody else can find would be
++ * worse than no survey at all.
++ *
++ * @param[out] gridStartCoord
++ * @param[out] gridStep
++ */
++void BG_GetLocationGrid(vec2_t gridStartCoord, vec2_t gridStep)
++{
++	gridStartCoord[0] = locInfo.gridStartCoord[0];
++	gridStartCoord[1] = locInfo.gridStartCoord[1];
++	gridStep[0]       = locInfo.gridStep[0];
++	gridStep[1]       = locInfo.gridStep[1];
++}
++#endif
++
+ char *BG_GetLocationString(float xpos, float ypos)
+ {
+ 	int x = (xpos - locInfo.gridStartCoord[0]) / locInfo.gridStep[0];
+diff --git a/src/game/bg_public.h b/src/game/bg_public.h
+index ebdba6d..041fad1 100644
+--- a/src/game/bg_public.h
++++ b/src/game/bg_public.h
+@@ -2775,6 +2775,9 @@ void BG_LinearPathOrigin2(float radius, splinePath_t **pSpline, float *deltaTime
+ int BG_MaxAmmoForWeapon(weapon_t weaponNum, const int *skill, int cls);
+ 
+ void BG_InitLocations(vec2_t world_mins, vec2_t world_maxs);
++#ifdef FEATURE_ACCESSIBILITY
++void BG_GetLocationGrid(vec2_t gridStartCoord, vec2_t gridStep);
++#endif
+ char *BG_GetLocationString(float xpos, float ypos);
+ 
+ extern const char *bg_fireteamNamesAllies[MAX_FIRETEAMS / 2];
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 428593d..21f054f 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8793,7 +8793,26 @@ static void UI_AccessibilityInstallBinds(void)
+ 		{ '0',        "accessibilityAmmo",       "weaponbank 10" },
+ 		/* Not narration - a part of the game that cannot be reached at
+ 		   all without a mouse. See the comment above the table. */
+-		{ K_KP_SLASH, "weapalt",                 NULL            }
++		{ K_KP_SLASH, "weapalt",                 NULL            },
++		/* The command map survey. These only do anything while the map
++		   key is held, so in a stock install they cost nothing: the
++		   arrow keys and the navigation cluster above them are bound to
++		   nothing at all in default.cfg.
++
++		   They are NOT free in default_left.cfg, which puts movement on
++		   the arrows - so the rule above does the work here rather than
++		   an exception being carved out. A player on that layout keeps
++		   their movement keys and binds the survey wherever suits
++		   them. Walking while trying to read the map would be worse
++		   than having to bind a key. */
++		{ K_UPARROW,   "accessibilityMapNorth", NULL            },
++		{ K_DOWNARROW, "accessibilityMapSouth", NULL            },
++		{ K_RIGHTARROW,"accessibilityMapEast",  NULL            },
++		{ K_LEFTARROW, "accessibilityMapWest",  NULL            },
++		{ K_PGUP,      "accessibilityMapUp",    NULL            },
++		{ K_PGDN,      "accessibilityMapDown",  NULL            },
++		{ K_HOME,      "accessibilityMapHere",  NULL            },
++		{ K_END,       "accessibilityMapNext",  NULL            }
+ 	};
+ 
+ 	vmCvar_t installed;

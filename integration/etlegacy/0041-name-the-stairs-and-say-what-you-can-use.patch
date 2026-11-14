@@ -1,0 +1,432 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index f1aecbe..8ef4d62 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3498,6 +3498,217 @@ static void ETA_NarrateObstacleAhead(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief How far ahead the first and second treads are sampled, in
++ *        Quake units.
++ *
++ * The near one is about half a stride: close enough that it describes
++ * the step the player is about to take rather than one across the room.
++ * The far one is a stride, and its only job is to tell a single step
++ * from a flight of them.
++ */
++#define ETA_STAIR_NEAR 28.0f
++#define ETA_STAIR_FAR 56.0f
++
++/**
++ * @brief The smallest change in ground height worth calling a step.
++ *
++ * Below this the ground is simply not level, which is most of this game.
++ */
++#define ETA_STAIR_MIN_RISE 4.0f
++
++/**
++ * @brief How flat a tread has to be, as the cosine of its slope.
++ *
++ * 0.99 is about eight degrees. Stairs in this game are built of flat
++ * brushes, so their treads come back at exactly 1.0; ramps, rubble and
++ * desert do not. Anything short of flat is left unsaid rather than
++ * called a staircase - a player told to expect steps and given a slope
++ * has been sent to look for something that is not there.
++ *
++ * Note this is much stricter than the engine's own MIN_WALK_NORMAL of
++ * 0.7, and deliberately so: that one answers "can this be walked on",
++ * which nearly everything can.
++ */
++#define ETA_STAIR_FLAT 0.99f
++
++/**
++ * @brief How long before the same staircase is worth mentioning again.
++ */
++#define ETA_STAIR_MIN_INTERVAL 3000
++
++/**
++ * @brief The height of the flat ground a short way ahead, relative to a
++ *        reference height.
++ *
++ * A point trace straight down, from one step above the reference to one
++ * step below it. That window is the engine's own step height on purpose:
++ * ground outside it is not somewhere the player can simply walk to, and
++ * is therefore not a step - it is either a wall (the obstacle report's
++ * business) or a drop (the drop warning's).
++ *
++ * @param[in]  ps       the player
++ * @param[in]  forward  flattened direction to sample along
++ * @param[in]  distance how far ahead
++ * @param[in]  fromZ    the height this is measured against
++ * @param[out] rise     signed height difference, on qtrue
++ * @return qtrue when flat ground was found inside the window
++ */
++static qboolean ETA_GroundRiseAhead(const playerState_t *ps, const vec3_t forward,
++                                    float distance, float fromZ, float *rise)
++{
++	trace_t trace;
++	vec3_t  start, end;
++
++	VectorMA(ps->origin, distance, forward, start);
++	start[2] = fromZ + ETA_DROP_STEP_UNITS + 1.0f;
++
++	VectorCopy(start, end);
++	end[2] = fromZ - ETA_DROP_STEP_UNITS - 1.0f;
++
++	CG_Trace(&trace, start, NULL, NULL, end, ps->clientNum, MASK_PLAYERSOLID);
++
++	if (trace.startsolid || trace.allsolid || trace.fraction == 1.0f)
++	{
++		return qfalse;
++	}
++
++	if (trace.plane.normal[2] < ETA_STAIR_FLAT)
++	{
++		return qfalse;
++	}
++
++	*rise = trace.endpos[2] - fromZ;
++
++	return qtrue;
++}
++
++/**
++ * @brief Says when the ground ahead climbs or falls away in steps.
++ *
++ * This is the other half of the obstacle fix, and it is owed. That fix
++ * lifted the probe by the engine's step height so a stair riser would
++ * stop being announced as a wall - which was right, and which left
++ * stairs silent altogether. A sighted player sees a staircase from the
++ * far side of a room; without this, someone playing by ear finds one by
++ * bumping into it.
++ *
++ * It measures rather than looks: flat ground a short way ahead, at a
++ * height the player could step to, is a step. Two of those going the
++ * same way is a flight. Nothing else is claimed - a slope comes back as
++ * nothing at all rather than as stairs, because sending someone to feel
++ * for steps that do not exist is worse than saying nothing.
++ *
++ * Aimed where the player is going when they are moving and where they
++ * are looking when they are standing still, which is the same rule the
++ * drop warning uses and for the same reason.
++ */
++static void ETA_NarrateStairsAhead(void)
++{
++	static int lastSpoken = -1;
++	static int lastTime;
++
++	const playerState_t *ps;
++	vec3_t               angles, forward;
++	float                footZ, first, second, speedSq;
++	ETA_Stairs           kind;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer)
++	{
++		lastSpoken = -1;
++		return;
++	}
++
++	ps = &cg.predictedPlayerState;
++
++	/* Only from the ground. In the air every reading is about wherever
++	   the player has fallen to by the time it is spoken. */
++	if (ps->groundEntityNum == ENTITYNUM_NONE)
++	{
++		lastSpoken = -1;
++		return;
++	}
++
++	/* A ladder is not a staircase and swimming is not walking; both have
++	   their own narration and neither wants this one talking over it. */
++	if ((ps->pm_flags & PMF_LADDER) || ETA_WaterLevel() > 1)
++	{
++		lastSpoken = -1;
++		return;
++	}
++
++	speedSq = ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1];
++
++	if (speedSq > 40.0f * 40.0f)
++	{
++		forward[0] = ps->velocity[0];
++		forward[1] = ps->velocity[1];
++		forward[2] = 0.0f;
++		VectorNormalize(forward);
++	}
++	else
++	{
++		angles[PITCH] = 0.0f;
++		angles[YAW]   = cg.refdefViewAngles[YAW];
++		angles[ROLL]  = 0.0f;
++		AngleVectors(angles, forward, NULL, NULL);
++	}
++
++	footZ = ps->origin[2] + ps->mins[2];
++
++	if (!ETA_GroundRiseAhead(ps, forward, ETA_STAIR_NEAR, footZ, &first))
++	{
++		lastSpoken = -1;
++		return;
++	}
++
++	if (first > ETA_STAIR_MIN_RISE)
++	{
++		kind = ETA_STAIRS_STEP_UP;
++	}
++	else if (first < -ETA_STAIR_MIN_RISE)
++	{
++		kind = ETA_STAIRS_STEP_DOWN;
++	}
++	else
++	{
++		/* Level ground. Forgetting what was last said here is what lets
++		   walking away from a staircase and back to it be news again. */
++		lastSpoken = -1;
++		return;
++	}
++
++	/* The second tread is measured from the first, not from the player:
++	   three steps up is well past anything a trace from foot height
++	   could see, so measuring both against the feet would report every
++	   staircase as a single step. What is being asked is only whether
++	   the ground carries on the same way, which is true whatever the
++	   run of the steps - and it differs from map to map. */
++	if (ETA_GroundRiseAhead(ps, forward, ETA_STAIR_FAR, footZ + first, &second))
++	{
++		if (kind == ETA_STAIRS_STEP_UP && second > ETA_STAIR_MIN_RISE)
++		{
++			kind = ETA_STAIRS_UP;
++		}
++		else if (kind == ETA_STAIRS_STEP_DOWN && second < -ETA_STAIR_MIN_RISE)
++		{
++			kind = ETA_STAIRS_DOWN;
++		}
++	}
++
++	if ((int)kind == lastSpoken || cg.time - lastTime < ETA_STAIR_MIN_INTERVAL)
++	{
++		return;
++	}
++
++	lastSpoken = (int)kind;
++	lastTime   = cg.time;
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakStairs(kind);
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Narrates the player's posture when it changes.
+  *
+@@ -3583,12 +3794,120 @@ static void ETA_NarrateStanceChange(void)
+  * used hint icon shader"), so it never represents a newly discovered
+  * interaction on its own.
+  */
++/**
++ * @brief The words for one of the engine's cursor hint icons.
++ *
++ * Switched on the names, never on the numbers. ET: Legacy has struck a
++ * dozen of these out as unused without renumbering what was left, so the
++ * enum has real holes in it - HINT_ACTIVATE is 3, HINT_HEALTH is 13,
++ * HINT_BUILD is 38 - and a table indexed by position would be quietly
++ * wrong for every hint after the first gap.
++ *
++ * What is deliberately missing is as considered as what is here.
++ * HINT_NONE and HINT_FORCENONE mean there is nothing to say;
++ * HINT_COMPLETED is the engine asking for the previous icon to be held
++ * on screen, not a new thing to interact with; HINT_HOLDABLE the
++ * engine's own hint table marks "unused". Each of those returns
++ * ETA_INTERACT_NONE, which the library speaks as silence.
++ */
++static ETA_Interaction ETA_InteractionForHint(int icon)
++{
++	switch (icon)
++	{
++	case HINT_ACTIVATE:
++	case HINT_BAD_USER:
++		return ETA_INTERACT_USABLE;
++	case HINT_CHAIR:
++		/* The engine draws the "not usable" icon for this one, so this
++		   is what a sighted player is being told. */
++		return ETA_INTERACT_NOT_USABLE;
++	case HINT_DOOR:
++	case HINT_DOOR_ROTATING:
++		return ETA_INTERACT_DOOR;
++	case HINT_DOOR_LOCKED:
++	case HINT_DOOR_ROTATING_LOCKED:
++		return ETA_INTERACT_DOOR_LOCKED;
++	case HINT_BUTTON:
++		return ETA_INTERACT_BUTTON;
++	case HINT_LADDER:
++		return ETA_INTERACT_LADDER;
++	case HINT_WATER:
++		return ETA_INTERACT_WATER;
++	case HINT_MG42:
++		return ETA_INTERACT_MG42;
++	case HINT_TANK:
++		return ETA_INTERACT_TANK;
++	case HINT_BREAKABLE:
++		return ETA_INTERACT_BREAKABLE;
++	case HINT_BREAKABLE_DYNAMITE:
++		return ETA_INTERACT_NEEDS_DYNAMITE;
++	/* The pliers, both ways round. The engine draws the same build icon
++	   for a construction as for a repair, so they are one report; the
++	   disarm is its own icon and its own words, because planting where
++	   you meant to defuse loses the round. */
++	case HINT_BUILD:
++	case HINT_CONSTRUCTIBLE:
++		return ETA_INTERACT_BUILD;
++	case HINT_DISARM:
++		return ETA_INTERACT_DISARM;
++	case HINT_DYNAMITE:
++		return ETA_INTERACT_PLANT_DYNAMITE;
++	case HINT_LANDMINE:
++		return ETA_INTERACT_LANDMINE;
++	case HINT_SATCHELCHARGE:
++		return ETA_INTERACT_SATCHEL;
++	case HINT_REVIVE:
++		return ETA_INTERACT_REVIVE;
++	case HINT_NO_DARM_FIRST_REVIVE:
++		return ETA_INTERACT_REVIVE_FIRST;
++	case HINT_HEALTH:
++		return ETA_INTERACT_HEALTH;
++	case HINT_AMMO:
++		return ETA_INTERACT_AMMO;
++	case HINT_WEAPON:
++		return ETA_INTERACT_WEAPON;
++	case HINT_RESTRICTED:
++		return ETA_INTERACT_RESTRICTED;
++	case HINT_POWERUP:
++		/* Only ever the enemy flag, from G_CheckForCursorHints. */
++		return ETA_INTERACT_OBJECTIVE;
++	case HINT_UNIFORM:
++		return ETA_INTERACT_UNIFORM;
++	case HINT_KNIFE:
++		return ETA_INTERACT_KNIFE;
++	case HINT_NONE:
++	case HINT_FORCENONE:
++	case HINT_COMPLETED:
++	case HINT_HOLDABLE:
++	default:
++		return ETA_INTERACT_NONE;
++	}
++}
++
++/**
++ * @brief How long a hint has to stay up before it is worth saying.
++ *
++ * The cue below fires the instant an icon appears, and should: that is
++ * the sighted player's flicker of movement at the edge of the eye. The
++ * words are different. Turning through a supply room puts four or five
++ * hints under the crosshair in under a second, and naming every one of
++ * them is a voice that cannot be listened to. So the sound says "there
++ * is something here" at once and the words follow for whatever the
++ * player is still looking at a quarter of a second later.
++ */
++#define ETA_HINT_SETTLE_MS 250
++
+ static void ETA_NarrateInteractionHint(void)
+ {
+ 	static qboolean wasActive = qfalse;
+ 	static int      lastIcon  = HINT_NONE;
+-	qboolean        active    = (qboolean)(cg.cursorHintTime != 0 && cg.cursorHintFade > 0 &&
++	static int      heldIcon  = -1;
++	static int      heldSince;
++	static qboolean heldSpoken = qfalse;
++	qboolean        active     = (qboolean)(cg.cursorHintTime != 0 && cg.cursorHintFade > 0 &&
+ 	                                        (cg.time - cg.cursorHintTime) < cg.cursorHintFade);
++	ETA_Interaction what;
++	int             percent;
+ 
+ 	if (active && cg.cursorHintIcon != HINT_COMPLETED &&
+ 	    (!wasActive || cg.cursorHintIcon != lastIcon))
+@@ -3598,6 +3917,45 @@ static void ETA_NarrateInteractionHint(void)
+ 	}
+ 
+ 	wasActive = active;
++
++	if (!eta_interactionCallouts.integer || !active || cg.cursorHintIcon == HINT_COMPLETED)
++	{
++		heldIcon = -1;
++		return;
++	}
++
++	if (cg.cursorHintIcon != heldIcon)
++	{
++		heldIcon   = cg.cursorHintIcon;
++		heldSince  = cg.time;
++		heldSpoken = qfalse;
++		return;
++	}
++
++	if (heldSpoken || cg.time - heldSince < ETA_HINT_SETTLE_MS)
++	{
++		return;
++	}
++
++	heldSpoken = qtrue;
++
++	what = ETA_InteractionForHint(cg.cursorHintIcon);
++
++	if (what == ETA_INTERACT_NONE)
++	{
++		return;
++	}
++
++	/* The same number CG_DrawCursorHintBar draws, on the same condition
++	   it draws it: how far a construction has got, how much is left of a
++	   breakable. Without it "pliers, build here" is the same sentence
++	   whether nobody has started or somebody is about to finish. */
++	percent = cg.cursorHintValue ?
++	          (int)MIN(((float)cg.cursorHintValue / 255.0f) * 100.0f, 100.0f) : -1;
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakInteraction(what, percent);
++	ETA_Speech_EndReport();
+ }
+ #endif
+ 
+@@ -6335,6 +6693,9 @@ void CG_DrawActive()
+ 	   survives. */
+ 	ETA_NarrateObstacleAhead();
+ 
++	/* Scenery too, and before the objective for the same reason. */
++	ETA_NarrateStairsAhead();
++
+ 	/* Cheap per frame - a scan of a few dozen command map entries - and
+ 	   the library speaks only on a milestone crossing. */
+ 	ETA_NarrateObjectiveApproach();
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 346d5fd..b33b816 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3433,6 +3433,7 @@ extern vmCvar_t eta_objectiveCallouts;
+ extern vmCvar_t eta_environmentCallouts;
+ extern vmCvar_t eta_facingCallouts;
+ extern vmCvar_t eta_locationCallouts;
++extern vmCvar_t eta_interactionCallouts;
+ 
+ /**
+  * Quake units to meters, for the accessibility navigation system's
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index ce72ccc..b43c195 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2191,6 +2191,7 @@ vmCvar_t eta_objectiveCallouts;
+ vmCvar_t eta_environmentCallouts;
+ vmCvar_t eta_facingCallouts;
+ vmCvar_t eta_locationCallouts;
++vmCvar_t eta_interactionCallouts;
+ vmCvar_t eta_doorCues;
+ vmCvar_t eta_crosshairCues;
+ 
+@@ -2347,6 +2348,7 @@ static void ETA_InitAccessibility(void)
+ 	trap_Cvar_Register(&eta_environmentCallouts, "eta_environmentCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_facingCallouts, "eta_facingCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_locationCallouts, "eta_locationCallouts", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_interactionCallouts, "eta_interactionCallouts", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_doorCues, "eta_doorCues", "1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_crosshairCues, "eta_crosshairCues", "1", CVAR_ARCHIVE);
+ 

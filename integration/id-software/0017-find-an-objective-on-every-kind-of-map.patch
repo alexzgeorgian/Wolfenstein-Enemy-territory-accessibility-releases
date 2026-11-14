@@ -1,0 +1,391 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 389e1b4..a3a1519 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -845,10 +845,8 @@ void CG_DrawMapEntity( mapEntityData_t *mEnt, float x, float y, float w, float h
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ /**
+- * Finds the world origin of the map objective belonging to team that is
+- * nearest to from, for the accessibility navigation system's distance and
+- * route-correction announcements. Returns qfalse when the client doesn't
+- * currently know a position for any of that team's objectives.
++ * Resolves where a command map objective entry actually is, and which
++ * cgs.oidInfo[] entry describes it.
+  *
+  * mapEntities[] is the live list the server publishes through its "entnfo"
+  * command (G_SendMapEntityInfo, g_teammapdata.c) and CG_ParseMapEntityInfo
+@@ -858,62 +856,213 @@ void CG_DrawMapEntity( mapEntityData_t *mEnt, float x, float y, float w, float h
+  * configstrings, which are dead in this release (see the README).
+  *
+  * Positions are resolved exactly the way CG_DrawMapEntity above already
+- * resolves them for drawing: ME_CONSTRUCT/ME_DESTRUCT/ME_DESTRUCT_2 carry
+- * an entity number in mEnt->data whose lerpOrigin is the objective's
+- * position, and ME_TANK/ME_TANK_DEAD are located through the
+- * ET_OID_TRIGGER entity in the current snapshot whose teamNum matches
+- * mEnt->data. mEnt->x/y are deliberately not used: CG_ParseMapEntity only
+- * fills those in for tanks and players, leaving them stale for the
++ * resolves them for drawing, and now for every type it draws:
++ * ME_CONSTRUCT/ME_DESTRUCT/ME_DESTRUCT_2 carry an entity number in
++ * mEnt->data whose lerpOrigin is the objective's position and whose
++ * modelindex2 is its oidInfo index; ME_TANK/ME_TANK_DEAD are located
++ * through the ET_OID_TRIGGER entity in the current snapshot whose teamNum
++ * matches mEnt->data; ME_COMMANDMAP_MARKER has no entity of its own and is
++ * positioned straight from its oidInfo. That last type was missing here
++ * until now, which left the navigation announcements with nothing to say
++ * on maps whose objectives are all markers.
++ *
++ * mEnt->x/y are deliberately not used: CG_ParseMapEntity only fills those
++ * in for tanks and players, leaving them stale for the
+  * constructible/destructible types, and quantizes them to 128-unit steps
+  * even then.
++ */
++qboolean ETA_MapObjectiveAt( const mapEntityData_t *mEnt, vec3_t origin, int *oidIndex ) {
++	const centity_t *cent;
++	int j;
++
++	// mEnt->data is server-supplied, so range-check it before indexing
++	if ( mEnt->data < 0 || mEnt->data >= MAX_GENTITIES ) {
++		return qfalse;
++	}
++
++	if ( mEnt->type == ME_CONSTRUCT || mEnt->type == ME_DESTRUCT || mEnt->type == ME_DESTRUCT_2 ) {
++		cent = &cg_entities[mEnt->data];
++
++		/* CG_DrawMapEntity reaches this type only from inside CG_DrawMap's
++		   own currentValid check. Nothing guards this path, so it is
++		   guarded here: lerpOrigin on an entity that has left the snapshot
++		   is wherever it was last seen, which is a confident wrong
++		   direction rather than a missing one. */
++		if ( !cent->currentValid ) {
++			return qfalse;
++		}
++
++		*oidIndex = cent->currentState.modelindex2;
++		VectorCopy( cent->lerpOrigin, origin );
++		return qtrue;
++	}
++
++	if ( mEnt->type == ME_TANK || mEnt->type == ME_TANK_DEAD ) {
++		if ( !cg.snap ) {
++			return qfalse;
++		}
++
++		for ( j = 0; j < cg.snap->numEntities; j++ ) {
++			if ( cg.snap->entities[j].eType == ET_OID_TRIGGER && cg.snap->entities[j].teamNum == mEnt->data ) {
++				*oidIndex = mEnt->data;
++				VectorCopy( cg_entities[cg.snap->entities[j].number].lerpOrigin, origin );
++				return qtrue;
++			}
++		}
++
++		return qfalse;
++	}
++
++	if ( mEnt->type == ME_COMMANDMAP_MARKER ) {
++		if ( mEnt->data >= MAX_OID_TRIGGERS ) {
++			return qfalse;
++		}
++
++		*oidIndex = mEnt->data;
++		VectorCopy( cgs.oidInfo[mEnt->data].origin, origin );
++		return qtrue;
++	}
++
++	return qfalse;
++}
++
++/**
++ * Whether an objective entry is one worth pointing a player at. Skips
++ * health/ammo cabinets, which the command map carries in the same list
++ * (spawnflag bit 5, the bit CG_DrawMapEntity above filters them by).
++ */
++static qboolean ETA_MapObjectiveUsable( int oidIndex ) {
++	if ( oidIndex < 0 || oidIndex >= MAX_OID_TRIGGERS ) {
++		return qfalse;
++	}
++
++	if ( cgs.oidInfo[oidIndex].spawnflags & ( 1 << 5 ) ) {
++		return qfalse;
++	}
++
++	return qtrue;
++}
++
++/**
++ * Fills out from an objective entry.
++ */
++static void ETA_MapObjectiveFill( int oidIndex, const vec3_t origin, etaObjective_t *out ) {
++	out->name = cgs.oidInfo[oidIndex].name[0] ? cgs.oidInfo[oidIndex].name : NULL;
++	out->entityNum = cgs.oidInfo[oidIndex].entityNum;
++	VectorCopy( origin, out->origin );
++}
++
++/**
++ * Re-finds a previously chosen objective, to see whether it is still on
++ * the command map and where it has got to. Same list and same filters as
++ * ETA_CurrentObjective below, matched on identity rather than distance.
++ */
++static qboolean ETA_ObjectiveByEntityNum( team_t team, int entityNum, etaObjective_t *out ) {
++	int i;
++
++	for ( i = 0; i < mapEntityCount; i++ ) {
++		mapEntityData_t *mEnt = &mapEntities[i];
++		vec3_t origin;
++		int oidIndex = -1;
++
++		if ( mEnt->team != team ) {
++			continue;
++		}
++
++		if ( !ETA_MapObjectiveAt( mEnt, origin, &oidIndex ) || !ETA_MapObjectiveUsable( oidIndex ) ) {
++			continue;
++		}
++
++		if ( cgs.oidInfo[oidIndex].entityNum != entityNum ) {
++			continue;
++		}
++
++		ETA_MapObjectiveFill( oidIndex, origin, out );
++		return qtrue;
++	}
++
++	return qfalse;
++}
++
++/**
++ * The objective every piece of accessibility navigation in this release
++ * points at: the nearest one on the player's own command map.
++ *
++ * Objectives the map marks as real objectives (spawnflag bit 4, the
++ * IS_OBJECTIVE bit CG_DrawMapEntity above tests) win over ones it does
++ * not, before distance is considered at all, so a far objective beats a
++ * near construction site.
+  *
+- * "Nearest" is this integration's own choice of navigation target, not an
+- * engine concept - this release designates no "main" objective at all.
++ * The chosen target is sticky. Without that, two objectives at similar
++ * range swap places as the player strafes between them, re-firing the
++ * objective cue and changing what "the objective" means mid-approach. The
++ * current target is kept while it is still on the command map unless
++ * another is a quarter closer - a margin rather than a fixed distance, so
++ * it scales with how far apart a given map spreads its objectives.
+  */
+-qboolean ETA_NearestObjectiveOrigin( team_t team, const vec3_t from, vec3_t origin ) {
+-	int i, j;
++qboolean ETA_CurrentObjective( team_t team, const vec3_t from, etaObjective_t *out ) {
++	static team_t stickyTeam = TEAM_FREE;
++	static int stickyEntNum = -1;
++	etaObjective_t best;
++	int bestTier = 0;
+ 	float bestDistance = 0;
+ 	qboolean found = qfalse;
++	int i;
++
++	if ( team != TEAM_AXIS && team != TEAM_ALLIES ) {
++		stickyTeam = TEAM_FREE;
++		stickyEntNum = -1;
++		return qfalse;
++	}
+ 
+ 	for ( i = 0; i < mapEntityCount; i++ ) {
+ 		mapEntityData_t *mEnt = &mapEntities[i];
+-		centity_t *cent = NULL;
++		vec3_t origin;
++		int oidIndex = -1;
++		int tier;
+ 		float distance;
+ 
+ 		if ( mEnt->team != team ) {
+ 			continue;
+ 		}
+ 
+-		// mEnt->data is server-supplied, so range-check it before indexing
+-		if ( mEnt->data < 0 || mEnt->data >= MAX_GENTITIES ) {
++		if ( !ETA_MapObjectiveAt( mEnt, origin, &oidIndex ) || !ETA_MapObjectiveUsable( oidIndex ) ) {
+ 			continue;
+ 		}
+ 
+-		if ( mEnt->type == ME_CONSTRUCT || mEnt->type == ME_DESTRUCT || mEnt->type == ME_DESTRUCT_2 ) {
+-			cent = &cg_entities[mEnt->data];
+-		} else if ( mEnt->type == ME_TANK || mEnt->type == ME_TANK_DEAD ) {
+-			for ( j = 0; j < cg.snap->numEntities; j++ ) {
+-				if ( cg.snap->entities[j].eType == ET_OID_TRIGGER && cg.snap->entities[j].teamNum == mEnt->data ) {
+-					cent = &cg_entities[cg.snap->entities[j].number];
+-					break;
+-				}
+-			}
+-		}
++		tier = ( cgs.oidInfo[oidIndex].spawnflags & ( 1 << 4 ) ) ? 1 : 0;
++		distance = Distance( from, origin );
+ 
+-		if ( !cent ) {
++		if ( found && ( tier < bestTier || ( tier == bestTier && distance >= bestDistance ) ) ) {
+ 			continue;
+ 		}
+ 
+-		distance = Distance( from, cent->lerpOrigin );
++		bestTier = tier;
++		bestDistance = distance;
++		found = qtrue;
++		ETA_MapObjectiveFill( oidIndex, origin, &best );
++	}
++
++	if ( !found ) {
++		stickyTeam = TEAM_FREE;
++		stickyEntNum = -1;
++		return qfalse;
++	}
++
++	if ( team == stickyTeam && stickyEntNum != best.entityNum ) {
++		etaObjective_t sticky;
+ 
+-		if ( !found || distance < bestDistance ) {
+-			bestDistance = distance;
+-			VectorCopy( cent->lerpOrigin, origin );
+-			found = qtrue;
++		if ( ETA_ObjectiveByEntityNum( team, stickyEntNum, &sticky )
++			 && Distance( from, best.origin ) >= 0.75f * Distance( from, sticky.origin ) ) {
++			best = sticky;
+ 		}
+ 	}
+ 
+-	return found;
++	*out = best;
++
++	stickyTeam = team;
++	stickyEntNum = best.entityNum;
++	return qtrue;
+ }
+ 
+ /**
+@@ -940,26 +1089,14 @@ int ETA_TeamObjectiveNames( team_t team, const char **names, int maxNames ) {
+ 
+ 	for ( i = 0; i < mapEntityCount && count < maxNames; i++ ) {
+ 		mapEntityData_t *mEnt = &mapEntities[i];
+-		int oid;
++		vec3_t origin;
++		int oid = -1;
+ 
+ 		if ( mEnt->team != team ) {
+ 			continue;
+ 		}
+ 
+-		// mEnt->data is server-supplied, so range-check it before indexing
+-		if ( mEnt->data < 0 || mEnt->data >= MAX_GENTITIES ) {
+-			continue;
+-		}
+-
+-		if ( mEnt->type == ME_CONSTRUCT || mEnt->type == ME_DESTRUCT || mEnt->type == ME_DESTRUCT_2 ) {
+-			oid = cg_entities[mEnt->data].currentState.modelindex2;
+-		} else if ( mEnt->type == ME_TANK || mEnt->type == ME_TANK_DEAD ) {
+-			oid = mEnt->data;
+-		} else {
+-			continue;
+-		}
+-
+-		if ( oid < 0 || oid >= MAX_OID_TRIGGERS ) {
++		if ( !ETA_MapObjectiveAt( mEnt, origin, &oid ) || !ETA_MapObjectiveUsable( oid ) ) {
+ 			continue;
+ 		}
+ 
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 7faf31a..cdf3407 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1036,7 +1036,7 @@ static void CG_AccessibilityStopSpeech_f( void ) {
+  */
+ void CG_AccessibilityNarrateObjective( void ) {
+ 	playerState_t *ps;
+-	vec3_t objectiveOrigin;
++	etaObjective_t objective;
+ 	vec3_t delta, angles;
+ 	float relativeYaw;
+ 
+@@ -1046,16 +1046,20 @@ void CG_AccessibilityNarrateObjective( void ) {
+ 
+ 	ps = &cg.snap->ps;
+ 
+-	if ( !ETA_NearestObjectiveOrigin( CG_LimboPanel_GetRealTeam(), ps->origin, objectiveOrigin ) ) {
++	if ( !ETA_CurrentObjective( CG_LimboPanel_GetRealTeam(), ps->origin, &objective ) ) {
+ 		/* Never silence: "no objective here" and "the mod has stopped
+ 		   working" must not sound the same. */
+ 		ETA_Speech_Say( "No current objective" );
+ 		return;
+ 	}
+ 
+-	ETA_NavigationSystem_AnnounceDistance( (int)( Distance( ps->origin, objectiveOrigin ) * ETA_QU_TO_METERS ) );
++	/* A map is not obliged to give its objectives a shortname, and the
++	   distance and turn direction are worth hearing either way. */
++	ETA_HudNarrator_SpeakObjective( objective.name ? objective.name : "Objective" );
+ 
+-	VectorSubtract( objectiveOrigin, ps->origin, delta );
++	ETA_NavigationSystem_AnnounceDistance( (int)( Distance( ps->origin, objective.origin ) * ETA_QU_TO_METERS ) );
++
++	VectorSubtract( objective.origin, ps->origin, delta );
+ 	vectoangles( delta, angles );
+ 
+ 	/**
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 749ed12..55cc9ec 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -2385,11 +2385,27 @@ int CG_PlayerAmmoValue( int *ammo, int *clips, int *akimboammo );
+  * cited external convention of 1 unit = 1 inch (0.0254 m) - a value from
+  * outside this source, not one derived from it.
+  */
+-void CG_AccessibilityNarrateObjective( void );
+-
+ #define ETA_QU_TO_METERS 0.0254f
+ 
+-qboolean ETA_NearestObjectiveOrigin( team_t team, const vec3_t from, vec3_t origin );
++/**
++ * Where the accessibility narration should be pointing the player.
++ *
++ * Deliberately not an oidInfo_t: that entry's origin is the trigger's, not
++ * the live position of the thing being defended, and an objective the
++ * client can place does not always have a complete oidInfo entry yet. This
++ * carries only what the narration needs - a label, somewhere to measure
++ * to, and an identity stable enough to notice when the target changes.
++ */
++typedef struct {
++	const char *name;       // the map's short name for it, or NULL if it gave none
++	vec3_t origin;          // world position, for distance and bearing
++	int entityNum;          // identity, for spotting a change of target
++} etaObjective_t;
++
++void CG_AccessibilityNarrateObjective( void );
++
++qboolean ETA_MapObjectiveAt( const mapEntityData_t *mEnt, vec3_t origin, int *oidIndex );
++qboolean ETA_CurrentObjective( team_t team, const vec3_t from, etaObjective_t *out );
+ int ETA_TeamObjectiveNames( team_t team, const char **names, int maxNames );
+ #endif
+ void CG_CenterPrint( const char *str, int y, int charWidth );
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 43080f9..599e498 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -527,20 +527,20 @@ void CG_CheckLocalSounds( playerState_t *ps, playerState_t *ops ) {
+  */
+ static void ETA_ObjectiveOrientationCue( playerState_t *ps ) {
+ 	team_t team = (team_t)ps->persistant[PERS_TEAM];
+-	vec3_t objectiveOrigin;
++	etaObjective_t objective;
+ 
+ 	if ( team != TEAM_AXIS && team != TEAM_ALLIES ) {
+ 		return;
+ 	}
+ 
+-	if ( !ETA_NearestObjectiveOrigin( team, ps->origin, objectiveOrigin ) ) {
++	if ( !ETA_CurrentObjective( team, ps->origin, &objective ) ) {
+ 		return;
+ 	}
+ 
+ 	{
+ 		vec3_t delta, angles;
+ 
+-		VectorSubtract( objectiveOrigin, ps->origin, delta );
++		VectorSubtract( objective.origin, ps->origin, delta );
+ 		vectoangles( delta, angles );
+ 
+ 		ETA_AudioCueSystem_PlayObjectiveCue();

@@ -1,0 +1,677 @@
+diff --git a/src/cgame/cg_accessibility.c b/src/cgame/cg_accessibility.c
+index ca21c6b..d66cc64 100644
+--- a/src/cgame/cg_accessibility.c
++++ b/src/cgame/cg_accessibility.c
+@@ -1509,6 +1509,93 @@ void CG_AccessibilityScoresArrived(void) {
+ 	eta_scoresPending = 0;
+ }
+ 
++/*
++=====================================================================
++Stats and top shots
++=====================================================================
++*/
++
++/* Each is built as the server's answer is parsed, and said when it is
++   the answer to a key just pressed. The windows lay them out in columns
++   of abbreviations; these are the same figures as a person reads them. */
++#define ETA_REPORT_PARTS 40
++#define ETA_REPORT_PART  96
++
++typedef struct {
++	char	text[ETA_REPORT_PARTS][ETA_REPORT_PART];
++	int		count;
++	int		pending;
++} eta_report_t;
++
++static eta_report_t eta_reports[ETA_REPORT_COUNT];
++
++void CG_AccessibilityReportBegin(eta_reportKind_t kind) {
++	eta_reports[kind].count = 0;
++}
++
++void CG_AccessibilityReportAdd(eta_reportKind_t kind, const char *text) {
++	eta_report_t *report = &eta_reports[kind];
++
++	if (report->count < ETA_REPORT_PARTS) {
++		Q_strncpyz(report->text[report->count++], text, ETA_REPORT_PART);
++	}
++}
++
++int CG_AccessibilityReportCount(eta_reportKind_t kind) {
++	return eta_reports[kind].count;
++}
++
++static void ETA_ReportSpeak(const eta_report_t *report) {
++	int i;
++
++	ETA_Speech_BeginReport();
++	for (i = 0; i < report->count; i++) {
++		ETA_Speech_Say(report->text[i]);
++	}
++	ETA_Speech_EndReport();
++}
++
++/* The answer is whole: say it if it was asked for a moment ago. */
++void CG_AccessibilityReportDone(eta_reportKind_t kind) {
++	eta_report_t *report = &eta_reports[kind];
++
++	if (report->pending && cg.time - report->pending >= 0 && cg.time - report->pending < ETA_ANSWER_WAIT_MS) {
++		ETA_ReportSpeak(report);
++	}
++	report->pending = 0;
++}
++
++/* The key for it was pressed. requested: a fresh answer was asked for,
++   so it is said when it arrives; otherwise the last one is said now. */
++void CG_AccessibilityReportPressed(eta_reportKind_t kind, qboolean requested) {
++	eta_report_t *report = &eta_reports[kind];
++
++	if (requested || report->count == 0) {
++		report->pending = cg.time | 1;
++		return;
++	}
++	ETA_ReportSpeak(report);
++}
++
++/* A weapon's stats name as a person says it: the window abbreviates to
++   fit a column, and a screen reader spells "F.Thrower" out. */
++const char *CG_AccessibilityStatsWeaponName(int stat) {
++	switch (stat) {
++	case WS_FLAMETHROWER:		return "Flamethrower";
++	case WS_GRENADELAUNCHER:	return "Rifle grenade";
++	case WS_MG42:				return "MG 42";
++	case WS_BROWNING:			return "Browning";
++	case WS_GARAND:				return "Garand";
++	case WS_K43:				return "K43";
++	case WS_FOOTKICK:			return "Kick";
++	default:
++		if (stat >= 0 && stat < WS_MAX) {
++			return CG_AccessibilityWeaponName((weapon_t)aWeaponInfo[stat].WP_Index);
++		}
++		return "Weapon";
++	}
++}
++
+ /*
+ =====================================================================
+ Chat
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 6079cca..b600864 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -166,7 +166,15 @@ static void CG_StatsDown_f(void) {
+ 
+ 			cgs.gamestats.requestTime = cg.time + SECONDS_2;
+ 			trap_SendClientCommand(va("sgstats %d", i));
++#ifdef FEATURE_ACCESSIBILITY
++			CG_AccessibilityReportPressed( ETA_REPORT_STATS, qtrue );
++#endif
++		}
++#ifdef FEATURE_ACCESSIBILITY
++		else {
++			CG_AccessibilityReportPressed( ETA_REPORT_STATS, qfalse );
+ 		}
++#endif
+ 	}
+ }
+ 
+@@ -196,7 +204,15 @@ void CG_topshotsDown_f(void) {
+ 		if(cgs.topshots.requestTime < cg.time) {
+ 			cgs.topshots.requestTime = cg.time + SECONDS_2;
+ 			trap_SendClientCommand("stshots");
++#ifdef FEATURE_ACCESSIBILITY
++			CG_AccessibilityReportPressed( ETA_REPORT_TOPSHOTS, qtrue );
++#endif
++		}
++#ifdef FEATURE_ACCESSIBILITY
++		else {
++			CG_AccessibilityReportPressed( ETA_REPORT_TOPSHOTS, qfalse );
+ 		}
++#endif
+ 	}
+ }
+ 
+diff --git a/src/cgame/cg_debriefing.c b/src/cgame/cg_debriefing.c
+index 58770d1..fc1cf0f 100644
+--- a/src/cgame/cg_debriefing.c
++++ b/src/cgame/cg_debriefing.c
+@@ -17,6 +17,9 @@
+  *
+  */
+ #include "cg_local.h"
++#ifdef FEATURE_ACCESSIBILITY
++#include "speech/speech_manager.h"
++#endif
+ 
+ team_t CG_Debriefing_FindWinningTeam(void);
+ team_t CG_Debriefing_FindOveralWinningTeam(void);
+@@ -1834,6 +1837,9 @@ void CG_Debriefing_Startup(void) {
+ 
+ void CG_Debriefing_Shutdown(void) {
+ 	cgs.dbShowing = qfalse;
++#ifdef FEATURE_ACCESSIBILITY
++	CG_AccessibilityDebriefingReset();
++#endif
+ }
+ 
+ void CG_Debriefing_InfoRequests(void) {
+@@ -1908,6 +1914,10 @@ qboolean CG_Debriefing_Draw(void) {
+ 		break;
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	CG_AccessibilityDebriefingFrame();
++#endif
++
+ 	// Render Chat and Button Panels
+ 	BG_PanelButtonsRender(chatPanelButtons);
+ 	BG_PanelButtonsRender(buttonsPanel);
+@@ -2464,6 +2474,11 @@ qboolean CG_Debriefing_Scrollbar_KeyUp(panel_button_t* button, int key) {
+ }
+ 
+ void CG_Debriefing_KeyEvent(int key, qboolean down) {
++#ifdef FEATURE_ACCESSIBILITY
++	if (CG_AccessibilityDebriefingKey(key, down)) {
++		return;
++	}
++#endif
+ 	switch (cgs.dbMode) {
+ 	case 0: // mapvote
+ 		if (BG_PanelButtonsKeyEvent(key, down, mapVoteButtons)) {
+@@ -3824,4 +3839,340 @@ void CG_parseMapVoteTally() {
+ 	}
+ 	return;
+ }
+-// MAPVOTE END
+\ No newline at end of file
++// MAPVOTE END
++#ifdef FEATURE_ACCESSIBILITY
++/*
++=====================================================================
++The end of the match, spoken
++
++The debriefing is four pages - the map vote, the scoreboard, the awards
++and every player's stats - worked with the mouse. Here they are pages
++of speech: Page Up and Page Down change the page, the arrows move
++through the maps, the awards or the players, Enter votes for a map,
++Home says the page again and End says you are ready. Typing still
++chats, and Enter sends the chat while there is any.
++=====================================================================
++*/
++
++static int		eta_dbSpokenMode = -1;		// the page last spoken
++static qboolean	eta_dbIntroduced;
++static qboolean	eta_dbMapsWaiting;			// map vote page said before the list came
++static int		eta_dbWeaponsWaiting = -1;	// player whose weapon stats are still coming
++static int		eta_dbAward = -1;			// award the arrows are on
++
++static const char *ETA_DebriefPageName(int mode) {
++	switch (mode) {
++	case 0:	return "Map vote";
++	case 1:	return "Scoreboard";
++	case 2:	return "Awards";
++	default: return "Player stats";
++	}
++}
++
++static qboolean ETA_DebriefHasPage(int mode) {
++	return (qboolean)(mode != 0 || cgs.gametype == GT_WOLF_MAPVOTE);
++}
++
++static void ETA_DebriefSayMap(int map) {
++	int k;
++	const char *choice = "";
++
++	if (map < 0 || map >= cgs.dbNumMaps) {
++		return;
++	}
++	for (k = 0; k < 3; k++) {
++		if (cgs.dbMapVotedFor[k] == map) {
++			choice = !cgs.dbMapMultiVote ? ", your vote" : (k == 0 ? ", your first choice" : k == 1 ? ", your second choice" : ", your third choice");
++		}
++	}
++	ETA_Speech_Say(va("%s, %d of %d, %d %s%s", cgs.dbMapDispName[map], map + 1, cgs.dbNumMaps,
++		cgs.dbMapVotes[map], cgs.dbMapVotes[map] == 1 ? "vote" : "votes", choice));
++}
++
++static void ETA_DebriefSayPlayer(int clientNum) {
++	clientInfo_t	*ci;
++	score_t			*score = NULL;
++	int				i;
++
++	if (clientNum < 0 || clientNum >= cgs.maxclients || !cgs.clientinfo[clientNum].infoValid) {
++		return;
++	}
++	ci = &cgs.clientinfo[clientNum];
++	for (i = 0; i < cgs.maxclients; i++) {
++		if (cg.scores[i].client == clientNum) {
++			score = &cg.scores[i];
++			break;
++		}
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(va("%s%s, %s, %d XP", ci->cleanname, clientNum == cg.clientNum ? ", you" : "",
++		CG_Debriefing_FullRankNameForClientInfo(ci), ci->score));
++	if (cgs.dbPlayerKillsDeathsRecieved) {
++		ETA_Speech_Say(va("%d kills, %d deaths", ci->kills, ci->deaths));
++		if (ci->team_kills_i > 0) {
++			ETA_Speech_Say(va("%d team kills", ci->team_kills_i));
++		}
++	}
++	if (cgs.dbAccuraciesRecieved) {
++		ETA_Speech_Say(va("accuracy %d percent", ci->totalWeapAcc));
++	}
++	if (score) {
++		ETA_Speech_Say(va("%d %s played", score->time, score->time == 1 ? "minute" : "minutes"));
++	}
++	if (cgs.dbWeaponStatsRecieved && cgs.dbSelectedClient == clientNum) {
++		int pos;
++
++		for (pos = CG_Debriefing_GetNextWeaponStat(-1); pos != -1; pos = CG_Debriefing_GetNextWeaponStat(pos)) {
++			ETA_Speech_Say(va("%s, %d shots, %d hits, %d %s", CG_AccessibilityStatsWeaponName(pos),
++				cgs.dbWeaponStats[pos].numShots, cgs.dbWeaponStats[pos].numHits,
++				cgs.dbWeaponStats[pos].numKills, cgs.dbWeaponStats[pos].numKills == 1 ? "kill" : "kills"));
++		}
++		eta_dbWeaponsWaiting = -1;
++	}
++	else {
++		eta_dbWeaponsWaiting = clientNum;
++	}
++	ETA_Speech_EndReport();
++}
++
++static void ETA_DebriefSayAward(int award) {
++	if (award < 0 || award >= NUM_ENDGAME_AWARDS || cgs.dbAwardTeams[award] == -1) {
++		return;
++	}
++	ETA_Speech_Say(va("%s: %s, %s", awardNames[award], cgs.dbAwardNames[award],
++		cgs.dbAwardTeams[award] == TEAM_AXIS ? "Axis" : "Allies"));
++}
++
++static int ETA_DebriefAwardCount(void) {
++	int i, n = 0;
++
++	for (i = 0; i < NUM_ENDGAME_AWARDS; i++) {
++		if (cgs.dbAwardTeams[i] != -1) {
++			n++;
++		}
++	}
++	return n;
++}
++
++static void ETA_DebriefSayPage(void) {
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(ETA_DebriefPageName(cgs.dbMode));
++
++	switch (cgs.dbMode) {
++	case 0:
++		if (!cgs.dbMapListReceived) {
++			ETA_Speech_Say("the maps are on their way");
++			eta_dbMapsWaiting = qtrue;
++			break;
++		}
++		eta_dbMapsWaiting = qfalse;
++		ETA_Speech_Say(va("%d maps. Up and Down choose, Enter votes%s", cgs.dbNumMaps,
++			cgs.dbMapMultiVote ? ", up to three choices" : ""));
++		ETA_DebriefSayMap(cgs.dbSelectedMap >= 0 ? cgs.dbSelectedMap : cgs.dbMapVotedFor[0]);
++		break;
++	case 1:
++		/* ends the report, with the board in it */
++		CG_AccessibilityScoresPressed( qfalse );
++		break;
++	case 2:
++		if (!cgs.dbAwardsParsed) {
++			CG_Debreifing2_Awards_Parse();
++		}
++		ETA_Speech_Say(va("%d awards. Up and Down go through them", ETA_DebriefAwardCount()));
++		break;
++	default:
++		ETA_Speech_Say("Up and Down go through the players");
++		ETA_DebriefSayPlayer(cgs.dbSelectedClient);
++		break;
++	}
++	ETA_Speech_EndReport();
++	eta_dbSpokenMode = cgs.dbMode;
++}
++
++/* Every frame of the debriefing. */
++void CG_AccessibilityDebriefingFrame(void) {
++	if (!eta_dbIntroduced) {
++		const char *winner = Info_ValueForKey(CG_ConfigString(CS_MULTI_MAPWINNER), "winner");
++
++		eta_dbIntroduced = qtrue;
++		eta_dbAward = -1;
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(atoi(winner) == -1 ? "Match over" : atoi(winner) ? "Match over. Allies win" : "Match over. Axis win");
++		ETA_Speech_Say("Page Up and Page Down change the page");
++		ETA_DebriefSayPage();	// ends the report
++		return;
++	}
++
++	if (cgs.dbMode != eta_dbSpokenMode) {
++		ETA_DebriefSayPage();	// changed with the mouse
++	}
++	else if (cgs.dbMode == 0 && eta_dbMapsWaiting && cgs.dbMapListReceived) {
++		ETA_DebriefSayPage();
++	}
++	else if (cgs.dbMode == 3 && eta_dbWeaponsWaiting == cgs.dbSelectedClient && cgs.dbWeaponStatsRecieved) {
++		ETA_DebriefSayPlayer(cgs.dbSelectedClient);
++	}
++}
++
++/* The debriefing is over: the next one introduces itself again. */
++void CG_AccessibilityDebriefingReset(void) {
++	eta_dbIntroduced = qfalse;
++	eta_dbSpokenMode = -1;
++	eta_dbMapsWaiting = qfalse;
++	eta_dbWeaponsWaiting = -1;
++}
++
++static void ETA_DebriefVote(void) {
++	int map = cgs.dbSelectedMap, k;
++
++	if (!cg.snap || map < 0 || map >= cgs.dbNumMaps) {
++		ETA_Speech_Say("Choose a map with Up and Down first");
++		return;
++	}
++	if (!cgs.dbMapMultiVote) {
++		trap_SendClientCommand(va("mapvote %d", cgs.dbMapID[map]));
++		cgs.dbMapVotedFor[0] = map;
++		ETA_Speech_Say(va("Voted for %s", cgs.dbMapDispName[map]));
++		return;
++	}
++	for (k = 0; k < 3; k++) {
++		if (cgs.dbMapVotedFor[k] == map) {
++			ETA_Speech_Say("You have chosen that one already");
++			return;
++		}
++	}
++	for (k = 0; k < 3 && cgs.dbMapVotedFor[k] != -1; k++) {
++	}
++	if (k == 3) {
++		ETA_Speech_Say("You have made all three choices");
++		return;
++	}
++	trap_SendClientCommand(va("mapvote %d %d", cgs.dbMapID[map], k + 1));
++	cgs.dbMapVotedFor[k] = map;
++	ETA_Speech_Say(va("%s choice: %s", k == 0 ? "First" : k == 1 ? "Second" : "Third", cgs.dbMapDispName[map]));
++}
++
++/* A key in the debriefing. qtrue: it was the mode's, and nothing else
++   gets it. */
++qboolean CG_AccessibilityDebriefingKey(int key, qboolean down) {
++	int step, i, mode;
++
++	if (!down) {
++		return qfalse;
++	}
++
++	switch (key) {
++	case K_PGUP:
++	case K_PGDN:
++		step = key == K_PGDN ? 1 : 3;
++		mode = cgs.dbMode;
++		for (i = 0; i < 4; i++) {
++			mode = (mode + step) % 4;
++			if (ETA_DebriefHasPage(mode)) {
++				break;
++			}
++		}
++		cgs.dbMode = mode;
++		trap_S_StartLocalSound(trap_S_RegisterSound("sound/menu/menu_click.wav", qtrue), CHAN_LOCAL_SOUND);
++		ETA_DebriefSayPage();
++		return qtrue;
++
++	case K_HOME:
++		ETA_DebriefSayPage();
++		return qtrue;
++
++	case K_END:
++		if (cg.snap && (cg.snap->ps.eFlags & EF_READY)) {
++			ETA_Speech_Say("You are ready already");
++		}
++		else {
++			trap_SendClientCommand("imready");
++			ETA_Speech_Say("Ready");
++		}
++		return qtrue;
++
++	case K_UPARROW:
++	case K_DOWNARROW:
++		step = key == K_DOWNARROW ? 1 : -1;
++		if (cgs.dbMode == 0) {
++			int map = cgs.dbSelectedMap;
++
++			if (cgs.dbNumMaps <= 0) {
++				ETA_Speech_Say("No maps yet");
++				return qtrue;
++			}
++			map = map < 0 ? 0 : (map + step + cgs.dbNumMaps) % cgs.dbNumMaps;
++			cgs.dbSelectedMap = map;
++			cgs.dbSelectedMapTime = cg.time;
++			if (map < cgs.dbMapVoteListOffset) {
++				cgs.dbMapVoteListOffset = map;
++			}
++			else if (map >= cgs.dbMapVoteListOffset + 18) {
++				cgs.dbMapVoteListOffset = map - 17;
++			}
++			ETA_DebriefSayMap(map);
++		}
++		else if (cgs.dbMode == 2) {
++			int award = eta_dbAward;
++
++			if (!cgs.dbAwardsParsed) {
++				CG_Debreifing2_Awards_Parse();
++			}
++			if (ETA_DebriefAwardCount() == 0) {
++				ETA_Speech_Say("No awards");
++				return qtrue;
++			}
++			do {
++				award = (award + step + NUM_ENDGAME_AWARDS) % NUM_ENDGAME_AWARDS;
++			} while (cgs.dbAwardTeams[award] == -1);
++			eta_dbAward = award;
++			ETA_DebriefSayAward(award);
++		}
++		else if (cgs.dbMode == 3) {
++			int count = 0, at = 0;
++
++			for (i = 0; i < cgs.maxclients; i++) {
++				cgs.dbSortedClients[i] = i;
++			}
++			qsort(cgs.dbSortedClients, cgs.maxclients, sizeof(int), CG_SortPlayersByXP);
++			for (i = 0; i < cgs.maxclients && cgs.clientinfo[cgs.dbSortedClients[i]].infoValid; i++) {
++				if (cgs.dbSortedClients[i] == cgs.dbSelectedClient) {
++					at = i;
++				}
++				count++;
++			}
++			if (count == 0) {
++				return qtrue;
++			}
++			at = (at + step + count) % count;
++			CG_Debrieing_SetSelectedClient(cgs.dbSortedClients[at]);
++			ETA_DebriefSayPlayer(cgs.dbSelectedClient);
++		}
++		else {
++			CG_AccessibilityScoresPressed( qfalse );
++		}
++		return qtrue;
++
++	case K_ENTER:
++	case K_KP_ENTER:
++		{
++			char chat[MAX_SAY_TEXT];
++
++			trap_Cvar_VariableStringBuffer("chattext", chat, sizeof(chat));
++			if (chat[0]) {
++				return qfalse;	// sends the chat
++			}
++			if (cgs.dbMode == 0) {
++				ETA_DebriefVote();
++			}
++			else {
++				ETA_DebriefSayPage();
++			}
++		}
++		return qtrue;
++	}
++
++	return qfalse;
++}
++#endif
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 17e0e2c..1312752 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3530,6 +3530,20 @@ void CG_AccessibilityDamage( float yaw );
+ void CG_AccessibilityPain( int health );
+ void CG_AccessibilityScoresPressed( qboolean requested );
+ void CG_AccessibilityScoresArrived( void );
++typedef enum {
++	ETA_REPORT_STATS,
++	ETA_REPORT_TOPSHOTS,
++	ETA_REPORT_COUNT
++} eta_reportKind_t;
++void CG_AccessibilityReportBegin( eta_reportKind_t kind );
++void CG_AccessibilityReportAdd( eta_reportKind_t kind, const char *text );
++int CG_AccessibilityReportCount( eta_reportKind_t kind );
++void CG_AccessibilityReportDone( eta_reportKind_t kind );
++void CG_AccessibilityReportPressed( eta_reportKind_t kind, qboolean requested );
++const char *CG_AccessibilityStatsWeaponName( int stat );
++void CG_AccessibilityDebriefingFrame( void );
++void CG_AccessibilityDebriefingReset( void );
++qboolean CG_AccessibilityDebriefingKey( int key, qboolean down );
+ void CG_AccessibilityChat( const char *text );
+ void CG_AccessibilityMusicFade( float level, qboolean restarted );
+ void CG_AccessibilityLoadingBegin( void );
+diff --git a/src/cgame/cg_servercmds.c b/src/cgame/cg_servercmds.c
+index 1034b6d..f1f70f6 100644
+--- a/src/cgame/cg_servercmds.c
++++ b/src/cgame/cg_servercmds.c
+@@ -2051,6 +2051,11 @@ void CG_topshotsParse_cmd(qboolean doBest) {
+ 
+ 	ts->cWeapons = 0;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	CG_AccessibilityReportBegin( ETA_REPORT_TOPSHOTS );
++	CG_AccessibilityReportAdd( ETA_REPORT_TOPSHOTS, "Top shots" );
++#endif
++
+ 	while( iArg+1 < Argc ) {
+ 		char name[32];
+ 		iWeap = atoi(CG_Argv(iArg++));
+@@ -2069,8 +2074,22 @@ void CG_topshotsParse_cmd(qboolean doBest) {
+ 			Q_strncpyz(ts->strWS[ts->cWeapons++],
+ 						va("%-12s %5.1f %4d/%-4d %5d  %s", WeaponStatsName(iWeap), acc, hits, atts, kills, name),
+ 						sizeof(ts->strWS[0]));
++#ifdef FEATURE_ACCESSIBILITY
++			/* weapon first: the list is sorted by it, and scanned for it */
++			CG_AccessibilityReportAdd( ETA_REPORT_TOPSHOTS, va("%s, %s, %d percent, %d %s",
++				CG_AccessibilityStatsWeaponName(iWeap),
++				(cnum >= 0 && cnum < MAX_CLIENTS) ? cgs.clientinfo[cnum].cleanname : "unknown",
++				(int)(acc + 0.5f), kills, kills == 1 ? "kill" : "kills") );
++#endif
+ 		}
+ 	}
++
++#ifdef FEATURE_ACCESSIBILITY
++	if( CG_AccessibilityReportCount( ETA_REPORT_TOPSHOTS ) == 1 ) {
++		CG_AccessibilityReportAdd( ETA_REPORT_TOPSHOTS, "nobody has any yet" );
++	}
++	CG_AccessibilityReportDone( ETA_REPORT_TOPSHOTS );
++#endif
+ }
+ 
+ void CG_ParseWeaponStats( void ) {
+@@ -2106,6 +2125,10 @@ void CG_parseWeaponStatsGS_cmd(void) {
+ 	int 			weaponMask	= atoi(CG_Argv(iArg++));
+ 	int 			skillMask;
+ 	int				xp			= 0;
++#ifdef FEATURE_ACCESSIBILITY
++	char			etaWeaponText[WS_MAX][96];
++	int				etaWeapons, etaKills, etaDeaths;
++#endif
+ 
+ 	gs->cWeapons	= 0;
+ 	gs->cSkills		= 0;
+@@ -2113,6 +2136,15 @@ void CG_parseWeaponStatsGS_cmd(void) {
+ 	gs->nClientID	= nClientID;
+ 	gs->nRounds		= nRounds;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* whose stats first - following a player, they are somebody else's -
++	   then the totals, rank and XP, then weapon by weapon */
++	CG_AccessibilityReportBegin( ETA_REPORT_STATS );
++	CG_AccessibilityReportAdd( ETA_REPORT_STATS, nClientID == cg.clientNum ? "Your stats" : va("Stats for %s", ci->cleanname) );
++	etaWeapons = 0;
++	etaKills = etaDeaths = 0;
++#endif
++
+ //	Q_strncpyz(strName, ci->name, sizeof(strName));
+ //	BG_cleanName(cgs.clientinfo[gs->nClientID].name, strName, sizeof(strName), qfalse);
+ 
+@@ -2164,6 +2196,22 @@ void CG_parseWeaponStatsGS_cmd(void) {
+ 				if(nShots > 0 || nHits > 0 || nKills > 0 || nDeaths) {
+ 					gs->fHasStats = qtrue;
+ 				}
++#ifdef FEATURE_ACCESSIBILITY
++				etaKills += nKills;
++				etaDeaths += nDeaths;
++				/* only the weapons used: the window lists all the class
++				   carries, which read aloud is a list of zeroes */
++				if( i != WS_POISON && (nShots > 0 || nKills > 0) && etaWeapons < WS_MAX ) {
++					if( nShots > 0 ) {
++						Q_strncpyz( etaWeaponText[etaWeapons++], va("%s, %d percent, %d %s", CG_AccessibilityStatsWeaponName(i),
++							(int)(nHits * 100.0f / nShots + 0.5f), nKills, nKills == 1 ? "kill" : "kills"), sizeof(etaWeaponText[0]) );
++					}
++					else {
++						Q_strncpyz( etaWeaponText[etaWeapons++], va("%s, %d %s", CG_AccessibilityStatsWeaponName(i),
++							nKills, nKills == 1 ? "kill" : "kills"), sizeof(etaWeaponText[0]) );
++					}
++				}
++#endif
+ 			}
+ 		}
+ 
+@@ -2179,6 +2227,16 @@ void CG_parseWeaponStatsGS_cmd(void) {
+ 			Q_strncpyz(gs->strExtra[1], va("Damage Recvd: %d", dmg_rcvd), sizeof(gs->strExtra[1]));
+ 			Q_strncpyz(gs->strExtra[2], va("KillingSpree: %-6d   Best spree: %d", spree, bestspree), sizeof(gs->strExtra[2]));
+ 			Q_strncpyz(gs->strExtra[3], va("Hit Regions : Head:%-3d Arms:%-3d Body:%-3d Legs:%-3d", hrHead, hrArms, hrBody, hrLegs), sizeof(gs->strExtra[3]));
++#ifdef FEATURE_ACCESSIBILITY
++			CG_AccessibilityReportAdd( ETA_REPORT_STATS, va("%d kills, %d deaths", etaKills, etaDeaths) );
++			CG_AccessibilityReportAdd( ETA_REPORT_STATS, va("headshots %d percent", (int)(hsRatio + 0.5f)) );
++			CG_AccessibilityReportAdd( ETA_REPORT_STATS, va("damage given %d, received %d", dmg_given, dmg_rcvd) );
++			if( team_dmg > 0 ) {
++				CG_AccessibilityReportAdd( ETA_REPORT_STATS, va("team damage %d", team_dmg) );
++			}
++			CG_AccessibilityReportAdd( ETA_REPORT_STATS, va("killing spree %d, best %d", spree, bestspree) );
++			CG_AccessibilityReportAdd( ETA_REPORT_STATS, va("hits: head %d, arms %d, body %d, legs %d", hrHead, hrArms, hrBody, hrLegs) );
++#endif
+ 		}
+ 	}
+ 
+@@ -2194,6 +2252,21 @@ void CG_parseWeaponStatsGS_cmd(void) {
+ 
+ 	Q_strncpyz(gs->strRank, va("%-13s %d", ((ci->team == TEAM_AXIS) ? rankNames_Axis : rankNames_Allies)[ci->rank], xp), sizeof(gs->strRank));
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	{
++		int k;
++
++		if( !gs->fHasStats ) {
++			CG_AccessibilityReportAdd( ETA_REPORT_STATS, "no weapon stats yet" );
++		}
++		CG_AccessibilityReportAdd( ETA_REPORT_STATS, va("rank %s, %d XP", ((ci->team == TEAM_AXIS) ? rankNames_Axis : rankNames_Allies)[ci->rank], xp) );
++		for( k = 0; k < etaWeapons; k++ ) {
++			CG_AccessibilityReportAdd( ETA_REPORT_STATS, etaWeaponText[k] );
++		}
++		CG_AccessibilityReportDone( ETA_REPORT_STATS );
++	}
++#endif
++
+ 	if(skillMask != 0) {
+ 		char *str;
+ 

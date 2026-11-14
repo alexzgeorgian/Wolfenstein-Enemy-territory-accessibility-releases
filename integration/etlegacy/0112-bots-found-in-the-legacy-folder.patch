@@ -1,0 +1,151 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index be85c47..d23740d 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -6954,6 +6954,36 @@ static void ETA_NarrateConsole(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief Says, a moment into a match the player hosts, why bots did not
++ *        come.
++ *
++ * The menus find it as Start Server is pressed (on a Mac: no bots file,
++ * one from another version, or no Omni-bot) but cannot say it then: the
++ * loading screen's speech talks over it. So it waits in eta_botsProblem
++ * and is said here, once the map is up, and then forgotten.
++ */
++static void ETA_SayBotsProblem(void)
++{
++	char problem[MAX_CVAR_VALUE_STRING];
++
++	if (!cg.snap || cg.time < cgs.levelStartTime + 3000)
++	{
++		return;
++	}
++
++	trap_Cvar_VariableStringBuffer("eta_botsProblem", problem, sizeof(problem));
++	if (!problem[0])
++	{
++		return;
++	}
++	trap_Cvar_Set("eta_botsProblem", "");
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(problem);
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief How near a ladder has to be to be said, and to be climbed with
+  *        the use key: two metres, a couple of steps.
+@@ -10785,6 +10815,9 @@ void CG_DrawActive()
+ 	/* The console opening over the match, or closing. */
+ 	ETA_NarrateConsole();
+ 
++	/* Why a hosted match has no bots, once it is up. */
++	ETA_SayBotsProblem();
++
+ 	/* Every active frame, so a weapon change is caught wherever it came
+ 	   from - a number key, the mouse wheel, running dry, or being handed a
+ 	   weapon on spawn. */
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index bcf8461..574cf37 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -4984,22 +4984,35 @@ static const char *UI_AccessibilityBotCommand(int bots)
+  */
+ #ifdef __APPLE__
+ /**
+- * @brief On a Mac, whether bots can come, said when they cannot.
++ * @brief On a Mac, whether bots can come; what stops them is kept to be
++ * said once the match is up.
+  *
+  * ET: Legacy builds its Mac game module without Omni-bot, so the Mac
+  * download carries one built with it, qagame_mac, for the legacy folder
+- * in the player's Library, and Omni-bot itself goes in their home
+- * folder, where the game module looks for it. Neither is in the pk3, so
++ * in the player's Library. Neither it nor Omni-bot is in the pk3, so
+  * either can be missing, and the game module can be one left from
+  * another version that the updater never replaced. Without this, a
+  * hosted game simply has no bots and nothing says why.
++ *
++ * Omni-bot is looked for where Windows players have it, in the legacy
++ * folder, and then in the home folder, and the game module is told
++ * where it was found (omnibot_path). Said here, as Start Server is
++ * pressed, the reason was cut off by the loading screen's speech, so it
++ * is kept in eta_botsProblem for the cgame to say a moment into the
++ * match (ETA_SayBotsProblem).
+  */
+ static void UI_AccessibilityMacBotsCheck(void)
+ {
+ 	char       homepath[MAX_OSPATH];
+ 	char       path[MAX_OSPATH];
++	char       folder[MAX_OSPATH];
+ 	const char *home = getenv("HOME");
+-	FILE       *omnibot;
++	FILE       *omnibot = NULL;
++	int        i;
++
++	/* Set, never registered: it is a message on its way to the cgame,
++	   not a setting, and is never saved. */
++	trap_Cvar_Set("eta_botsProblem", "");
+ 
+ 	trap_Cvar_VariableStringBuffer("fs_homepath", homepath, sizeof(homepath));
+ 	Com_sprintf(path, sizeof(path), "%s/legacy/qagame_mac", homepath);
+@@ -5009,23 +5022,40 @@ static void UI_AccessibilityMacBotsCheck(void)
+ 	case ETA_MAC_GAME_UNCHECKED:
+ 		return; /* a build that made no bots file */
+ 	case ETA_MAC_GAME_ABSENT:
+-		UI_AccessibilityUpdateSay("No bots: the Mac needs the bots file. Copy qagame_mac from the Mac download into the legacy folder, as the guide says.");
++		trap_Cvar_Set("eta_botsProblem", "No bots: the Mac needs the bots file. Copy qagame_mac from the Mac download into the legacy folder, as the guide says.");
+ 		return;
+ 	case ETA_MAC_GAME_OTHER:
+-		UI_AccessibilityUpdateSay("No bots: the bots file in the legacy folder is from another version. Copy qagame_mac from this version's Mac download over it.");
++		trap_Cvar_Set("eta_botsProblem", "No bots: the bots file in the legacy folder is from another version. Copy qagame_mac from this version's Mac download over it.");
+ 		return;
+ 	case ETA_MAC_GAME_MATCHES:
+ 		break;
+ 	}
+ 
+-	Com_sprintf(path, sizeof(path), "%s/omni-bot/omnibot_et_mac.so", home ? home : "");
+-	omnibot = home ? fopen(path, "rb") : NULL;
++	for (i = 0; i < 2 && !omnibot; i++)
++	{
++		if (i == 0)
++		{
++			Com_sprintf(folder, sizeof(folder), "%s/legacy/omni-bot", homepath);
++		}
++		else if (home)
++		{
++			Com_sprintf(folder, sizeof(folder), "%s/omni-bot", home);
++		}
++		else
++		{
++			break;
++		}
++		Com_sprintf(path, sizeof(path), "%s/omnibot_et_mac.so", folder);
++		omnibot = fopen(path, "rb");
++	}
++
+ 	if (!omnibot)
+ 	{
+-		UI_AccessibilityUpdateSay("No bots: Omni-bot is not in your home folder. The guide says where to get it.");
++		trap_Cvar_Set("eta_botsProblem", "No bots: Omni-bot was not found. Put the omni-bot folder in the legacy folder, beside the mod.");
+ 		return;
+ 	}
+ 	fclose(omnibot);
++	trap_Cvar_Set("omnibot_path", folder);
+ }
+ #endif
+ 
+@@ -5046,6 +5076,9 @@ static void UI_AccessibilityHostServer(void)
+ 		/* Off means off. omnibot_enable is archived, so without this a
+ 		   server hosted with bots once would have them every time after. */
+ 		trap_Cvar_Set("omnibot_enable", "0");
++#ifdef __APPLE__
++		trap_Cvar_Set("eta_botsProblem", "");
++#endif
+ 		return;
+ 	}
+ 

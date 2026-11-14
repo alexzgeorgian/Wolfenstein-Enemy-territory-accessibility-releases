@@ -1,0 +1,303 @@
+diff --git a/src/cgame/cg_limbopanel.c b/src/cgame/cg_limbopanel.c
+index e6e7811..bc03f34 100644
+--- a/src/cgame/cg_limbopanel.c
++++ b/src/cgame/cg_limbopanel.c
+@@ -3542,31 +3542,110 @@ qboolean CG_LimboPanel_Draw(void)
+  */
+ #define ETA_LIMBO_TEAM    0
+ #define ETA_LIMBO_CLASS   1
+-#define ETA_LIMBO_CONFIRM 2
++#define ETA_LIMBO_WEAPON  2
++#define ETA_LIMBO_CONFIRM 3
+ 
+ typedef struct
+ {
+ 	panel_button_t *button;
+ 	int            kind;
++	int            slot;
+ } eta_limboStop_t;
+ 
++/*
++ * The weapon stops carry no button: the panel has no per-weapon control to
++ * drive, only a dropdown. They are driven through the slot lights and
++ * CG_LimboPanel_SetSelectedWeaponNum instead, which is the same pair the
++ * dropdown itself uses.
++ *
++ * SECONDARY_SLOT is 0 and PRIMARY_SLOT is 1 (cg_local.h), the opposite way
++ * round from how the names read, so the slots here are written as the
++ * constants rather than as numbers.
++ */
+ static eta_limboStop_t eta_limboStops[] =
+ {
+-	{ &teamButton0,  ETA_LIMBO_TEAM    },
+-	{ &teamButton1,  ETA_LIMBO_TEAM    },
+-	{ &teamButton2,  ETA_LIMBO_TEAM    },
+-	{ &classButton0, ETA_LIMBO_CLASS   },
+-	{ &classButton1, ETA_LIMBO_CLASS   },
+-	{ &classButton2, ETA_LIMBO_CLASS   },
+-	{ &classButton3, ETA_LIMBO_CLASS   },
+-	{ &classButton4, ETA_LIMBO_CLASS   },
+-	{ &okButton,     ETA_LIMBO_CONFIRM }
++	{ &teamButton0,  ETA_LIMBO_TEAM,    0              },
++	{ &teamButton1,  ETA_LIMBO_TEAM,    0              },
++	{ &teamButton2,  ETA_LIMBO_TEAM,    0              },
++	{ &classButton0, ETA_LIMBO_CLASS,   0              },
++	{ &classButton1, ETA_LIMBO_CLASS,   0              },
++	{ &classButton2, ETA_LIMBO_CLASS,   0              },
++	{ &classButton3, ETA_LIMBO_CLASS,   0              },
++	{ &classButton4, ETA_LIMBO_CLASS,   0              },
++	{ NULL,          ETA_LIMBO_WEAPON,  PRIMARY_SLOT   },
++	{ NULL,          ETA_LIMBO_WEAPON,  SECONDARY_SLOT },
++	{ &okButton,     ETA_LIMBO_CONFIRM, 0              }
+ };
+ 
+ #define ETA_LIMBO_STOP_COUNT ((int)(sizeof(eta_limboStops) / sizeof(eta_limboStops[0])))
+ 
+ static int eta_limboIndex = -1;
+ 
++/**
++ * @brief Collects the weapons the panel offers for a slot, in the order its
++ * own dropdown lists them - which is the order the panel's 1-9 accelerator
++ * keys count in, so what is spoken and what those keys do cannot disagree.
++ * @param[in]  slot
++ * @param[out] out
++ * @param[in]  max
++ * @return how many options were written to out.
++ */
++static int ETA_LimboPanel_WeaponOptions(int slot, weapon_t *out, int max)
++{
++	bg_playerclass_t *classInfo = CG_LimboPanel_GetPlayerClass();
++	int              saved      = cgs.ccSelectedWeaponSlot;
++	int              i, cnt     = 0;
++
++	if (!classInfo || CG_LimboPanel_GetTeam() == TEAM_SPECTATOR)
++	{
++		return 0;
++	}
++
++	/* CG_LimboPanel_WeaponPanel_GetSelectableWeaponOption reads the live slot
++	   rather than taking one, so the slot is moved for the walk and put back.
++	   Its secondary-slot answer depends on the current primary pick, which is
++	   why the list is read fresh every time rather than cached. */
++	cgs.ccSelectedWeaponSlot = slot;
++
++	for (i = 0; i < MAX_WEAPS_PER_CLASS && cnt < max; i++)
++	{
++		weapon_t weap = CG_LimboPanel_WeaponPanel_GetSelectableWeaponOption(classInfo, i);
++
++		if (weap != WP_NONE)
++		{
++			out[cnt++] = weap;
++		}
++	}
++
++	cgs.ccSelectedWeaponSlot = saved;
++	return cnt;
++}
++
++/**
++ * @brief A stop worth stopping on. A class with one weapon in a slot has
++ * nothing to choose there, and a spectator has no weapons at all; walking
++ * onto either would say something the player cannot act on.
++ * @param[in] index
++ * @return
++ */
++static qboolean ETA_LimboPanel_StopIsAvailable(int index)
++{
++	weapon_t options[MAX_WEAPS_PER_CLASS];
++
++	if (index < 0 || index >= ETA_LIMBO_STOP_COUNT)
++	{
++		return qfalse;
++	}
++
++	if (eta_limboStops[index].kind != ETA_LIMBO_WEAPON)
++	{
++		return qtrue;
++	}
++
++	return (qboolean)(ETA_LimboPanel_WeaponOptions(eta_limboStops[index].slot, options,
++	                                               MAX_WEAPS_PER_CLASS) > 1);
++}
++
+ /**
+  * @brief Spoken name for one stop, including whether it is the current choice
+  * and whether the server has ruled it out - both of which a sighted player
+@@ -3581,6 +3660,33 @@ static const char *ETA_LimboStopText(const eta_limboStop_t *stop)
+ 	const char  *state = "";
+ 	team_t      team;
+ 
++	if (stop->kind == ETA_LIMBO_WEAPON)
++	{
++		weapon_t options[MAX_WEAPS_PER_CLASS];
++		weapon_t current = CG_LimboPanel_GetSelectedWeapon(stop->slot);
++		int      count   = ETA_LimboPanel_WeaponOptions(stop->slot, options, MAX_WEAPS_PER_CLASS);
++		int      i, at   = 0;
++
++		for (i = 0; i < count; i++)
++		{
++			if (options[i] == current)
++			{
++				at = i + 1;
++				break;
++			}
++		}
++
++		/* "N of M" is the panel's own phrasing for this - it is what the
++		   dropdown prints beside each weapon - and M is the count the engine
++		   works out per class and skill level, not one assumed here. */
++		Com_sprintf(text, sizeof(text), "%s weapon, %s, %i of %i%s",
++		            stop->slot == PRIMARY_SLOT ? "Primary" : "Secondary",
++		            current != WP_NONE ? GetWeaponTableData(current)->desc : "none",
++		            at, count,
++		            CG_LimboPanel_RealWeaponIsDisabled(current) ? ", unavailable" : "");
++		return text;
++	}
++
+ 	switch (stop->kind)
+ 	{
+ 	case ETA_LIMBO_TEAM:
+@@ -3630,7 +3736,29 @@ static void ETA_LimboPanel_MoveCursor(void)
+ 		return;
+ 	}
+ 
+-	rect         = &eta_limboStops[eta_limboIndex].button->rect;
++	if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_WEAPON)
++	{
++		/* A weapon stop has no control of its own. Landing on it selects that
++		   slot through the panel's own slot light, so the dropdown on screen
++		   shows the weapons being spoken, and so the engine's own selectable
++		   weapon lookup - which reads the live slot - answers for this one.
++		   weaponLight1 carries SECONDARY_SLOT and weaponLight2 PRIMARY_SLOT;
++		   that pairing is checked rather than assumed from the names. */
++		panel_button_t *light = (eta_limboStops[eta_limboIndex].slot == PRIMARY_SLOT)
++		                        ? &weaponLight2 : &weaponLight1;
++
++		if (cgs.ccSelectedWeaponSlot != eta_limboStops[eta_limboIndex].slot)
++		{
++			CG_LimboPanel_WeaponLights_KeyDown(light, K_MOUSE1);
++		}
++
++		rect = &light->rect;
++	}
++	else
++	{
++		rect = &eta_limboStops[eta_limboIndex].button->rect;
++	}
++
+ 	cgs.cursorX  = (int)(rect->x + rect->w / 2.f);
+ 	cgs.cursorY  = (int)(rect->y + rect->h / 2.f);
+ 	cgDC.cursorx = cgs.cursorX;
+@@ -3657,19 +3785,63 @@ static void ETA_LimboPanel_SpeakCurrent(void)
+  */
+ static qboolean ETA_LimboPanel_HandleKey(int key)
+ {
++	int steps;
++
+ 	switch (key)
+ 	{
+ 	case K_DOWNARROW:
+-	case K_TAB:
+-		eta_limboIndex = (eta_limboIndex + 1) % ETA_LIMBO_STOP_COUNT;
+-		ETA_LimboPanel_MoveCursor();
+-		ETA_LimboPanel_SpeakCurrent();
+-		return qtrue;
+ 	case K_UPARROW:
+-		eta_limboIndex = (eta_limboIndex <= 0 ? ETA_LIMBO_STOP_COUNT : eta_limboIndex) - 1;
++		/* Step over stops the current team and class leave nothing to choose
++		   at, rather than announcing a dead end. The bound walk cannot spin:
++		   team, class and confirm are always available. */
++		for (steps = 0; steps < ETA_LIMBO_STOP_COUNT; steps++)
++		{
++			if (key == K_DOWNARROW)
++			{
++				eta_limboIndex = (eta_limboIndex + 1) % ETA_LIMBO_STOP_COUNT;
++			}
++			else
++			{
++				eta_limboIndex = (eta_limboIndex <= 0 ? ETA_LIMBO_STOP_COUNT : eta_limboIndex) - 1;
++			}
++
++			if (ETA_LimboPanel_StopIsAvailable(eta_limboIndex))
++			{
++				break;
++			}
++		}
++
+ 		ETA_LimboPanel_MoveCursor();
+ 		ETA_LimboPanel_SpeakCurrent();
+ 		return qtrue;
++	case K_TAB:
++	{
++		/* Tab keeps the job it has in the stock panel - swapping which weapon
++		   slot is shown - and gains a spoken result. MoveCursor clicks the
++		   slot light exactly as the stock handler below does, so the swap is
++		   the engine's, and parking the walk on that slot's stop keeps the
++		   keyboard and the panel pointing at the same thing. */
++		int other = (cgs.ccSelectedWeaponSlot == PRIMARY_SLOT) ? SECONDARY_SLOT : PRIMARY_SLOT;
++		int i;
++
++		if (CG_LimboPanel_GetTeam() == TEAM_SPECTATOR)
++		{
++			return qfalse;
++		}
++
++		for (i = 0; i < ETA_LIMBO_STOP_COUNT; i++)
++		{
++			if (eta_limboStops[i].kind == ETA_LIMBO_WEAPON && eta_limboStops[i].slot == other)
++			{
++				eta_limboIndex = i;
++				ETA_LimboPanel_MoveCursor();
++				ETA_LimboPanel_SpeakCurrent();
++				return qtrue;
++			}
++		}
++
++		return qfalse;
++	}
+ 	case K_ENTER:
+ 	case K_KP_ENTER:
+ 		if (eta_limboIndex < 0)
+@@ -3681,13 +3853,39 @@ static qboolean ETA_LimboPanel_HandleKey(int key)
+ 		   exactly what it would see under a real click. */
+ 		ETA_LimboPanel_MoveCursor();
+ 
+-		if (eta_limboStops[eta_limboIndex].button->onKeyDown)
++		if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_WEAPON)
++		{
++			weapon_t options[MAX_WEAPS_PER_CLASS];
++			int      slot    = eta_limboStops[eta_limboIndex].slot;
++			weapon_t current = CG_LimboPanel_GetSelectedWeapon(slot);
++			int      count   = ETA_LimboPanel_WeaponOptions(slot, options, MAX_WEAPS_PER_CLASS);
++			int      i, at   = -1;
++
++			/* The panel offers no per-weapon control to click, only a dropdown
++			   that needs a cursor, so Enter advances the slot to its next
++			   option instead - the same setter the dropdown calls. */
++			for (i = 0; i < count; i++)
++			{
++				if (options[i] == current)
++				{
++					at = i;
++					break;
++				}
++			}
++
++			if (count > 0)
++			{
++				CG_LimboPanel_SetSelectedWeaponNum(slot, options[(at + 1) % count]);
++				SOUND_SELECT;
++			}
++		}
++		else if (eta_limboStops[eta_limboIndex].button->onKeyDown)
+ 		{
+ 			eta_limboStops[eta_limboIndex].button->onKeyDown(eta_limboStops[eta_limboIndex].button, K_MOUSE1);
+ 		}
+ 
+-		/* Re-read the same stop: selecting a team or class changes what the
+-		   panel now says about it. */
++		/* Re-read the same stop: selecting a team, class or weapon changes
++		   what the panel now says about it. */
+ 		ETA_LimboPanel_SpeakCurrent();
+ 		return qtrue;
+ 	default:

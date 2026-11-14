@@ -1,0 +1,346 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 05399bf..5525714 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3342,6 +3342,131 @@ static void ETA_NarrateFacing(void)
+ 	}
+ }
+ 
++/**
++ * @brief How quickly the music gets out of the way, and how slowly it returns.
++ *
++ * Down fast enough to be clear of the first syllable, up slowly enough
++ * that an estimate which expired a little early is heard as the music
++ * coming back rather than as a click.
++ */
++#define ETA_MUSIC_DUCK_DOWN_MS 200
++#define ETA_MUSIC_DUCK_UP_MS   600
++
++/**
++ * @brief The music level the game itself last asked for.
++ *
++ * Not always 1. A map script fades the music for its own reasons -
++ * mu_fade is one of the commands the server sends - and restoring to full
++ * after a narration would override that, turning a deliberate hush back
++ * into a soundtrack. So the duck is applied as a fraction of whatever the
++ * game last asked for, and the restore goes back to that and not to 1.
++ */
++static float gMusicBaseline = 1.0f;
++static qboolean gMusicDucked = qfalse;
++static int      gMusicDuckUntil = 0;
++static int      gMusicDuckSerial = 0;
++
++/**
++ * @brief Records a music level the game asked for, and applies the duck to it.
++ *
++ * @param[in] level the level the game wants, 0 to 1
++ * @param[in] restarted qtrue when a new track was started rather than faded
++ */
++void ETA_MusicFadeRequested(float level, qboolean restarted)
++{
++	gMusicBaseline = level;
++
++	if (restarted)
++	{
++		/* A new stream starts unfaded, so whatever duck was in place has
++		   already been cancelled by the engine. Following it here keeps
++		   this from believing it is still ducked and never restoring. */
++		gMusicDucked = qfalse;
++		return;
++	}
++
++	/* Mid-duck, the game has just set a new level underneath us. Re-apply
++	   the duck on top of it rather than leaving the music at the level the
++	   script asked for while the narrator is still talking over it. */
++	if (gMusicDucked)
++	{
++		trap_S_FadeBackgroundTrack(gMusicBaseline * eta_musicDuck.value,
++		                           ETA_MUSIC_DUCK_DOWN_MS, 0);
++	}
++}
++
++/**
++ * @brief Turns the music down while the narrator is talking.
++ *
++ * A tester turned the music up and found the narrator underneath it. The
++ * two are mixed by different things and neither knows about the other:
++ * the music is the engine's, and the speech is NVDA's or SAPI's, going
++ * out through Windows rather than through the game at all. So no volume
++ * setting anywhere can balance them against each other - turning the
++ * music up genuinely does bury the narration, and there is nothing in
++ * either mixer that would stop it.
++ *
++ * What the mod can do is the thing broadcast has always done: duck the
++ * bed while the voice is on it. This is the game's own music fade, the
++ * same one map scripts use, so it costs nothing and needs no new mixing.
++ *
++ * It works whichever backend is speaking, which matters more than it
++ * looks: the obvious fix - a speech volume setting - would do nothing at
++ * all for an NVDA user, because NVDA speaks at the volume its own user
++ * configured and exposes no way to ask otherwise.
++ *
++ * How long to stay out of the way is an estimate, because neither
++ * backend reports when the words stop. See
++ * ETA_Speech_EstimateDurationMs.
++ */
++static void ETA_DuckMusicForSpeech(void)
++{
++	int serial = ETA_Speech_GetSpokenSerial();
++
++	/* 1 is the off position, and it is the default: ducking changes what
++	   a player already had set up, so it is opt-in by setting rather than
++	   something that happens to them. */
++	if (eta_musicDuck.value >= 1.0f)
++	{
++		if (gMusicDucked)
++		{
++			trap_S_FadeBackgroundTrack(gMusicBaseline, ETA_MUSIC_DUCK_UP_MS, 0);
++			gMusicDucked = qfalse;
++		}
++
++		gMusicDuckSerial = serial;
++		return;
++	}
++
++	if (serial != gMusicDuckSerial)
++	{
++		gMusicDuckSerial = serial;
++
++		/* Each new line pushes the end out again, so a run of reports is
++		   one continuous duck rather than a stutter of dips. */
++		gMusicDuckUntil = cg.time
++		                  + ETA_Speech_EstimateDurationMs(ETA_Speech_GetLastMessage());
++
++		if (!gMusicDucked)
++		{
++			gMusicDucked = qtrue;
++			trap_S_FadeBackgroundTrack(gMusicBaseline * eta_musicDuck.value,
++			                           ETA_MUSIC_DUCK_DOWN_MS, 0);
++		}
++
++		return;
++	}
++
++	/* Subtraction rather than a comparison, so a clock that rewound on a
++	   map change costs one early restore instead of leaving the music
++	   ducked until something else is spoken. */
++	if (gMusicDucked && cg.time - gMusicDuckUntil >= 0)
++	{
++		trap_S_FadeBackgroundTrack(gMusicBaseline, ETA_MUSIC_DUCK_UP_MS, 0);
++		gMusicDucked = qfalse;
++	}
++}
++
+ /**
+  * @brief Says what the player is looking at when they aim up or down.
+  *
+@@ -6990,6 +7115,10 @@ void CG_DrawActive()
+ 	}
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++	/* First, so everything below reads what the player has set now rather
++	   than what they had when the map loaded. */
++	ETA_UpdateAccessibilitySettings();
++
+ 	/* Every active frame, so a weapon change is caught wherever it came
+ 	   from - a number key, the mouse wheel, running dry, or being handed a
+ 	   weapon on spawn. */
+@@ -7004,6 +7133,11 @@ void CG_DrawActive()
+ 
+ 	ETA_NarrateZoom();
+ 
++	/* Not speech, so not behind the passive hold: this is the mixer
++	   getting out of the way of whatever is being said, including the
++	   reports that hold everything else quiet. */
++	ETA_DuckMusicForSpeech();
++
+ 	/* Last, so everything above still sees the previous frame's totals:
+ 	   this is what a pickup next frame will be measured against. It is
+ 	   bookkeeping rather than speech, so it runs whatever else is being
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 2e9d10a..1d3ef85 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3454,6 +3454,21 @@ void CG_AccessibilitySampleTotals(void);
+ extern vmCvar_t eta_objectiveCallouts;
+ extern vmCvar_t eta_environmentCallouts;
+ extern vmCvar_t eta_facingCallouts;
++extern vmCvar_t eta_musicDuck;
++extern vmCvar_t eta_speechRate;
++extern vmCvar_t eta_speechPitch;
++extern vmCvar_t eta_speechVolume;
++
++/* Called where the game itself moves the music, so the accessibility
++   duck can be applied on top of what the map asked for rather than
++   overriding it on the way back up. */
++void ETA_MusicFadeRequested(float level, qboolean restarted);
++
++/* Re-reads the settings above. Registering a cvar fills the module's
++   copy once and nothing refreshes it afterwards, so without this a
++   setting changed mid-game is stored and ignored until the map
++   reloads. */
++void ETA_UpdateAccessibilitySettings(void);
+ extern vmCvar_t eta_locationCallouts;
+ extern vmCvar_t eta_interactionCallouts;
+ extern vmCvar_t eta_mapCallouts;
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 8a87483..bc1568f 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -41,6 +41,7 @@
+ #include "audio/audio_cue_system.h"
+ #include "hud/hud_narrator.h"
+ #include "navigation/navigation_system.h"
++#include "speech/speech_manager.h"
+ #endif
+ 
+ displayContextDef_t cgDC;
+@@ -2190,6 +2191,10 @@ typedef struct
+ vmCvar_t eta_objectiveCallouts;
+ vmCvar_t eta_environmentCallouts;
+ vmCvar_t eta_facingCallouts;
++vmCvar_t eta_musicDuck;
++vmCvar_t eta_speechRate;
++vmCvar_t eta_speechPitch;
++vmCvar_t eta_speechVolume;
+ vmCvar_t eta_locationCallouts;
+ vmCvar_t eta_interactionCallouts;
+ vmCvar_t eta_mapCallouts;
+@@ -2336,6 +2341,71 @@ static void ETA_PlayCueSound(ETA_AudioCueType type, int directionDegrees, int ha
+  * Speak entry points return immediately while those are null. The module
+  * narrated into a void until this existed.
+  */
++/**
++ * @brief Every setting the mod adds, in one list.
++ *
++ * One list rather than a run of registration calls, because there are two
++ * things that have to happen to each of these and they were drifting
++ * apart. Registering a cvar fills the module's copy of it once; nothing
++ * refreshes that copy afterwards unless somebody asks, and nobody was
++ * asking. So every one of these settings could be changed - from the
++ * console, from a config, from a menu - and the change would not be seen
++ * until the map reloaded, because the module kept reading the value it
++ * was handed at startup.
++ *
++ * That is the kind of failure this project keeps meeting: it compiles, it
++ * stores the new value, `\cvarlist` shows it, and the game behaves as
++ * though nothing happened. A list used by both the registration and the
++ * refresh is what stops it coming back the next time a setting is added.
++ */
++typedef struct
++{
++	vmCvar_t   *cvar;
++	const char *name;
++	const char *defaultValue;
++} eta_setting_t;
++
++static eta_setting_t eta_settings[] =
++{
++	{ &eta_objectiveCallouts,   "eta_objectiveCallouts",   "1" },
++	{ &eta_environmentCallouts, "eta_environmentCallouts", "1" },
++	{ &eta_facingCallouts,      "eta_facingCallouts",      "1" },
++	{ &eta_locationCallouts,    "eta_locationCallouts",    "1" },
++	{ &eta_interactionCallouts, "eta_interactionCallouts", "1" },
++	{ &eta_mapCallouts,         "eta_mapCallouts",         "1" },
++	{ &eta_doorCues,            "eta_doorCues",            "1" },
++	{ &eta_crosshairCues,       "eta_crosshairCues",       "1" },
++	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
++	{ &eta_speechRate,          "eta_speechRate",          "0" },
++	{ &eta_speechPitch,         "eta_speechPitch",         "0" },
++	{ &eta_speechVolume,        "eta_speechVolume",        "100" }
++};
++
++/**
++ * @brief Re-reads the mod's settings, so changing one takes effect now.
++ *
++ * Called every frame. trap_Cvar_Update on an unchanged cvar is a copy of
++ * a few bytes, and the alternative - tracking modification counts - would
++ * cost about as much as it saved.
++ */
++void ETA_UpdateAccessibilitySettings(void)
++{
++	size_t i;
++
++	for (i = 0; i < sizeof(eta_settings) / sizeof(eta_settings[0]); i++)
++	{
++		trap_Cvar_Update(eta_settings[i].cvar);
++	}
++
++	/* Pushed rather than polled, because the library has no way to read a
++	   cvar: it is a static library linked into this module, with no
++	   engine of its own. Setting the same values again costs two SAPI
++	   calls on a COM object that is already local, and skipping them
++	   would mean tracking three modification counts to save it. */
++	ETA_Speech_SetVoice(eta_speechRate.integer, eta_speechPitch.integer,
++	                    eta_speechVolume.integer);
++}
++
+ static void ETA_InitAccessibility(void)
+ {
+ 	size_t i;
+@@ -2345,14 +2415,11 @@ static void ETA_InitAccessibility(void)
+ 	ETA_HudNarrator_Init();
+ 	ETA_NavigationSystem_Init();
+ 
+-	trap_Cvar_Register(&eta_objectiveCallouts, "eta_objectiveCallouts", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_environmentCallouts, "eta_environmentCallouts", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_facingCallouts, "eta_facingCallouts", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_locationCallouts, "eta_locationCallouts", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_interactionCallouts, "eta_interactionCallouts", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_mapCallouts, "eta_mapCallouts", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_doorCues, "eta_doorCues", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_crosshairCues, "eta_crosshairCues", "1", CVAR_ARCHIVE);
++	for (i = 0; i < sizeof(eta_settings) / sizeof(eta_settings[0]); i++)
++	{
++		trap_Cvar_Register(eta_settings[i].cvar, eta_settings[i].name,
++		                   eta_settings[i].defaultValue, CVAR_ARCHIVE);
++	}
+ 
+ 	for (i = 0; i < sizeof(eta_loopSounds) / sizeof(eta_loopSounds[0]); i++)
+ 	{
+diff --git a/src/cgame/cg_servercmds.c b/src/cgame/cg_servercmds.c
+index b20afe0..5eb2ede 100644
+--- a/src/cgame/cg_servercmds.c
++++ b/src/cgame/cg_servercmds.c
+@@ -3598,6 +3598,11 @@ static void CG_ServerCommand(void)
+ 		}
+ 
+ 		trap_S_StartBackgroundTrack(CG_Argv(1), CG_Argv(1), fadeTime);
++#ifdef FEATURE_ACCESSIBILITY
++		/* A new stream starts unfaded, which silently cancels any
++		   accessibility duck in place. */
++		ETA_MusicFadeRequested(1.0f, qtrue);
++#endif
+ 		return;
+ 	}
+ 	// plays once then back to whatever the loop was \/
+@@ -3613,6 +3618,9 @@ static void CG_ServerCommand(void)
+ 		}
+ 
+ 		trap_S_StartBackgroundTrack(CG_Argv(1), "onetimeonly", fadeTime);
++#ifdef FEATURE_ACCESSIBILITY
++		ETA_MusicFadeRequested(1.0f, qtrue);
++#endif
+ 		return;
+ 	}
+ 	case MU_STOP_HASH:                                  // "mu_stop" has optional parameter for fade-down time
+@@ -3628,10 +3636,19 @@ static void CG_ServerCommand(void)
+ 
+ 		trap_S_FadeBackgroundTrack(0.0f, fadeTime, 0);
+ 		trap_S_StartBackgroundTrack("", "", -2);   // '-2' for 'queue looping track' (QUEUED_PLAY_LOOPED)
++#ifdef FEATURE_ACCESSIBILITY
++		ETA_MusicFadeRequested(0.0f, qtrue);
++#endif
+ 		return;
+ 	}
+ 	case MU_FADE_HASH:                                 // "mu_fade"
+ 		trap_S_FadeBackgroundTrack(Q_atof(CG_Argv(1)), Q_atoi(CG_Argv(2)), 0);
++#ifdef FEATURE_ACCESSIBILITY
++		/* The level the map wants. The duck is a fraction of this, and
++		   the restore returns to it - a script that hushed the music for
++		   its own reasons keeps its hush. */
++		ETA_MusicFadeRequested(Q_atof(CG_Argv(1)), qfalse);
++#endif
+ 		return;
+ 	case SND_FADE_HASH:                                // "snd_fade"
+ 		trap_S_FadeAllSound(Q_atof(CG_Argv(1)), Q_atoi(CG_Argv(2)), Q_atoi(CG_Argv(3)));

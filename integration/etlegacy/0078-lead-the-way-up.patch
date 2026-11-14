@@ -1,0 +1,635 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 4586dbe..a09cdd0 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -2779,9 +2779,10 @@ typedef struct
+ 	qboolean active;
+ 	qboolean square;   /* a map square rather than a spot */
+ 	qboolean leftIt;   /* has been far enough away for arriving to mean something */
++	qboolean objective;/* put on the objective, which has a name of its own */
+ 	vec3_t origin;     /* the spot, or the square's middle */
+ 	int column, row, layer;
+-	char name[16];     /* the square's name, "C,3" */
++	char name[48];     /* the square's name, "C,3", or the objective's */
+ } eta_marker_t;
+ 
+ static eta_marker_t eta_marker;
+@@ -2871,6 +2872,7 @@ static float ETA_MarkerSquareRadius(void)
+ #define ETA_ROUTE_CELL          32.0f
+ #define ETA_ROUTE_HALF_WIDTH    12.0f
+ #define ETA_ROUTE_SLOPE_LIFT    20.0f   /* a second try, higher, for ramps */
++#define ETA_ROUTE_JUMP_LIFT     24.0f   /* a third, for a ledge to jump onto */
+ #define ETA_ROUTE_MAX_DROP      96.0f
+ #define ETA_ROUTE_BUDGET_MS     2       /* searching per frame, at most */
+ #define ETA_ROUTE_BUDGET_STEP   4       /* squares between looks at the clock */
+@@ -2897,6 +2899,8 @@ typedef struct
+ 	int      steeredAt;
+ 	int      along;       /* the point of the way the player is at */
+ 	int      side;        /* which way round the last opening was: -1, 1, 0 */
++	int      saidJump;    /* the jump on the way last told of, by its point */
++	qboolean overEdge;    /* steer is across a jump or up a ladder */
+ } eta_route_t;
+ 
+ static eta_route_t eta_route;
+@@ -2913,9 +2917,12 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ 	   sideways check fitted through is not refused on the way down. */
+ 	static const vec3_t footMins = { -ETA_ROUTE_HALF_WIDTH, -ETA_ROUTE_HALF_WIDTH, -24.0f };
+ 	static const vec3_t footMaxs = { ETA_ROUTE_HALF_WIDTH, ETA_ROUTE_HALF_WIDTH, 24.0f - 18.0f };
+-	trace_t trace;
+-	vec3_t  start, end, down;
+-	float   lift = 0.0f;
++	static const float lifts[2] = { ETA_ROUTE_SLOPE_LIFT, ETA_ROUTE_JUMP_LIFT };
++	trace_t  trace;
++	vec3_t   start, end, down;
++	float    lift  = 0.0f;
++	qboolean ledge = qfalse;
++	int      i;
+ 
+ 	(void)context;
+ 
+@@ -2926,25 +2933,49 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ 
+ 	if (trace.startsolid || trace.fraction < 1.0f)
+ 	{
+-		/* A slope rises faster than a step over one square; try again a
+-		   little higher, if there is headroom to get there. */
+-		lift = ETA_ROUTE_SLOPE_LIFT;
+-		VectorCopy(from, end);
+-		end[2] += lift;
+-		trap_CM_BoxTrace(&trace, start, end, mins, maxs, 0, MASK_PLAYERSOLID);
++		/* What stopped the step: a slope rises faster than a step over
++		   one square, but its face leans back. A face that stands
++		   straight up is the edge of a ledge, which no amount of walking
++		   gets onto - it is jumped. */
++		ledge = (qboolean)(!trace.startsolid && trace.plane.normal[2] < 0.3f);
++
++		/* Again a little higher, and then as high as a jump reaches, if
++		   there is headroom to get there. ET's jump lifts the feet about
++		   45 units (JUMP_VELOCITY 270 against gravity 800); the probe's
++		   bottom stands a step above the feet, so a lift of 24 clears a
++		   ledge of 42 - a little short of the most, to leave room. */
++		for (i = 0; i < 2; i++)
++		{
++			lift = lifts[i];
++			VectorCopy(from, start);
++			VectorCopy(from, end);
++			end[2] += lift;
++			trap_CM_BoxTrace(&trace, start, end, mins, maxs, 0, MASK_PLAYERSOLID);
++
++			if (trace.startsolid || trace.fraction < 1.0f)
++			{
++				return ETA_PATH_NONE;
++			}
+ 
+-		if (trace.startsolid || trace.fraction < 1.0f)
+-		{
+-			return 0;
++			VectorCopy(end, start);
++			VectorSet(end, to[0], to[1], from[2] + lift);
++			trap_CM_BoxTrace(&trace, start, end, mins, maxs, 0, MASK_PLAYERSOLID);
++
++			if (!trace.startsolid && trace.fraction >= 1.0f)
++			{
++				break;
++			}
+ 		}
+ 
+-		VectorCopy(end, start);
+-		VectorSet(end, to[0], to[1], from[2] + lift);
+-		trap_CM_BoxTrace(&trace, start, end, mins, maxs, 0, MASK_PLAYERSOLID);
++		if (i == 2)
++		{
++			return ETA_PATH_NONE;
++		}
+ 
+-		if (trace.startsolid || trace.fraction < 1.0f)
++		/* Only a jump clears the higher of the two. */
++		if (i == 1)
+ 		{
+-			return 0;
++			ledge = qtrue;
+ 		}
+ 	}
+ 
+@@ -2959,16 +2990,19 @@ static int ETA_RouteMove(void *context, const float from[3], float to[3])
+ 	if (trace.startsolid || trace.allsolid || trace.fraction >= 1.0f
+ 	    || trace.plane.normal[2] < 0.7f)
+ 	{
+-		return 0;
++		return ETA_PATH_NONE;
+ 	}
+ 
+ 	if (CG_PointContents(trace.endpos, -1) & (CONTENTS_LAVA | CONTENTS_SLIME))
+ 	{
+-		return 0;
++		return ETA_PATH_NONE;
+ 	}
+ 
+ 	to[2] = trace.endpos[2];
+-	return 1;
++
++	/* Up onto a ledge, or over something and down the other side: either
++	   way the player has to jump, and is told to. */
++	return ledge ? ETA_PATH_JUMP : ETA_PATH_WALK;
+ }
+ 
+ /**
+@@ -2987,6 +3021,31 @@ static float ETA_RouteWalkable(const vec3_t from, const vec3_t to)
+ 	VectorCopy(from, a);
+ 	VectorCopy(to, b);
+ 
++	/* Somewhere higher up is walked to only up a slope. Looked at from
++	   down here, a slope leans back, and so does nothing else: a face
++	   that stands straight up is a wall, a ledge, or the riser of a
++	   stair too high to take in one, and the line stops there. Without
++	   this the higher end's floor was all that was looked at, and a
++	   floor above, reached by stairs round the side, was "straight
++	   ahead" - through the wall under it. */
++	if (b[2] > a[2] + 18.0f)
++	{
++		vec3_t level;
++
++		VectorSet(level, b[0], b[1], a[2]);
++		trap_CM_BoxTrace(&trace, a, level, mins, maxs, 0, MASK_PLAYERSOLID);
++
++		if (trace.startsolid)
++		{
++			return 0.0f;
++		}
++
++		if (trace.fraction < 1.0f && trace.plane.normal[2] < 0.3f)
++		{
++			return trace.fraction;
++		}
++	}
++
+ 	/* Level with the higher end, so a straight run up a ramp is not cut by
+ 	   the ramp itself. */
+ 	a[2] = b[2] = MAX(a[2], b[2]);
+@@ -3104,6 +3163,7 @@ static void ETA_RoutePlan(void)
+ 	eta_route.startedAt = cg.time;
+ 	eta_route.done      = qfalse;
+ 	eta_route.along     = 0;
++	eta_route.saidJump  = -1;
+ }
+ 
+ /**
+@@ -3115,13 +3175,54 @@ static void ETA_RouteForget(void)
+ 	memset(&eta_route, 0, sizeof(eta_route));
+ }
+ 
++/**
++ * @brief "Jump up, ahead", once, as the player comes to a jump on the way.
++ *
++ * The way can lead onto a ledge too high to step up, or over something
++ * in the way, and the ping alone cannot say that the next step is a
++ * jump: walking at a ledge just walks into it. So the player is told,
++ * within a couple of metres of the edge, which way the jump is - and
++ * whether it is up onto something or over it and down. A ladder needs
++ * nothing here: the ladder is said as the player reaches it, with F to
++ * climb (cg_draw.c).
++ */
++#define ETA_ROUTE_JUMP_SAY 96.0f
++
++static void ETA_RouteSayJump(int special, int count, const vec3_t here)
++{
++	vec3_t edge, landing, delta;
++
++	if (special >= count || special < 1 || special == eta_route.saidJump
++	    || ETA_PathFinder_PointKind(special) != ETA_PATH_JUMP)
++	{
++		return;
++	}
++
++	ETA_PathFinder_Point(special - 1, edge);
++	ETA_PathFinder_Point(special, landing);
++	VectorSubtract(edge, here, delta);
++	delta[2] = 0.0f;
++
++	if (VectorLength(delta) > ETA_ROUTE_JUMP_SAY)
++	{
++		return;
++	}
++
++	eta_route.saidJump = special;
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(va("%s, %s", landing[2] > edge[2] + 8.0f ? "Jump up" : "Jump over",
++	                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(landing))));
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Follows the way found, if there is one: sets eta_route.steer.
+  */
+ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ {
+ 	int    count = ETA_PathFinder_PointCount();
+-	int    i, nearest = eta_route.along, best;
++	int    i, nearest = eta_route.along, best, special;
+ 	float  nearestDistance = 1.0e9f;
+ 	vec3_t point;
+ 
+@@ -3130,6 +3231,15 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 		return;
+ 	}
+ 
++	/* On a ladder the player leaves the way upward, a floor's height
++	   from its nearest point: that is the way, not a stray from it, and
++	   a new search from halfway up a ladder starts in mid air. The way
++	   is picked up again at the top. */
++	if (CG_AccessibilityClimbing())
++	{
++		return;
++	}
++
+ 	if (!eta_route.done)
+ 	{
+ 		/* How old the way is counts from when it was found, not from
+@@ -3168,9 +3278,25 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 
+ 	eta_route.along = nearest;
+ 
++	/* The next place the way is not a walk: a jump, or a ladder. Nothing
++	   past it is looked at, however straight the line: a ladder's top is
++	   over the wall it stands against, and a line to it leads into that
++	   wall rather than to the ladder's foot. */
++	special = count;
++	for (i = nearest + 1; i < count; i++)
++	{
++		if (ETA_PathFinder_PointKind(i) != ETA_PATH_WALK)
++		{
++			special = i;
++			break;
++		}
++	}
++
++	ETA_RouteSayJump(special, count, here);
++
+ 	/* The furthest point a few steps on that can be walked to straight. */
+ 	best = nearest;
+-	for (i = MIN(count - 1, nearest + ETA_ROUTE_LOOKAHEAD); i > nearest; i--)
++	for (i = MIN(MIN(count - 1, special - 1), nearest + ETA_ROUTE_LOOKAHEAD); i > nearest; i--)
+ 	{
+ 		ETA_PathFinder_Point(i, point);
+ 
+@@ -3181,7 +3307,9 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 		}
+ 	}
+ 
+-	if (state == ETA_PATH_FOUND && best == count - 1)
++	eta_route.overEdge = qfalse;
++
++	if (state == ETA_PATH_FOUND && best == count - 1 && special == count)
+ 	{
+ 		/* The marker is in a straight line from the end of the way. */
+ 		eta_route.steering = qfalse;
+@@ -3199,6 +3327,7 @@ static void ETA_RouteFollow(ETA_PathState state, const vec3_t here)
+ 	ETA_PathFinder_Point(best, point);
+ 	VectorCopy(point, eta_route.steer);
+ 	eta_route.steering = qtrue;
++	eta_route.overEdge = (qboolean)(best == special);
+ }
+ 
+ /**
+@@ -3258,6 +3387,17 @@ static void ETA_RouteFrame(void)
+ 		return;
+ 	}
+ 
++	/* Over a ledge, or up a ladder: there is a wall in the way, and
++	   that is the point - it is jumped, or climbed, and the ping says
++	   where. Looking for a way round it would lead away from the only
++	   way up. */
++	if (eta_route.steering && eta_route.overEdge)
++	{
++		eta_route.aimSet = qfalse;
++		eta_route.side   = 0;
++		return;
++	}
++
+ 	/* Can the player walk that way, as far as it matters? Then that is
+ 	   where the ping goes. */
+ 	{
+@@ -3454,6 +3594,7 @@ void CG_AccessibilityMarkerPlace(void)
+ 		ETA_MapCellCentre(eta_mapCursor.column, eta_mapCursor.row, centre);
+ 
+ 		eta_marker.square    = qtrue;
++		eta_marker.objective = qfalse;
+ 		eta_marker.leftIt    = qtrue;
+ 		eta_marker.origin[0] = centre[0];
+ 		eta_marker.origin[1] = centre[1];
+@@ -3475,8 +3616,9 @@ void CG_AccessibilityMarkerPlace(void)
+ 			return;
+ 		}
+ 
+-		eta_marker.square = qfalse;
+-		eta_marker.leftIt = qfalse;
++		eta_marker.square    = qfalse;
++		eta_marker.objective = qfalse;
++		eta_marker.leftIt    = qfalse;
+ 		VectorCopy(cg.predictedPlayerState.origin, eta_marker.origin);
+ 		eta_marker.name[0] = '\0';
+ 	}
+@@ -3506,6 +3648,85 @@ void CG_AccessibilityMarkerPlace(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief Puts the marker on the current objective, and leads there.
++ *
++ * The objective report says which way and how far, and since the last
++ * version how far up - but it points in a straight line, and an
++ * objective on a floor above is not reached in a straight line. The
++ * tester walked at the Oasis command post and met the wall under it.
++ * The marker's way already goes round walls and up stairs; with a jump
++ * and a ladder known to it as well, it can take the player up. So this
++ * puts the marker there, and the marker's ping leads the way.
++ *
++ * The marker goes on the floor under the objective's point, where the
++ * player will stand: the point itself is the middle of the objective's
++ * trigger, often a metre or more up, where nobody can stand.
++ */
++void CG_AccessibilityMarkerObjective(void)
++{
++	/* The route probe's body, so the height is the one the way is
++	   searched at: the player's origin, standing there. */
++	static const vec3_t mins = { -ETA_ROUTE_HALF_WIDTH, -ETA_ROUTE_HALF_WIDTH, -24.0f };
++	static const vec3_t maxs = { ETA_ROUTE_HALF_WIDTH, ETA_ROUTE_HALF_WIDTH, 24.0f };
++	etaObjective_t objective;
++	trace_t        trace;
++	vec3_t         below;
++	int            distance;
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	if (cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say("Only in play: spawn first, then ask for the way to the objective");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	if (!CG_AccessibilityObjective(cgs.clientinfo[cg.clientNum].team,
++	                               cg.predictedPlayerState.origin, &objective))
++	{
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say("No current objective");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	memset(&eta_marker, 0, sizeof(eta_marker));
++	eta_marker.square    = qfalse;
++	eta_marker.objective = qtrue;
++	eta_marker.leftIt    = qtrue;
++	VectorCopy(objective.origin, eta_marker.origin);
++	Q_strncpyz(eta_marker.name, objective.name ? objective.name : "the objective", sizeof(eta_marker.name));
++	Q_CleanStr(eta_marker.name);
++
++	/* Down onto the floor, as a player standing there: the height the
++	   way is searched at, and measured to. */
++	VectorCopy(objective.origin, below);
++	below[2] -= 256.0f;
++	trap_CM_BoxTrace(&trace, objective.origin, below, mins, maxs, 0, MASK_PLAYERSOLID);
++	if (!trace.startsolid && !trace.allsolid && trace.fraction < 1.0f)
++	{
++		VectorCopy(trace.endpos, eta_marker.origin);
++	}
++
++	eta_marker.active = qtrue;
++	ETA_RouteForget();
++	distance = ETA_MarkerDistance();
++	ETA_NavigationSystem_StartMarkerApproach(distance);
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(va("Marker on %s", eta_marker.name));
++	ETA_NavigationSystem_AnnounceMarkerDistance(distance);
++	ETA_NavigationSystem_AnnounceHeight((eta_marker.origin[2] - cg.predictedPlayerState.origin[2]) * ETA_QU_TO_METERS);
++	ETA_MarkerSpeakWay();
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Says where the marker is from here.
+  */
+@@ -3527,8 +3748,16 @@ void CG_AccessibilityMarkerWhere(void)
+ 		ETA_MarkerSquareName(name, sizeof(name));
+ 		ETA_Speech_Say(va("Marker on %s", name));
+ 	}
++	else if (eta_marker.objective)
++	{
++		ETA_Speech_Say(va("Marker on %s", eta_marker.name));
++	}
+ 
+ 	ETA_NavigationSystem_AnnounceMarkerDistance(ETA_MarkerDistance());
++	if (!eta_marker.square)
++	{
++		ETA_NavigationSystem_AnnounceHeight((eta_marker.origin[2] - cg.predictedPlayerState.origin[2]) * ETA_QU_TO_METERS);
++	}
+ 	ETA_MarkerSpeakWay();
+ 	ETA_Speech_EndReport();
+ }
+@@ -3604,6 +3833,10 @@ void CG_AccessibilityMarkerFrame(void)
+ 			ETA_MarkerSquareName(name, sizeof(name));
+ 			ETA_Speech_Say(va("Marker reached, %s", name));
+ 		}
++		else if (eta_marker.objective)
++		{
++			ETA_Speech_Say(va("Marker reached, %s", eta_marker.name));
++		}
+ 		else
+ 		{
+ 			ETA_Speech_Say("Marker reached");
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 8dec982..2169d3e 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1593,6 +1593,14 @@ static void CG_AccessibilityMarkerClear_f(void)
+ 	CG_AccessibilityMarkerClear();
+ }
+ 
++/* The marker on the objective, so its way leads there - up stairs,
++   ladders and ledges. */
++static void CG_AccessibilityMarkerObjective_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	CG_AccessibilityMarkerObjective();
++}
++
+ /**
+  * @brief "What is around me" - see cg_draw.c.
+  */
+@@ -5694,6 +5702,7 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
+ 	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
++	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
+ 	{ "accessibilitySurroundings", CG_AccessibilitySurroundings_f },
+ 	{ "+accessibilityTurnLeft",   CG_AccessibilityTurnLeftDown_f },
+ 	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 5e0634c..d03e326 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3583,6 +3583,107 @@ static int ETA_MapFileRestart(void *context)
+ 	return file->left > 0 && file->handle;
+ }
+ 
++/**
++ * @brief A floor a player could stand on, looking down from a point.
++ *
++ * The body is the route probe's (cg_commandmap.c), so the height found
++ * is the one the way is searched at: the player's origin, standing.
++ */
++static qboolean ETA_LadderFloor(vec3_t point, float drop)
++{
++	static const vec3_t mins = { -12.0f, -12.0f, -24.0f };
++	static const vec3_t maxs = { 12.0f, 12.0f, 24.0f };
++	trace_t trace;
++	vec3_t  end;
++
++	VectorCopy(point, end);
++	end[2] -= drop;
++	trap_CM_BoxTrace(&trace, point, end, mins, maxs, 0, MASK_PLAYERSOLID);
++
++	if (trace.startsolid || trace.allsolid || trace.fraction >= 1.0f || trace.plane.normal[2] < 0.7f)
++	{
++		return qfalse;
++	}
++
++	VectorCopy(trace.endpos, point);
++	return qtrue;
++}
++
++/**
++ * @brief Each ladder's foot and top, handed to the way-finder as links.
++ *
++ * The way to somewhere on a floor above can go up a ladder only if the
++ * search knows where the ladder starts and where it lets the player off.
++ * The foot is in front of the climbing face, on the floor near the
++ * ladder's bottom. The top is over the ladder's head, on the floor the
++ * ladder reaches - usually beyond the wall it stands against, sometimes
++ * on its own side, at a hatch. A ladder painted on every face does not
++ * say which face is climbed, so both are tried. A ladder whose foot or
++ * top has no floor - one that ends in mid air - joins nothing.
++ */
++static void ETA_LadderLinks(void)
++{
++	int i, linked = 0;
++
++	ETA_PathFinder_ClearLinks();
++
++	for (i = 0; i < eta_mapLadderCount; i++)
++	{
++		const ETA_BspLadder *ladder = &eta_mapLadders[i];
++		int                 axis    = Q_fabs(ladder->normal[0]) > 0.5f ? 0 : 1;
++		float               half    = (ladder->maxs[axis] - ladder->mins[axis]) * 0.5f;
++		vec3_t              centre;
++		int                 side;
++
++		VectorAdd(ladder->mins, ladder->maxs, centre);
++		VectorScale(centre, 0.5f, centre);
++
++		for (side = 0; side < (ladder->oneFace ? 1 : 2); side++)
++		{
++			float  sign = side ? -1.0f : 1.0f;
++			vec3_t face, foot, top;
++			int    exit;
++			float  reach;
++			qboolean found = qfalse;
++
++			VectorScale(ladder->normal, sign, face);
++
++			VectorMA(centre, half + 16.0f, face, foot);
++			foot[2] = ladder->mins[2] + 24.0f + 8.0f;
++
++			if (!ETA_LadderFloor(foot, 56.0f))
++			{
++				continue;
++			}
++
++			/* Over the head, then on the same side. */
++			for (exit = 0; exit < 2 && !found; exit++)
++			{
++				for (reach = 24.0f; reach <= 56.0f && !found; reach += 16.0f)
++				{
++					VectorMA(centre, (exit ? 1.0f : -1.0f) * (half + reach), face, top);
++					top[2] = ladder->maxs[2] + 24.0f + 8.0f;
++
++					found = (qboolean)(ETA_LadderFloor(top, 48.0f)
++					                   && top[2] >= ladder->maxs[2] - 8.0f
++					                   && top[2] - foot[2] >= 48.0f);
++				}
++			}
++
++			if (found)
++			{
++				ETA_PathFinder_AddLink(foot, top, ETA_PATH_LADDER_UP);
++				ETA_PathFinder_AddLink(top, foot, ETA_PATH_LADDER_DOWN);
++				linked++;
++				break;
++			}
++		}
++	}
++
++	CG_DPrintf("accessibility: %d of %d ladder(s) join two floors for the way-finder\n",
++	           linked, eta_mapLadderCount);
++}
++
+ void CG_AccessibilityLoadLadders(void)
+ {
+ 	etaMapFile_t file;
+@@ -3602,6 +3703,8 @@ void CG_AccessibilityLoadLadders(void)
+ 	}
+ 
+ 	CG_DPrintf("accessibility: %d ladder(s) in %s\n", eta_mapLadderCount, cgs.mapname);
++
++	ETA_LadderLinks();
+ }
+ 
+ int CG_AccessibilityLadderCount(void)
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 956fc79..6cc0a34 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3443,6 +3443,7 @@ void CG_AccessibilityMapClosed(void);
+ void CG_AccessibilityMarkerPlace(void);
+ void CG_AccessibilityMarkerWhere(void);
+ void CG_AccessibilityMarkerClear(void);
++void CG_AccessibilityMarkerObjective(void);
+ void CG_AccessibilityMarkerReset(void);
+ void CG_AccessibilityMarkerFrame(void);
+ void CG_AccessibilityMarkerApproach(void);
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 5675def..b31fa25 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9318,6 +9318,12 @@ void UI_AccessibilityInstallBinds(void)
+ 		{ K_KP_INS,       "accessibilityMarkerPlace", NULL,          6 },
+ 		{ K_KP_DEL,       "accessibilityMarkerWhere", NULL,          6 },
+ 		{ K_KP_STAR,      "accessibilityMarkerClear", NULL,          6 },
++		/* Keypad plus, under the marker keys: the marker on the
++		   objective, so its way leads up to one on a floor above. The
++		   stock config has selectbuddy -1 here, which picks the whole
++		   fireteam - taken for the reason the survey's rows give, and
++		   only while it is still exactly that. */
++		{ K_KP_PLUS,      "accessibilityMarkerObjective", "selectbuddy -1", 11 },
+ 		/* The arrows move from the engine's own +left and +right to the
+ 		   mod's turn keys, which pass a hold straight through to those
+ 		   and turn a tap into a step to the next compass point - the
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index d5125bf..6315cfc 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -871,6 +871,7 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymarkerplace",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerwhere",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitymarkerobjective",              -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },

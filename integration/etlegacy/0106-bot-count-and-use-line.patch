@@ -1,0 +1,326 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 4019d41..1f397f0 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1850,6 +1850,7 @@ typedef struct
+ 	qboolean      automatic;    /* the lock or the snap took this by itself */
+ 	int           manualUntil;  /* no lock by itself before this */
+ 	int           nextSearch;
++	float         lift;         /* raised this much over the point, to clear what lies in the way */
+ } eta_aim_t;
+ 
+ static eta_aim_t eta_aim;
+@@ -2322,6 +2323,7 @@ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label)
+ 	eta_aim.mode      = ETA_AIM_SNAP;
+ 	eta_aim.entityNum = target->entityNum;
+ 	eta_aim.started   = cg.time;
++	eta_aim.lift      = 0.0f;
+ 	VectorCopy(target->point, eta_aim.point);
+ 
+ 	if (label)
+@@ -2893,6 +2895,91 @@ qboolean CG_AccessibilityMapKeyEvent(int key, qboolean down)
+ /**
+  * @brief Every frame: steers a running aim onto its target.
+  */
++/**
++ * @brief What lies on the ground across the use key's line, short of
++ * what the player was turned to: the entity, or -1 for nothing.
++ *
++ * The tester chose the mounted gun, and F picked up an enemy's weapon
++ * lying by it. The game's use takes the first thing its line from the
++ * eyes meets (Cmd_Activate_f), and a weapon or a pack on the ground is
++ * one - picked up, a weapon in place of the player's own. The cgame's
++ * own traces pass through them, so each is tested here by the box the
++ * game gives it (g_items.c), along the line the view is on now.
++ */
++#define ETA_USE_LIFT_MAX  24.0f   /* the most the aim is raised to clear one */
++#define ETA_USE_LIFT_STEP 8.0f
++
++static int ETA_UseLineBlocked(const vec3_t eye, const vec3_t end, int target)
++{
++	vec3_t dir;
++	float  length = Distance(eye, end);
++	int    i, a;
++
++	if (!cg.snap || length < 1.0f)
++	{
++		return -1;
++	}
++	VectorSubtract(end, eye, dir);
++	VectorScale(dir, 1.0f / length, dir);
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		const vec_t         *at = cg_entities[es->number].lerpOrigin;
++		float               enter = 0.0f, leave = length;
++		qboolean            hit = qtrue;
++
++		if (es->eType != ET_ITEM || es->number == target || (es->eFlags & EF_NODRAW))
++		{
++			continue;
++		}
++
++		/* Both of the game's item boxes in one: from a radius below the
++		   origin to two above. */
++		for (a = 0; a < 3 && hit; a++)
++		{
++			float lo = at[a] - ITEM_RADIUS, hi = at[a] + (a == 2 ? 2.0f * ITEM_RADIUS : ITEM_RADIUS);
++
++			if (fabs(dir[a]) < 0.0001f)
++			{
++				hit = (qboolean)(eye[a] >= lo && eye[a] <= hi);
++			}
++			else
++			{
++				float t0 = (lo - eye[a]) / dir[a], t1 = (hi - eye[a]) / dir[a];
++
++				if (t0 > t1)
++				{
++					float swap = t0;
++
++					t0 = t1;
++					t1 = swap;
++				}
++				enter = MAX(enter, t0);
++				leave = MIN(leave, t1);
++				hit   = (qboolean)(enter <= leave);
++			}
++		}
++
++		/* Met before the point itself, by more than a hand's width. */
++		if (hit && enter < length - 4.0f)
++		{
++			return es->number;
++		}
++	}
++
++	return -1;
++}
++
++/* Where the use key's line ends now: along the view, as far as the point. */
++static void ETA_UseLineEnd(const vec3_t eye, const vec3_t point, vec3_t end)
++{
++	vec3_t forward;
++
++	AngleVectors(cg.predictedPlayerState.viewangles, forward, NULL, NULL);
++	VectorMA(eye, Distance(eye, point), forward, end);
++}
++
+ void CG_AccessibilityAimFrame(void)
+ {
+ 	ETA_MapCatchFrame();
+@@ -2947,7 +3034,7 @@ void CG_AccessibilityAimFrame(void)
+ 		    && cg_entities[eta_aim.entityNum].currentState.eType == ET_ITEM)
+ 		{
+ 			VectorCopy(cg_entities[eta_aim.entityNum].lerpOrigin, eta_aim.point);
+-			eta_aim.point[2] += 8.0f;
++			eta_aim.point[2] += 8.0f + eta_aim.lift;
+ 		}
+ 
+ 		if (ETA_AimSteer(eta_aim.point, 2.0f) || cg.time - eta_aim.started > ETA_AIM_SNAP_MS)
+@@ -2955,6 +3042,54 @@ void CG_AccessibilityAimFrame(void)
+ 			qboolean use  = eta_use.pending;
+ 			int      body = eta_aim.entityNum;
+ 
++			/* Something on the ground across the line would be what is
++			   used: aim a little higher over it, and failing that, say
++			   so rather than pick it up. */
++			if (use && !eta_use.uniform)
++			{
++				vec3_t eye, end;
++				int    blocker;
++
++				VectorCopy(cg.predictedPlayerState.origin, eye);
++				eye[2] += cg.predictedPlayerState.viewheight;
++				ETA_UseLineEnd(eye, eta_aim.point, end);
++				blocker = ETA_UseLineBlocked(eye, end, body);
++
++				if (blocker >= 0)
++				{
++					float lift;
++
++					for (lift = eta_aim.lift + ETA_USE_LIFT_STEP; lift <= ETA_USE_LIFT_MAX; lift += ETA_USE_LIFT_STEP)
++					{
++						vec3_t higher;
++
++						VectorCopy(eta_aim.point, higher);
++						higher[2] += lift - eta_aim.lift;
++						if (ETA_UseLineBlocked(eye, higher, body) < 0)
++						{
++							VectorCopy(higher, eta_aim.point);
++							eta_aim.lift    = lift;
++							eta_aim.started = cg.time;
++							return;
++						}
++					}
++
++					{
++						char name[64];
++
++						if (!CG_AccessibilityObjectName(&cg_entities[blocker].currentState, name, sizeof(name)))
++						{
++							Q_strncpyz(name, "something", sizeof(name));
++						}
++						ETA_AimStop();
++						ETA_HudNarrator_HoldPassive(cg.time);
++						ETA_Speech_Say(va("Not used: %s on the ground is in the way, and would be picked up. "
++						                  "Step to one side, then F", name));
++					}
++					return;
++				}
++			}
++
+ 			ETA_AimStop();
+ 
+ 			if (use && eta_use.uniform)
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 462a86c..6abbc2f 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -44,6 +44,8 @@
+ #ifdef FEATURE_ACCESSIBILITY
+ static void UI_AccessibilityUpdateFrame(void);
+ static void UI_AccessibilityConsoleFrame(void);
++static void UI_AccessibilityBotsFrame(void);
++static void UI_AccessibilityUpdateSay(const char *text);
+ #endif
+ #include "../qcommon/q_oss.h"
+ #include "ui_cvars.h"
+@@ -1085,6 +1087,7 @@ void UI_Refresh(int realtime)
+ #ifdef FEATURE_ACCESSIBILITY
+ 	UI_AccessibilityUpdateFrame();
+ 	UI_AccessibilityConsoleFrame();
++	UI_AccessibilityBotsFrame();
+ #endif
+ 
+ 	if (Menu_Count() > 0)
+@@ -4922,14 +4925,39 @@ static const char *UI_GetDemoPath(qboolean prefix)
+ /* The mod's Hosting page, registered when the ui starts so the page reads
+    out its real values before anybody has hosted anything. */
+ static vmCvar_t eta_hostPlain;
+-static vmCvar_t eta_hostBots;
++static vmCvar_t eta_hostBotCount;
+ static vmCvar_t eta_hostBotSkill;
+ 
++/* The most bots the Hosting page offers: with the host, the 20 players
++   the Host Game screen makes room for. */
++#define ETA_HOST_BOTS_MAX 19
++
+ static void UI_AccessibilityRegisterHostCvars(void)
+ {
+ 	trap_Cvar_Register(&eta_hostPlain, "eta_hostPlain", "1", CVAR_ARCHIVE);
+-	trap_Cvar_Register(&eta_hostBots, "eta_hostBots", "0", CVAR_ARCHIVE);
++	trap_Cvar_Register(&eta_hostBotCount, "eta_hostBotCount", "-1", CVAR_ARCHIVE);
+ 	trap_Cvar_Register(&eta_hostBotSkill, "eta_hostBotSkill", "2", CVAR_ARCHIVE);
++
++	/* The first bot setting, eta_hostBots, counted players, bots and
++	   people together: "up to 8 players". The tester asked to choose how
++	   many bots, so the count is of bots now; whoever had chosen gets
++	   that many players less themselves. Read once, from the config it
++	   was saved in, and no longer a setting of its own. */
++	if (eta_hostBotCount.integer < 0)
++	{
++		int players = (int)trap_Cvar_VariableValue("eta_hostBots");
++
++		trap_Cvar_Set("eta_hostBotCount", va("%i", players > 1 ? MIN(players - 1, ETA_HOST_BOTS_MAX) : 0));
++		trap_Cvar_Update(&eta_hostBotCount);
++	}
++}
++
++/* That many bots, however many people join: Omni-bot adds bots up to
++   minbots whoever else is playing, and takes them away only past
++   maxbots players in all - so with both at the count, it stays. */
++static const char *UI_AccessibilityBotCommand(int bots)
++{
++	return va("bot minbots %i ; bot maxbots %i", bots, bots);
+ }
+ 
+ /**
+@@ -4950,13 +4978,14 @@ static void UI_AccessibilityRegisterHostCvars(void)
+  * Bots. Omni-bot is loaded by the game module as the map starts, and only
+  * if omnibot_enable is set by then, so it is set here. The bot count is a
+  * command to Omni-bot, and there is no Omni-bot until the map is up, so it
+- * is queued behind the map command. maxbots fills the server to that many
+- * players in all, and a bot makes way for each friend who joins.
++ * is queued behind the map command: exactly that many bots, friends or
++ * not. Changed on the Hosting page during the match, it is sent at once
++ * (UI_AccessibilityBotsFrame).
+  */
+ static void UI_AccessibilityHostServer(void)
+ {
+ 	trap_Cvar_Update(&eta_hostPlain);
+-	trap_Cvar_Update(&eta_hostBots);
++	trap_Cvar_Update(&eta_hostBotCount);
+ 	trap_Cvar_Update(&eta_hostBotSkill);
+ 
+ 	if (eta_hostPlain.integer)
+@@ -4965,7 +4994,7 @@ static void UI_AccessibilityHostServer(void)
+ 		trap_Cvar_Set("sv_allowDownload", "0");
+ 	}
+ 
+-	if (eta_hostBots.integer <= 0)
++	if (eta_hostBotCount.integer <= 0)
+ 	{
+ 		/* Off means off. omnibot_enable is archived, so without this a
+ 		   server hosted with bots once would have them every time after. */
+@@ -4974,9 +5003,57 @@ static void UI_AccessibilityHostServer(void)
+ 	}
+ 
+ 	trap_Cvar_Set("omnibot_enable", "1");
+-	trap_Cmd_ExecuteText(EXEC_APPEND, va("wait 10 ; bot difficulty %i ; bot maxbots %i\n",
++	trap_Cmd_ExecuteText(EXEC_APPEND, va("wait 10 ; bot difficulty %i ; %s\n",
+ 	                                     (int)Com_Clamp(1, 6, eta_hostBotSkill.integer),
+-	                                     (int)Com_Clamp(1, MAX_CLIENTS, eta_hostBots.integer)));
++	                                     UI_AccessibilityBotCommand((int)Com_Clamp(1, ETA_HOST_BOTS_MAX, eta_hostBotCount.integer))));
++}
++
++/**
++ * @brief The bot count changed during a match the player is hosting:
++ * sent to Omni-bot at once, and said.
++ *
++ * The tester asked to choose how many bots play. Before a match the
++ * Hosting page sets it for Start Server; during one, in a game they
++ * host, the same row adds or sends away bots there and then. Omni-bot
++ * only loads as a map starts, so in a game hosted without bots, they
++ * come with the next map. On somebody else's server it is not theirs to
++ * change, and waits for the next game they host.
++ */
++static void UI_AccessibilityBotsFrame(void)
++{
++	static int      said = -1;
++	uiClientState_t cstate;
++	int             bots;
++
++	trap_Cvar_Update(&eta_hostBotCount);
++	bots = (int)Com_Clamp(0, ETA_HOST_BOTS_MAX, eta_hostBotCount.integer);
++
++	trap_GetClientState(&cstate);
++	if (said < 0 || cstate.connState != CA_ACTIVE || trap_Cvar_VariableValue("sv_running") == 0.f)
++	{
++		said = bots;
++		return;
++	}
++
++	if (bots == said)
++	{
++		return;
++	}
++	said = bots;
++
++	if (trap_Cvar_VariableValue("omnibot_enable") == 0.f)
++	{
++		if (bots > 0)
++		{
++			trap_Cvar_Set("omnibot_enable", "1");
++			UI_AccessibilityUpdateSay(va("%i %s from the next map: this one started without bots", bots,
++			                             bots == 1 ? "bot joins" : "bots join"));
++		}
++		return;
++	}
++
++	trap_Cmd_ExecuteText(EXEC_APPEND, va("%s\n", UI_AccessibilityBotCommand(bots)));
++	UI_AccessibilityUpdateSay(bots ? va("%i %s now", bots, bots == 1 ? "bot" : "bots") : "No bots now");
+ }
+ 
+ /*

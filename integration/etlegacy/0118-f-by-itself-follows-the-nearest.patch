@@ -1,0 +1,98 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 8a20762..5860752 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -2516,23 +2516,25 @@ static qboolean ETA_UseInReach(const etaAimTarget_t *target)
+ }
+ 
+ /**
+- * @brief Kept facing the chosen thing while walking to it.
++ * @brief Kept facing the thing F turned to while walking to it.
+  *
+  * The tester chose a weapon a few metres off, F turned them to it, and
+  * walking there the view drifted off it: they arrived facing elsewhere,
+- * and could not pick it up. So F, on a chosen thing out of reach, turns
+- * to it and stays on it - the view following it as the player walks, the
+- * way the enemy lock follows an enemy - and says once it is in reach,
+- * when F uses it. It lets go when F uses it, a turn key is pressed,
+- * another is chosen, or it is out of sight for a moment; the choice is
+- * kept all the while.
++ * and could not pick it up. So F, on a thing out of reach, turns to it
++ * and stays on it - the view following it as the player walks, the way
++ * the enemy lock follows an enemy - and says once it is in reach, when F
++ * uses it. It lets go when F uses it, a turn key is pressed, another is
++ * chosen, or it is out of sight for a moment; a choice is kept all the
++ * while. At first only a thing chosen with the bracket keys was
++ * followed; the tester then found F by itself said nothing on reaching
++ * the nearest thing, so that is followed too.
+  */
+ #define ETA_FOLLOW_REFRESH_MS 250
+ #define ETA_FOLLOW_LOST_MS    1000
+ 
+-static void ETA_AimStartFollow(const etaAimTarget_t *target)
++static void ETA_AimStartFollow(const etaAimTarget_t *target, const char *label)
+ {
+-	ETA_AimStartSnap(target, target->name);
++	ETA_AimStartSnap(target, label ? label : target->name);
+ 	eta_aim.mode      = ETA_AIM_FOLLOW;
+ 	eta_aim.follow    = *target;
+ 	eta_aim.saidReach = qfalse;
+@@ -2662,7 +2664,7 @@ static void CG_AccessibilityActivateDown_f(void)
+ 				   player walks there. */
+ 				if (!list[index].ladder && !list[index].locked && !reach)
+ 				{
+-					ETA_AimStartFollow(&list[index]);
++					ETA_AimStartFollow(&list[index], NULL);
+ 				}
+ 				else
+ 				{
+@@ -2727,10 +2729,32 @@ static void CG_AccessibilityActivateDown_f(void)
+ 
+ 	if (hint || count <= 0)
+ 	{
++		/* Used: what was walked to has done its job. */
++		if (eta_aim.mode == ETA_AIM_FOLLOW)
++		{
++			ETA_AimStop();
++		}
+ 		ETA_UseKey(qtrue);
+ 		return;
+ 	}
+ 
++	/* Walked up to what F turned to: F uses it, rather than moving on
++	   to the next one along. */
++	if (eta_aim.mode == ETA_AIM_FOLLOW && ETA_UseInReach(&eta_aim.follow))
++	{
++		int j = ETA_ChooseFind(list, count, &eta_aim.follow);
++
++		if (j >= 0 && !list[j].ladder && !list[j].stairs)
++		{
++			ETA_AimStartSnap(&list[j], list[j].name);
++			eta_use.pending    = (qboolean)!list[j].locked;
++			eta_use.uniform    = list[j].uniform;
++			eta_aim.cycleIndex = j;
++			eta_aim.cycleAt    = cg.time;
++			return;
++		}
++	}
++
+ 	/* Pressed again soon after: the next one along. */
+ 	if (eta_aim.cycleAt && cg.time >= eta_aim.cycleAt && cg.time - eta_aim.cycleAt < ETA_AIM_CYCLE_MS)
+ 	{
+@@ -2784,6 +2808,16 @@ static void CG_AccessibilityActivateDown_f(void)
+ 		return;
+ 	}
+ 
++	/* Further off: turned to, said, and kept facing while the player
++	   walks there, "in reach" said on arrival - but a door that will not
++	   open is only turned to. */
++	if (!list[index].locked)
++	{
++		ETA_AimStartFollow(&list[index],
++		                   count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : NULL);
++		return;
++	}
++
+ 	ETA_AimStartSnap(&list[index],
+ 	                 count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : list[index].name);
+ }

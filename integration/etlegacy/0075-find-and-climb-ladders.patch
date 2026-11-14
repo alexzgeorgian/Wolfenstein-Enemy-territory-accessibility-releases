@@ -1,0 +1,635 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 705fb82..c7f3786 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1893,18 +1893,12 @@ static void ETA_AimStop(void)
+  * engine's own sense, in CL_AdjustAngles - so a target at a higher yaw
+  * is to the left, and one at a higher pitch is below.
+  */
+-static qboolean ETA_AimSteer(const vec3_t point, float tolerance)
++static qboolean ETA_AimSteerAngles(const vec3_t wanted, float tolerance)
+ {
+ 	const playerState_t *ps = &cg.predictedPlayerState;
+-	vec3_t              eye, delta, wanted;
+ 	float               yawError, pitchError, worst, perFrame, deadzone;
+ 	int                 yaw = 0, pitch = 0;
+ 
+-	VectorCopy(ps->origin, eye);
+-	eye[2] += ps->viewheight;
+-	VectorSubtract(point, eye, delta);
+-	vectoangles(delta, wanted);
+-
+ 	yawError   = AngleSubtract(wanted[YAW], ps->viewangles[YAW]);
+ 	pitchError = AngleSubtract(wanted[PITCH], ps->viewangles[PITCH]);
+ 	worst      = MAX(fabs(yawError), fabs(pitchError));
+@@ -1929,6 +1923,249 @@ static qboolean ETA_AimSteer(const vec3_t point, float tolerance)
+ 	return (qboolean)(!yaw && !pitch);
+ }
+ 
++static qboolean ETA_AimSteer(const vec3_t point, float tolerance)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	vec3_t              eye, delta, wanted;
++
++	VectorCopy(ps->origin, eye);
++	eye[2] += ps->viewheight;
++	VectorSubtract(point, eye, delta);
++	vectoangles(delta, wanted);
++
++	return ETA_AimSteerAngles(wanted, tolerance);
++}
++
++/**
++ * @brief Climbing a ladder with the use key.
++ *
++ * A ladder in ET is climbed with the view and the walk keys together:
++ * facing it and walking forward climbs it while the view is level or
++ * up, and climbs down while the view is well down; walking backward
++ * reverses either (PM_LadderMove). Getting on from the top means
++ * walking off the edge toward the ladder and catching it on the way
++ * down - the game grabs a ladder within 48 units ahead of a falling
++ * player. None of that can be done by ear without a lot of falling.
++ *
++ * So the use key does it, with keys pressed for the player as the
++ * turning does, and the game's own movement doing the climbing:
++ *
++ *   - up: face the ladder, view a little up, walk forward; off the top,
++ *     a few more steps onto the ledge;
++ *   - down, ladder on the far side of the hole: face it, look well
++ *     down, walk forward off the edge onto it, and on down;
++ *   - down, ladder on the wall under the player's own edge: face that
++ *     wall, view level, walk backward off the edge onto it, and on down.
++ *
++ * It stops at the top or the bottom, says so, and gives the keys back.
++ * The player turning by hand, the use key again, the map, death, or a
++ * climb that never got onto the ladder all stop it too.
++ */
++#define ETA_CLIMB_KEY_FORWARD "993"
++#define ETA_CLIMB_KEY_BACK    "992"
++#define ETA_CLIMB_GRAB_MS     3000
++#define ETA_CLIMB_LIMIT_MS    20000
++#define ETA_CLIMB_STEP_OFF_MS 400
++#define ETA_CLIMB_FACING      20.0f
++
++typedef struct
++{
++	qboolean active;
++	qboolean goesUp;
++	qboolean behind;
++	vec3_t   point;
++	vec3_t   normal;
++	int      started;
++	int      move;      /* the walk key held: 1 forward, -1 back */
++	qboolean latched;   /* has been on the ladder */
++	int      offSince;  /* off the top of it, since */
++	float    startZ;
++} eta_climb_t;
++
++static eta_climb_t eta_climb;
++
++qboolean CG_AccessibilityClimbing(void)
++{
++	return eta_climb.active;
++}
++
++static void ETA_ClimbMove(int move)
++{
++	if (move == eta_climb.move)
++	{
++		return;
++	}
++
++	if (eta_climb.move)
++	{
++		trap_SendConsoleCommand(va("-%s %s\n", eta_climb.move > 0 ? "forward" : "back",
++		                           eta_climb.move > 0 ? ETA_CLIMB_KEY_FORWARD : ETA_CLIMB_KEY_BACK));
++	}
++	if (move)
++	{
++		trap_SendConsoleCommand(va("+%s %s\n", move > 0 ? "forward" : "back",
++		                           move > 0 ? ETA_CLIMB_KEY_FORWARD : ETA_CLIMB_KEY_BACK));
++	}
++
++	eta_climb.move = move;
++}
++
++static void ETA_ClimbStop(const char *say)
++{
++	if (!eta_climb.active)
++	{
++		return;
++	}
++
++	ETA_ClimbMove(0);
++	ETA_AimKeys(0, 0);
++	ETA_TurnBoost(qfalse);
++	eta_climb.active = qfalse;
++
++	if (say)
++	{
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say(say);
++		ETA_Speech_EndReport();
++	}
++}
++
++static void ETA_ClimbStart(const etaLadder_t *ladder)
++{
++	if (eta_turn.step)
++	{
++		ETA_TurnStopStep(qfalse);
++	}
++	ETA_AimStop();
++
++	memset(&eta_climb, 0, sizeof(eta_climb));
++	eta_climb.active  = qtrue;
++	eta_climb.goesUp  = ladder->goesUp;
++	eta_climb.behind  = ladder->behind;
++	eta_climb.started = cg.time;
++	eta_climb.startZ  = cg.predictedPlayerState.origin[2];
++	VectorCopy(ladder->point, eta_climb.point);
++	VectorCopy(ladder->normal, eta_climb.normal);
++
++	ETA_HudNarrator_HoldPassive(cg.time);
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(ladder->goesUp ? "Climbing up" : "Climbing down");
++	ETA_Speech_EndReport();
++}
++
++static void ETA_ClimbFrame(void)
++{
++	const playerState_t *ps       = &cg.predictedPlayerState;
++	qboolean            onLadder  = (qboolean)((ps->pm_flags & PMF_LADDER) != 0);
++	qboolean            onGround  = (qboolean)(ps->groundEntityNum != ENTITYNUM_NONE);
++	vec3_t              wanted, toLadder;
++	float               yawError;
++
++	if (!cg.snap || ps->pm_type != PM_NORMAL || cgs.autoMapExpanded)
++	{
++		ETA_ClimbStop(NULL);
++		return;
++	}
++
++	if (cg.time < eta_climb.started || cg.time - eta_climb.started > ETA_CLIMB_LIMIT_MS)
++	{
++		ETA_ClimbStop("Climb stopped");
++		return;
++	}
++
++	if (onLadder)
++	{
++		eta_climb.latched = qtrue;
++	}
++
++	if (!eta_climb.latched && cg.time - eta_climb.started > ETA_CLIMB_GRAB_MS)
++	{
++		ETA_ClimbStop("Could not get onto the ladder");
++		return;
++	}
++
++	/* Arrived. */
++	if (eta_climb.latched)
++	{
++		if (eta_climb.goesUp)
++		{
++			if (!onLadder)
++			{
++				if (!eta_climb.offSince)
++				{
++					eta_climb.offSince = cg.time;
++				}
++
++				if (onGround && ps->origin[2] < eta_climb.startZ + 16.0f)
++				{
++					/* Back where it started: let go of the ladder, or
++					   never got up it. */
++					ETA_ClimbStop("Off the ladder");
++					return;
++				}
++
++				if (onGround && cg.time - eta_climb.offSince > ETA_CLIMB_STEP_OFF_MS)
++				{
++					ETA_ClimbStop("Top of the ladder");
++					return;
++				}
++			}
++			else
++			{
++				eta_climb.offSince = 0;
++			}
++		}
++		else if (onGround && ps->origin[2] < eta_climb.startZ - 32.0f)
++		{
++			ETA_ClimbStop("Bottom of the ladder");
++			return;
++		}
++	}
++
++	/* Facing: at the ladder's face once on it, or from behind its wall;
++	   on the way to a ladder ahead, at the spot where it was found. */
++	if (eta_climb.latched || eta_climb.behind)
++	{
++		VectorScale(eta_climb.normal, -1.0f, toLadder);
++	}
++	else
++	{
++		VectorSubtract(eta_climb.point, ps->origin, toLadder);
++	}
++	toLadder[2] = 0.0f;
++
++	wanted[YAW]  = vectoyaw(toLadder);
++	wanted[ROLL] = 0.0f;
++
++	if (eta_climb.goesUp)
++	{
++		wanted[PITCH] = -10.0f;     /* a little up: climbs */
++	}
++	else if (eta_climb.behind)
++	{
++		wanted[PITCH] = 0.0f;       /* level, walking backward: climbs down */
++	}
++	else
++	{
++		wanted[PITCH] = 70.0f;      /* well down, walking forward: climbs down */
++	}
++
++	ETA_AimSteerAngles(wanted, 2.0f);
++
++	/* Walk only once facing about the right way, so the first step is
++	   never off a ledge in some other direction. */
++	yawError = AngleSubtract(wanted[YAW], ps->viewangles[YAW]);
++
++	if (Q_fabs(yawError) < ETA_CLIMB_FACING || eta_climb.latched)
++	{
++		ETA_ClimbMove(eta_climb.behind ? -1 : 1);
++	}
++	else
++	{
++		ETA_ClimbMove(0);
++	}
++}
++
+ static void ETA_AimSay(const char *what, const vec3_t point)
+ {
+ 	int meters = (int)(Distance(cg.predictedPlayerState.origin, point) * ETA_QU_TO_METERS + 0.5f);
+@@ -2011,12 +2248,34 @@ static void CG_AccessibilityActivateDown_f(void)
+ 
+ 	eta_use.held = qtrue;
+ 
+-	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
++	/* The game's ladder icon is not something the use key does anything
++	   with, so it is not a hint here: the key climbs the ladder. */
++	hint = (qboolean)(cg.cursorHintIcon != HINT_NONE && cg.cursorHintIcon != HINT_LADDER
++	                  && cg.cursorHintTime != 0 && cg.cursorHintFade > 0
+ 	                  && cg.time - cg.cursorHintTime < cg.cursorHintFade);
+ 
++	/* Pressed while climbing: stop. */
++	if (eta_climb.active)
++	{
++		ETA_ClimbStop("Climb stopped");
++		return;
++	}
++
+ 	count = (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL && !hint)
+ 	        ? CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS) : 0;
+ 
++	/* A ladder within reach, nearer than anything else to use: climb it. */
++	if (cg.snap && cg.predictedPlayerState.pm_type == PM_NORMAL && !hint)
++	{
++		etaLadder_t ladder;
++
++		if (CG_AccessibilityLadderNear(&ladder) && (count <= 0 || ladder.meters < list[0].meters))
++		{
++			ETA_ClimbStart(&ladder);
++			return;
++		}
++	}
++
+ 	if (hint || count <= 0)
+ 	{
+ 		ETA_UseKey(qtrue);
+@@ -2377,6 +2636,13 @@ void CG_AccessibilityAimFrame(void)
+ {
+ 	ETA_MapCatchFrame();
+ 
++	/* A climb has the keys to itself. */
++	if (eta_climb.active)
++	{
++		ETA_ClimbFrame();
++		return;
++	}
++
+ 	/* A use pressed on arrival lets go a moment later, if the player's
+ 	   own key already has. */
+ 	if (eta_use.pressed && !eta_use.held && eta_use.releaseAt
+@@ -2504,8 +2770,12 @@ static void CG_AccessibilityTurnDown(int direction)
+ 		return;
+ 	}
+ 
+-	/* The player turning by hand takes over from any aim, and the lock
+-	   leaves them to it for a moment. */
++	/* The player turning by hand takes over from any aim or climb, and
++	   the lock leaves them to it for a moment. */
++	if (eta_climb.active)
++	{
++		ETA_ClimbStop("Climb stopped");
++	}
+ 	if (eta_aim.mode != ETA_AIM_NONE)
+ 	{
+ 		ETA_AimStop();
+@@ -2677,6 +2947,8 @@ void CG_AccessibilityTurnShutdown(void)
+ 	{
+ 		ETA_TurnKey(eta_turn.passthrough, qfalse);
+ 	}
++	ETA_ClimbStop(NULL);
++	memset(&eta_climb, 0, sizeof(eta_climb));
+ 	ETA_AimStop();
+ 	ETA_UseKey(qfalse);
+ 	ETA_MapCatchKeys(qfalse);
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 961b47d..c21e339 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -5183,6 +5183,246 @@ static qboolean ETA_GroundRiseAhead(const playerState_t *ps, const vec3_t forwar
+  * are looking when they are standing still, which is the same rule the
+  * drop warning uses and for the same reason.
+  */
++/**
++ * @brief How near a ladder has to be to be said, and to be climbed with
++ *        the use key: two metres, a couple of steps.
++ */
++#define ETA_LADDER_REACH 80.0f
++
++/* How far below the feet the probes for a ladder down go looking: deep
++   enough to be in the shaft, not so deep a ladder two floors down is
++   taken for this one. */
++#define ETA_LADDER_DROP 64.0f
++
++/* What the player's own movement collides with (cg_predict.c): other
++   players are not part of a ladder, and must not hide one. */
++#define ETA_LADDER_MASK (MASK_PLAYERSOLID & ~CONTENTS_BODY)
++
++/* How often the ladder search runs while nothing is being climbed. */
++#define ETA_LADDER_SEARCH_MS 250
++
++/**
++ * @brief Whether a trace ended on a ladder - the same test the game's
++ *        own movement makes, SURF_LADDER on a wall-like face.
++ */
++static qboolean ETA_LadderHit(const trace_t *tr)
++{
++	return (qboolean)(tr->fraction < 1.0f && !tr->startsolid && !tr->allsolid
++	                  && (tr->surfaceFlags & SURF_LADDER)
++	                  && Q_fabs(tr->plane.normal[2]) < 0.7f);
++}
++
++/**
++ * @brief The nearest ladder the player could climb from where they stand.
++ *
++ * A ladder in ET is not an entity. It is a face of the map marked
++ * SURF_LADDER - usually an invisible clip brush laid against a wall -
++ * and the game's movement code finds it by tracing straight ahead from
++ * the player (PM_CheckLadderMove). So this finds it the same way, in
++ * every direction rather than only ahead:
++ *
++ * - Up: traces out from chest height in sixteen directions. A ladder
++ *   face there, facing back toward the player, goes up from here.
++ * - Down: with the feet on the ground, points just beyond the player
++ *   and below the floor are tried; where one is open air - a shaft, a
++ *   hatch - traces from it look for a ladder face on either wall. The
++ *   face can be on the far wall, looking back at the player, or on the
++ *   near one, under the player's own edge and looking away; which it is
++ *   decides whether the climb starts by walking forward or backward.
++ *
++ * Everything is the map's own collision, the same traces the game makes,
++ * so a ladder that is said is one the game will let the player climb.
++ */
++qboolean CG_AccessibilityLadderNear(etaLadder_t *out)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	float               best = ETA_LADDER_REACH + 1.0f;
++	trace_t             tr;
++	int                 i, h;
++
++	if (!cg.snap)
++	{
++		return qfalse;
++	}
++
++	memset(out, 0, sizeof(*out));
++
++	for (i = 0; i < 16; i++)
++	{
++		vec3_t dir, from, end;
++		float  yaw = (float)i * 22.5f;
++
++		dir[0] = (float)cos(DEG2RAD(yaw));
++		dir[1] = (float)sin(DEG2RAD(yaw));
++		dir[2] = 0.0f;
++
++		for (h = 0; h < 2; h++)
++		{
++			VectorCopy(ps->origin, from);
++			from[2] += h ? 40.0f : 16.0f;
++			VectorMA(from, ETA_LADDER_REACH, dir, end);
++
++			CG_Trace(&tr, from, NULL, NULL, end, ps->clientNum, ETA_LADDER_MASK);
++
++			/* Facing the player: a ladder seen from behind is the back of
++			   a wall. */
++			if (!ETA_LadderHit(&tr) || DotProduct(dir, tr.plane.normal) > -0.3f)
++			{
++				continue;
++			}
++
++			if (tr.fraction * ETA_LADDER_REACH < best)
++			{
++				best = tr.fraction * ETA_LADDER_REACH;
++				VectorCopy(tr.endpos, out->point);
++				VectorCopy(tr.plane.normal, out->normal);
++				out->goesUp = qtrue;
++				out->behind = qfalse;
++			}
++		}
++	}
++
++	if (best <= ETA_LADDER_REACH)
++	{
++		out->meters = best * ETA_QU_TO_METERS;
++		return qtrue;
++	}
++
++	/* A ladder down starts from the ground. */
++	if (ps->groundEntityNum == ENTITYNUM_NONE)
++	{
++		return qfalse;
++	}
++
++	for (i = 0; i < 8; i++)
++	{
++		vec3_t dir, probe, above;
++		float  yaw = (float)i * 45.0f;
++		int    step;
++
++		dir[0] = (float)cos(DEG2RAD(yaw));
++		dir[1] = (float)sin(DEG2RAD(yaw));
++		dir[2] = 0.0f;
++
++		for (step = 1; step <= 2; step++)
++		{
++			int side;
++
++			VectorMA(ps->origin, 32.0f * (float)step, dir, probe);
++			probe[2] = ps->origin[2] + ps->mins[2] - ETA_LADDER_DROP;
++
++			/* There has to be a way down to the probe: open from the
++			   player's own floor level all the way to it. */
++			VectorCopy(probe, above);
++			above[2] = ps->origin[2];
++			CG_Trace(&tr, above, NULL, NULL, probe, ps->clientNum, ETA_LADDER_MASK);
++			if (tr.fraction < 1.0f || tr.startsolid)
++			{
++				continue;
++			}
++
++			for (side = 0; side < 2; side++)
++			{
++				vec3_t sideDir, end;
++				float  across;
++
++				VectorScale(dir, side ? -1.0f : 1.0f, sideDir);
++				VectorMA(probe, 64.0f, sideDir, end);
++
++				CG_Trace(&tr, probe, NULL, NULL, end, ps->clientNum, ETA_LADDER_MASK);
++
++				if (!ETA_LadderHit(&tr))
++				{
++					continue;
++				}
++
++				across = (float)sqrt((tr.endpos[0] - ps->origin[0]) * (tr.endpos[0] - ps->origin[0])
++				                     + (tr.endpos[1] - ps->origin[1]) * (tr.endpos[1] - ps->origin[1]));
++
++				if (across < best)
++				{
++					vec3_t fromLadder;
++
++					best = across;
++					VectorCopy(tr.endpos, out->point);
++					VectorCopy(tr.plane.normal, out->normal);
++					out->goesUp = qfalse;
++
++					/* Behind the ladder's face: the player stands over the
++					   wall it is on, and has to step back off the edge. */
++					VectorSubtract(ps->origin, tr.endpos, fromLadder);
++					fromLadder[2] = 0.0f;
++					out->behind   = (qboolean)(DotProduct(fromLadder, tr.plane.normal) < 0.0f);
++				}
++			}
++		}
++	}
++
++	if (best <= ETA_LADDER_REACH)
++	{
++		out->meters = best * ETA_QU_TO_METERS;
++		return qtrue;
++	}
++
++	return qfalse;
++}
++
++/**
++ * @brief Says a ladder once, as the player comes to it.
++ *
++ * Stairs are said as the ground ahead rises; a ladder is not ground,
++ * and nothing about walking past one says it is there - the game only
++ * shows its icon when the crosshair happens to be on it. So the search
++ * runs a few times a second, and a ladder is said when one comes within
++ * two metres and not again until the player has walked away from it.
++ */
++static void ETA_NarrateLadder(void)
++{
++	static int    nextSearch;
++	static vec3_t saidAt;
++	static int    said;
++	etaLadder_t   ladder;
++	int           meters;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL || !eta_environmentCallouts.integer
++	    || (cg.snap->ps.pm_flags & PMF_LADDER) || CG_AccessibilityClimbing())
++	{
++		return;
++	}
++
++	if (cg.time < nextSearch && nextSearch - cg.time <= ETA_LADDER_SEARCH_MS)
++	{
++		return;
++	}
++	nextSearch = cg.time + ETA_LADDER_SEARCH_MS;
++
++	if (!CG_AccessibilityLadderNear(&ladder))
++	{
++		/* Walked away: the next ladder, or this one again, is news. */
++		if (said && Distance(cg.predictedPlayerState.origin, saidAt) > ETA_LADDER_REACH * 2.0f)
++		{
++			said = 0;
++		}
++		return;
++	}
++
++	if (said && Distance(ladder.point, saidAt) < ETA_LADDER_REACH * 2.0f)
++	{
++		return;
++	}
++
++	said = 1;
++	VectorCopy(ladder.point, saidAt);
++
++	meters = (int)(ladder.meters + 0.5f);
++
++	ETA_Speech_BeginReport();
++	ETA_HudNarrator_SpeakLadder(ladder.goesUp ? 1 : 0,
++	                            ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(ladder.point)),
++	                            meters);
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Says when an objective is finished, or lost.
+  *
+@@ -8657,6 +8897,8 @@ void CG_DrawActive()
+ 
+ 		ETA_NarrateStairsAhead();
+ 
++		ETA_NarrateLadder();
++
+ 		ETA_NarrateObjectiveApproach();
+ 
+ 		CG_AccessibilityMarkerApproach();
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index c5aaca2..1f901de 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3496,6 +3496,22 @@ void     CG_AccessibilityAimFrame(void);
+ qboolean CG_AccessibilityBuildBusy(void);
+ qboolean CG_AccessibilityMapKeyEvent(int key, qboolean down);
+ 
++/*
++ * A ladder near the player, found in cg_draw.c by the game's own ladder
++ * test, and climbed with the use key in cg_consolecmds.c.
++ */
++typedef struct
++{
++	vec3_t   point;     ///< where the ladder's face was found
++	vec3_t   normal;    ///< which way the face looks
++	qboolean goesUp;    ///< up from here; otherwise down a shaft or hatch
++	qboolean behind;    ///< down, on the wall under the player's own edge
++	float    meters;
++} etaLadder_t;
++
++qboolean CG_AccessibilityLadderNear(etaLadder_t *out);
++qboolean CG_AccessibilityClimbing(void);
++
+ /**
+  * @brief The mod's own looping sounds, shipped inside the pk3.
+  */

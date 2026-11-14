@@ -1,0 +1,281 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 23c80ee..60b0826 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -41,6 +41,7 @@
+ #include "hud/hud_narrator.h"
+ #include "navigation/place_classifier.h"
+ #include "map/bsp_ladders.h"
++#include "map/bsp_props.h"
+ #include "navigation/navigation_system.h"
+ #include "speech/speech_manager.h"
+ #endif
+@@ -2480,6 +2481,8 @@ static void ETA_DescribeSurface(const trace_t *trace, char *out, size_t outSize)
+ 	}
+ }
+ 
++static const char *ETA_PropAt(const vec3_t point);
++
+ static void ETA_DescribeTraceHit(const trace_t *trace, char *out, size_t outSize)
+ {
+ 	int entityNum = trace->entityNum;
+@@ -2535,6 +2538,18 @@ static void ETA_DescribeTraceHit(const trace_t *trace, char *out, size_t outSize
+ 		return;
+ 	}
+ 
++	/* Something in a room the map names - "Crate", "Bookcase" - rather
++	   than the wood it is made of. */
++	{
++		const char *prop = ETA_PropAt(trace->endpos);
++
++		if (prop)
++		{
++			Q_strncpyz(out, prop, outSize);
++			return;
++		}
++	}
++
+ 	ETA_DescribeSurface(trace, out, outSize);
+ }
+ 
+@@ -3860,6 +3875,177 @@ qboolean CG_AccessibilityMapLadder(int index, vec3_t mins, vec3_t maxs)
+ 	return qtrue;
+ }
+ 
++/**
++ * @brief The furniture and the things in a room, read from the map file
++ * while it loads: see map/bsp_props.h.
++ */
++#define ETA_MAP_PROPS 1024
++
++static ETA_BspProp   eta_mapProps[ETA_MAP_PROPS];
++static int           eta_mapPropCount;
++static unsigned char eta_mapPropSaid[ETA_MAP_PROPS];
++
++void CG_AccessibilityLoadProps(void)
++{
++	etaMapFile_t file;
++
++	eta_mapPropCount = 0;
++	memset(eta_mapPropSaid, 0, sizeof(eta_mapPropSaid));
++	file.handle = 0;
++
++	if (ETA_MapFileRestart(&file))
++	{
++		eta_mapPropCount = ETA_BspProps_Find(ETA_MapFileRead, ETA_MapFileRestart, &file,
++		                                     eta_mapProps, ETA_MAP_PROPS);
++	}
++
++	if (file.handle)
++	{
++		trap_FS_FCloseFile(file.handle);
++	}
++
++	CG_DPrintf("accessibility: %d thing(s) in the rooms of %s\n", eta_mapPropCount, cgs.mapname);
++}
++
++/* The thing a point is on, NULL for none: a trace's end on its surface
++   lands at its box, give or take - and walking into it, the player's
++   own box stops half its width short. */
++#define ETA_PROP_ON 20.0f
++
++static const char *ETA_PropAt(const vec3_t point)
++{
++	int i;
++
++	for (i = 0; i < eta_mapPropCount; i++)
++	{
++		const ETA_BspProp *prop = &eta_mapProps[i];
++
++		if (point[0] >= prop->mins[0] - ETA_PROP_ON && point[0] <= prop->maxs[0] + ETA_PROP_ON
++		    && point[1] >= prop->mins[1] - ETA_PROP_ON && point[1] <= prop->maxs[1] + ETA_PROP_ON
++		    && point[2] >= prop->mins[2] - ETA_PROP_ON && point[2] <= prop->maxs[2] + ETA_PROP_ON)
++		{
++			return prop->name;
++		}
++	}
++
++	return NULL;
++}
++
++/**
++ * @brief "Armchair, ahead left" as the player comes up to it.
++ *
++ * The tester asked to hear the table, the chair, the bookcase when
++ * getting close to one. Said once a thing is within about a metre and a
++ * half of the player, on their floor and in sight - a chair in the next
++ * room is not news - and again only after they have walked a few metres
++ * off and come back. A window is said only from inside: walking down a
++ * street, every house front has them. Two of the same side by side, a
++ * pair of chairs, are said once. Scenery, so it waits behind anything
++ * the player asked for.
++ */
++#define ETA_PROP_NEAR   60.0f    /* said within this of its box, about a metre and a half */
++#define ETA_PROP_REARM  160.0f   /* and again once the player has been this far off */
++#define ETA_PROP_EVERY  1200     /* ms between two of them */
++#define ETA_PROP_PAIR   96.0f    /* one of the same this close is said with it */
++
++static float ETA_PropFlatDistance(const ETA_BspProp *prop, const vec3_t at)
++{
++	float dx = at[0] < prop->mins[0] ? prop->mins[0] - at[0] : at[0] > prop->maxs[0] ? at[0] - prop->maxs[0] : 0.0f;
++	float dy = at[1] < prop->mins[1] ? prop->mins[1] - at[1] : at[1] > prop->maxs[1] ? at[1] - prop->maxs[1] : 0.0f;
++
++	return sqrt(dx * dx + dy * dy);
++}
++
++static void ETA_NarrateFurniture(void)
++{
++	static int          lastTime;
++	const playerState_t *ps = &cg.predictedPlayerState;
++	const ETA_BspProp   *prop;
++	vec3_t              eye, closest, center;
++	trace_t             trace;
++	float               feet, head, bestDistance = ETA_PROP_NEAR;
++	int                 i, best = -1, a;
++
++	if (!cg.snap || ps->pm_type != PM_NORMAL || !eta_furnitureCallouts.integer || eta_mapPropCount <= 0)
++	{
++		return;
++	}
++
++	feet = ps->origin[2] - 24.0f;
++	head = ps->origin[2] + 48.0f;
++
++	for (i = 0; i < eta_mapPropCount; i++)
++	{
++		float distance;
++
++		prop     = &eta_mapProps[i];
++		distance = ETA_PropFlatDistance(prop, ps->origin);
++
++		if (distance > ETA_PROP_REARM || prop->maxs[2] < feet - 8.0f || prop->mins[2] > head + 16.0f)
++		{
++			eta_mapPropSaid[i] = 0;
++			continue;
++		}
++
++		if (!eta_mapPropSaid[i] && distance <= bestDistance)
++		{
++			bestDistance = distance;
++			best         = i;
++		}
++	}
++
++	if (best < 0 || cg.time - lastTime < ETA_PROP_EVERY)
++	{
++		return;
++	}
++
++	prop = &eta_mapProps[best];
++
++	VectorCopy(ps->origin, eye);
++	eye[2] += ps->viewheight;
++
++	/* From outside, every house front has windows. */
++	if (!Q_stricmp(prop->name, "Window"))
++	{
++		vec3_t up;
++
++		VectorSet(up, eye[0], eye[1], eye[2] + 2048.0f);
++		CG_Trace(&trace, eye, NULL, NULL, up, cg.snap->ps.clientNum, MASK_SOLID);
++		if (trace.fraction >= 1.0f || (trace.surfaceFlags & SURF_SKY))
++		{
++			eta_mapPropSaid[best] = 1;
++			return;
++		}
++	}
++
++	/* In sight: nothing solid between the eyes and the nearest of it. */
++	for (a = 0; a < 3; a++)
++	{
++		closest[a] = eye[a] < prop->mins[a] ? prop->mins[a] : eye[a] > prop->maxs[a] ? prop->maxs[a] : eye[a];
++		center[a]  = (prop->mins[a] + prop->maxs[a]) * 0.5f;
++	}
++	CG_Trace(&trace, eye, NULL, NULL, closest, cg.snap->ps.clientNum, MASK_SOLID);
++	if (trace.fraction < 1.0f && Distance(trace.endpos, closest) > 16.0f)
++	{
++		return;
++	}
++
++	lastTime = cg.time;
++	for (i = 0; i < eta_mapPropCount; i++)
++	{
++		if (i == best || (!Q_stricmp(eta_mapProps[i].name, prop->name)
++		                  && ETA_PropFlatDistance(&eta_mapProps[i], center) <= ETA_PROP_PAIR))
++		{
++			eta_mapPropSaid[i] = 1;
++		}
++	}
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(va("%s, %s", prop->name,
++	                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(center))));
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief How far a ladder is heard, in Quake units: about fifteen metres.
+  *
+@@ -10028,6 +10214,8 @@ void CG_DrawActive()
+ 
+ 		ETA_NarrateStairsAhead();
+ 
++		ETA_NarrateFurniture();
++
+ 		ETA_NarrateLadder();
+ 
+ 		/* Only the marker's distances, counted to where the marker is.
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 2d13d3c..563cb77 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3474,6 +3474,7 @@ int CG_AccessibilityFlagSeen(const vec3_t origin, int frame);
+ 
+ /* The map's ladders, read from its map file as it loads. See cg_draw.c. */
+ void CG_AccessibilityLoadLadders(void);
++void CG_AccessibilityLoadProps(void);
+ int CG_AccessibilityLadderCount(void);
+ qboolean CG_AccessibilityMapLadder(int index, vec3_t mins, vec3_t maxs);
+ const char *CG_AccessibilityGameModelPath(int index);
+@@ -3562,6 +3563,7 @@ extern vmCvar_t eta_openingCallouts;
+ extern vmCvar_t eta_mapToggle;
+ extern vmCvar_t eta_playerCallouts;
+ extern vmCvar_t eta_groundCallouts;
++extern vmCvar_t eta_furnitureCallouts;
+ extern vmCvar_t eta_autoLock;
+ const char *CG_AccessibilityWeaponName(weapon_t weap);
+ void CG_AccessibilitySampleTotals(void);
+diff --git a/src/cgame/cg_main.c b/src/cgame/cg_main.c
+index 3f80e65..956b5d4 100644
+--- a/src/cgame/cg_main.c
++++ b/src/cgame/cg_main.c
+@@ -2221,6 +2221,8 @@ vmCvar_t eta_openingCallouts;
+ vmCvar_t eta_mapToggle;
+ vmCvar_t eta_playerCallouts;
+ vmCvar_t eta_groundCallouts;
++/* The furniture and the things in a room, said as the player comes up to them. */
++vmCvar_t eta_furnitureCallouts;
+ vmCvar_t eta_autoLock;
+ 
+ /**
+@@ -2437,6 +2439,7 @@ static eta_setting_t eta_settings[] =
+ 	{ &eta_mapToggle,           "eta_mapToggle",           "1" },
+ 	{ &eta_playerCallouts,      "eta_playerCallouts",      "1" },
+ 	{ &eta_groundCallouts,      "eta_groundCallouts",      "1" },
++	{ &eta_furnitureCallouts,   "eta_furnitureCallouts",   "1" },
+ 	{ &eta_autoLock,            "eta_autoLock",            "1" },
+ 	{ &eta_musicDuck,           "eta_musicDuck",           "1" },
+ 	{ &eta_speechRate,          "eta_speechRate",          "0" },
+@@ -2785,9 +2788,10 @@ void CG_Init(int serverMessageNum, int serverCommandSequence, int clientNum, qbo
+ 
+ 	trap_CM_LoadMap(cgs.mapname);
+ #ifdef FEATURE_ACCESSIBILITY
+-	/* Every ladder on the map, from the same file, while it is loading
+-	   anyway. */
++	/* Every ladder on the map, and the things in its rooms, from the same
++	   file, while it is loading anyway. */
+ 	CG_AccessibilityLoadLadders();
++	CG_AccessibilityLoadProps();
+ #endif
+ 
+ 	DEBUG_INITPROFILE_EXEC("loadmap");

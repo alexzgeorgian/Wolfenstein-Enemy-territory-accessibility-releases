@@ -1,0 +1,534 @@
+# @VERSION@ - what changed
+
+The install guide sits beside this file, in `INSTALL.md`. This one is
+only the history.
+
+It goes all the way back to the first published build, so you never have
+to open a browser to find out what changed between the version you had
+and the version you have.
+
+
+## This build - @VERSION@
+
+@CHANGES@
+
+
+## What it does
+
+- **Updates** - as the game starts it says *"Checking for updates"*,
+  then whether you have the latest version, then *"Main menu"*; a newer
+  version is offered in a popup that talks:
+  download, checked against its checksum, and put in place when you
+  quit. *Options*, *Accessibility*, *Check for updates* asks by hand.
+- **Menus** - moving to an item speaks it together with what it is set
+  to, changing it speaks the new value, and confirmation dialogs are
+  read out.
+- **Enter changes the setting you are on.** Every settings control in
+  the game wanted the mouse pointer inside it as well as keyboard
+  focus, and arrowing onto one does not move the pointer - so Enter did
+  nothing, on every checkbox, every yes/no and every game type. A
+  tester found it unable to choose a game type while hosting a server.
+  Clicking is unchanged.
+- **Sliders step with the left and right arrow keys**, speaking the new
+  value each time - effects volume, music volume, mouse sensitivity,
+  and the forty-odd others. Around twenty presses end to end, on a
+  ladder of round numbers rather than a flat twentieth of each range.
+  Pressing past an end says the value again rather than going quiet.
+- **The controls list can be read and changed.** Each row says its name
+  and the key it is on - *"Crouch, C"* - and Enter starts a capture
+  that tells you it is listening: *"press the key to use. Escape to
+  cancel, backspace to clear."* The next key you press is taken and
+  read back. Until now the list spoke only the control's name, which
+  made it look as though nothing could be changed at all.
+- **Text boxes** - arriving at one reads what it holds, every character
+  you type is echoed, and the arrow keys read it back one character at a
+  time. Passwords are spoken as a length, never read out.
+- **Team, class and weapon** - the limbo panel, which is mouse-only in
+  the stock game, gets keyboard navigation and speaks each team and
+  class along with whether it is full, unavailable, or the one you are
+  on. Each weapon slot is a stop too, spoken as "Primary weapon,
+  Thompson, 1 of 3" with the game's own count for your class and skill
+  level.
+- **Health and ammo keys** - one each, under the hand that is already on
+  the movement keys, because one long report is the wrong shape for "am
+  I about to die".
+- **Stance** - crouching, standing up and going prone are spoken as they
+  happen. If the game refuses to let you stand because something is over
+  your head, you hear that you are still crouched rather than being left
+  to guess.
+- **Status key** - everything at once: health, weapon, ammo, the current
+  objective, how far away it is in metres, and whether to turn left,
+  turn right, or carry straight on.
+- **The marker's distance** counts itself down as you close in - 100,
+  50, 25 and 10 metres, with up or down - so you can hear that you are
+  getting there. Keypad plus puts the marker on the objective. The old
+  *"meters to objective"*, counted in a straight line, is gone. The
+  objective comes from the same list your command map draws, so it
+  works on every map, not only the ones that name a main objective.
+- **Furniture and things in a room are said** as you come within a
+  metre and a half: a chair, a bed, a bookcase, a crate, a window from
+  inside - read from the names the map gives them.
+- **Pickups are heard where they lie** - health packs, ammo packs and
+  weapons within ten metres and in sight, each its own sound; a dropped
+  objective rings the flag's bell.
+- **Health and ammo cabinets are heard** - the health pack's and the
+  ammo pack's sounds, from the cabinet, when it is in sight within ten
+  metres.
+- **SAPI 5 lets each line finish** - with NVDA closed, a new line used
+  to cut off the one before it, so most of what was said was lost.
+- **The tank rumbles** - the one to escort, like the Jagdpanther on
+  Goldrush; damaged, it taps for the side that repairs it.
+- **F keeps you facing what you chose** - walking to it the view
+  follows it, and *"in reach, F to use"* says when F will pick it up.
+- **Walking into something is heard** - a thud for a wall, a knock for
+  a thing.
+- **Landmines are warned of** - *"Enemy landmine, ahead, 6 meters"*,
+  with fast beeps from it close by, and the marker's way steps round
+  them; only the mines the game shows you, spotted by your team or
+  seen with the skill for traps.
+- **How you died is said** in the game's words - *"You failed to spot
+  Hans's Landmine"* - and your kills.
+- **Who you watch is said** - *"following Hans, Axis Medic, 85
+  health"*, then their kills, their death and *"Hans revived"*.
+- **The console says when it opens** - *"Console open. The same key
+  closes it"*, and *"Console closed"*.
+- **The way goes through low tunnels crouched** - *"Crouch, low ceiling
+  ahead"*, with the key, and *"Stand up"* once out from under.
+- **The way out of a building on ;** - the marker goes on the nearest
+  way out under the open sky and leads you through the door; again for
+  another door. Outside, on the nearest way into a building.
+- **Accessibility → Sound**: a volume for each of the mod's sounds -
+  the marker, objective sounds, doors, ladders, the crosshair, the
+  alerts - and for the game's announcer, each from 0 to 100.
+- **The objectives key** reads the map's objective text for your team as
+  well as showing the panel, with no rebinding.
+- **Getting wedged** reads out the objective, its distance and which way
+  to turn - only when you are pressing a movement key and getting
+  nowhere.
+- **What is blocking you** is named when something actually is - a wall,
+  a door - found by sweeping your own body's shape in the direction you
+  are *asking* to move, and only while you are asking to move and not
+  getting anywhere. Stairs pass underneath it and the walls beside a
+  corridor stay quiet while you run past them.
+- **Objectives in the map's own order.** ET's maps run their objectives
+  in sequence, and the mod used to point at whichever was nearest -
+  usually one that cannot be started yet. The status and objectives keys
+  now open with *"Objective 2 of 4"* and the map's description of it,
+  finishing one is announced as it happens, and the navigation walks you
+  to the one you can actually do.
+- **Options - Accessibility** opens a short menu of four pages.
+  **Environment**: fourteen yes/no rows for what the mod tells you about
+  the world. **Speech**: four sliders for the voice and the music. **Key
+  Binds**: twenty-five bind rows, each saying which key it is on and
+  changeable from the keyboard - the mod's own twenty-one, plus smooth
+  turn left, smooth turn right, look up and look down, which are the
+  *game's* commands and which the game's own controls list offers
+  nowhere at all. The game's CONTROLS page is left as the game ships it.
+  Resetting the controls to default no longer takes the mod's keys away,
+  which it used to do permanently.
+  **Hosting**: whether friends join a game you host with the plain game,
+  and how many Omni-bot bots play - changed during the match, at once.
+- **A tap on Left or Right turns to the next compass point** and says
+  it as it lands, the way a flick of the mouse does; two taps turn a
+  quarter. Holding still turns smoothly, for aiming, and names each
+  point as you cross it.
+- **The marker's ping never points into a wall.** When a wall is in the
+  way it moves to the nearest open way out, and behind that the mod
+  works out a whole way you can walk - through the doorway, round the
+  corner - that the ping and "turn left or right" follow.
+- **The loading screen is said** - connecting, downloading, the map's
+  name and briefing, the loading bar by the quarter, and *"Loaded. Press
+  L to choose your team and class"* when it is over.
+- **The build is counted out while you aim at it.** The game hides the
+  progress from a player looking at their own construction; the mod now
+  reads it from the construction itself, so the percentages and
+  *"Construction complete"* are heard wherever you look.
+- **The map key opens and closes the map.** One press opens it -
+  *"Map open"* - and it stays open while you walk the survey; the next
+  press closes it. Environment - *Map key opens and closes* turns it
+  back into a key to hold.
+- **Objectives are read without their stars.** The game breaks its
+  objective text into lines with a star; each is now a sentence break.
+- **Menu labels are read as words.** The game hides a hotkey marker
+  inside button names - Play is stored as *PL^_AY* - and colour codes
+  inside player and server names. Both are taken out before anything is
+  spoken, so nothing is spelled out.
+- **F9 says what is around you** - indoors or out, which ways are open
+  and how far by compass point, the walls, a window, what blocks a way
+  when it is a thing, and the named things close by - a truck, a crate,
+  a health cabinet - with direction, distance and whether they are in
+  sight.
+- **Players near you are said as they come and go** - an enemy in
+  clear sight, a wounded teammate, teammates close by: ahead, left,
+  right or behind, how far, and again as they come closer or move away.
+  Never an enemy through a wall.
+- **Things on the ground are said as you reach them** - a weapon, ammo,
+  a health pack; and for a covert op, an enemy body with its uniform.
+- **A covert op takes a uniform with F** - F faces the enemy body and
+  holds use until the uniform is on. An enemy just shot down is listed
+  too: their body, and its uniform, come once they give up - don't
+  shoot them again.
+- **No more "Object"** - what the narrator meets is said as what it is:
+  a mounted gun, a cabinet, a landmine, a body, a construction with its
+  objective; a nameless part of the map as the wall or ground it is.
+- **Rooms** - ' puts the marker on the nearest room you can walk into,
+  with its name, floor and size; again for the next. Each square of the
+  map survey says how many rooms it has.
+- **Stairs on the way, and on F** - *"Stairs up, ahead left, 3 meters"*
+  before a flight on the way to the marker; jumps name the jump key. F
+  turns to stairs close by, and at their foot straight up or down them.
+- **Sniper spots** - / puts the marker on the nearest high place that
+  looks out a long way - a rooftop, a balcony, a ledge, an upper floor
+  window - and says what it sees; again for the next. Found in the map's
+  own walls and floors, and only those with a way up.
+- **The kind of place** - a street and which way it runs, an alley, a
+  square, a building and its upper floor, a balcony, a roof, a ledge with
+  its drop - said as you come into it, worked out from the map's own
+  walls and floors, on F9, and for each square of the map survey.
+- **Choosing what to use** - ] and [ step through the things to use
+  close by, said without turning you; F then turns to the one chosen and
+  uses it in reach, whatever the crosshair is on.
+- **Aiming, with a key and by itself** - F with nothing under the
+  crosshair turns to the nearest thing to use - using it in reach,
+  naming it further off, the next one on another press; and the enemy
+  lock
+  keeps your sights on an enemy in sight - by itself, or while INS is
+  held - in a game you host or where the server allows it.
+- **The map has the keys while it is open** - the arrows walk the map,
+  and nothing moves until it is closed.
+- **Openings are said as you walk** - *"Opening to the east"* at a side
+  street or a corner, *"Wall to the east"* when it closes again - so you
+  hear where a street begins and ends. Environment - *Openings as you
+  walk* turns it off.
+- **The scoreboard, player stats and top shots speak** - the time left,
+  both teams, where you stand and every player's XP; your kills,
+  accuracy, damage, rank and weapons; the best player with each weapon.
+- **Every door creaks**, including the team doors the server never
+  marks, and a door your team cannot open creaks as locked.
+- **Compass zoom speaks** - which of the fourteen steps it is on and how
+  many metres across the compass shows.
+- **Look up and look down work in a match.** The game deleted both
+  commands every time a match loaded, so the arrow keys did nothing in
+  play.
+- **A marker of your own.** Open the map, walk the cursor to a
+  square and press Keypad 0 - or press it with the map down to mark
+  where you stand. A ping along the way there and distance callouts
+  walk you there - a high ping in front, a lower one to either side and
+  a low double ping behind - and *"Marker reached"* says you have arrived.
+  Keypad dot asks where it is, Keypad star clears it.
+- **The way to the objective, up as well as round.** Keypad plus puts
+  the marker on the objective - press it again for the next one on your
+  command map - and the ping leads you there by stairs,
+  ladders and ledges - *"Jump up, ahead"* at a ledge, F to climb at a
+  ladder - instead of into the wall under an objective on a floor above.
+- **The music gets out of the narrator's way.** A tester turned the
+  music up and found the narrator underneath it - which no volume
+  setting could have fixed, because the music is mixed by the game and
+  the speech goes out through Windows, and neither can see the other.
+  The mod now dips the music while the voice is on it and brings it
+  straight back, using the game's own music fade. Off by default;
+  `eta_musicDuck 0.3` turns it on. A map that fades its own music keeps
+  its level - the dip is a fraction of what the map asked for.
+- **The narrator's voice can be shaped on SAPI 5** - rate, pitch and
+  volume. Not on NVDA, and deliberately so: NVDA speaks at the settings
+  its own user chose, and a game overriding them would be a bug. If you
+  are on NVDA, the music ducking above is the setting that helps.
+- **Settings take effect when you change them.** They used not to: every
+  setting the mod adds was read once at map load and never re-read, so
+  changing one stored the value and changed nothing until the next map,
+  with nothing anywhere to say so.
+- **The arrow keys turn and look.** Stock ET binds no key to either -
+  aiming is the mouse and nothing but the mouse, so the compass could
+  tell you that you were facing south and leave you no way to act on
+  it. Left and right turn on the spot; up and down tip the view, and
+  what you end up pointing at is spoken: *"Open sky"*, *"Concrete
+  ground, 3 meters"*, *"Wooden ceiling"*. It is the same trace the
+  binoculars use, so it never reports through a wall, and it waits for
+  the aim to settle rather than narrating the sweep.
+- **The command map, square by square.** Press the map key to open the
+  map - it stays open until the next press - and the keypad's arrow
+  keys walk a cursor across the map's own lettered grid,
+  saying what is in each square and how far away and in which direction
+  it lies -
+  *"C,3. Axis command post, two teammates. 40 metres, north-east, 52
+  degrees."* The squares are the ones your team reads off their screens.
+  It reports what the game sends your team and nothing more.
+- **The scenery waits when you have asked a question.** Speech has one
+  voice, so a report arriving mid-answer destroys it. Pressing a status
+  or objectives key keeps the scenery quiet for a few seconds. The drop
+  warning is the one exception, and deliberately so.
+- **Stairs** are called ahead of you, up or down, and a single step is
+  told from a flight of them. The ground is measured rather than looked
+  at, and a ramp is left unsaid rather than called stairs.
+- **What you can use** is named when the game shows the icon for it -
+  *"Pliers, build here"*, *"Pliers, defuse here"*, *"Pliers, arm
+  dynamite here"* over your team's own dynamite, *"Dynamite goes
+  here"*, *"Revive"*, *"Health pack"* - with the progress figure where
+  the game draws one beside the icon. The interaction sound still fires
+  the instant the icon appears; the words follow a quarter of a second
+  behind, so turning through a supply room does not read out everything
+  you swept past.
+- **The build is counted out** while you hold the pliers on a
+  construction - *"Building, 27 percent"*, *"Building, 52 percent"*,
+  *"Building, 78 percent"*, *"Building, 91 percent"* - and finishes
+  with *"Construction complete"*. Four figures on the way up rather
+  than continuously, and it counts out again from where a part-built
+  construction actually stands when you come back to it. The
+  completion is the game's own event, the one that fills the bar to
+  the top on screen; the figure itself never reaches 100, because the
+  game resets it in the same frame the work finishes. Every
+  constructible, on every map.
+- **Binoculars and scopes** say which one is up, and what your view runs
+  into - a person and whose side they are on, a door, or the wall,
+  ground or ceiling in front of you and what it is made of. It keeps
+  talking as you sweep across a scene.
+- **Drops** - when the ground in front of you falls away, you are told
+  so and how far down it goes, and whether the fall would hurt or kill
+  you. Those two bands are the game's own falling-damage thresholds
+  worked back into heights, using the gravity actually in play, rather
+  than a guess about what counts as high. It looks where you are going
+  when you are moving and where you are facing when you are standing
+  still.
+- **Water** - wading in, getting deep enough that a jump becomes a
+  swim, going under, and coming back out. Those are the engine's own
+  waterlevels, which is why "deep water" and "swimming" mean something
+  specific: they are the points at which your own movement changes.
+- **Doors creak.** Every door within about ten metres has a creaking
+  sound placed on it, positioned in the world, so it swings around you
+  as you turn and centres when you face it. A locked door creaks
+  differently - duller and slower - so you can hear that it will not
+  open without walking to it. Doors are identified by the game's own
+  classification, not guessed from the entity, so lifts and tank
+  barriers are not mistaken for them.
+- **Construction sites tap, demolition targets hiss, and flags ring.**
+  A site your team can build taps like a hammer on steel; an enemy
+  objective you can blow up - a dynamite target, or an enemy
+  construction that can be destroyed - hisses like a lit fuse; a flag
+  you can capture rings a two-note bell. Within about twenty-five
+  metres, positioned in the world like the doors, and each falls silent
+  once it is built, destroyed or yours.
+- **Spectating or in play is said** as it changes - *"Spectating,
+  following"* a name, *"In play, Allies, Medic"*, *"Down, a medic can
+  revive you"*, *"Waiting to respawn"* - and the status key opens with
+  it.
+- **Ladders are said, and F climbs them** - *"Ladder down, ahead left,
+  2 meters. F climbs"*; F turns you onto it and climbs up or down to the
+  end, stepping off the edge onto a ladder below the way the game needs.
+- **The map survey names flags and counts doors and ladders** in each
+  square - the flags to capture, the doors that are the ways into
+  buildings, and the ladders up and down inside them.
+- **Thrown dynamite is found again.** When your dynamite stops rolling
+  the narrator says where - *"Dynamite down, 2 meters ahead left, not
+  armed"* - and for an engineer F turns to dynamite in sight: your
+  team's to arm, the enemy's armed one to defuse.
+- **Ladders knock.** Every ladder within about fifteen metres, the
+  nearest two at a time, plays three knocks on wooden rungs from the
+  ladder itself, and F turns you to one in sight like anything else to
+  use. Ladders are part of the map's walls, not anything the
+  game sends, so they are read out of the map file as it loads.
+- **Up or down is said** - *"Command post, ahead left, 12 meters, 4
+  meters above you"* - for the objective, the distances called on the
+  way to it, and whatever F turns to, whenever it is two metres or more
+  off your own level.
+- **The crosshair ticks when it is on somebody** - bright for an enemy,
+  low and soft for a teammate, fast enough that a quick sweep across a
+  target still registers. It reads the game's own crosshair, so it never
+  sees through a wall, and a disguised covert operative sounds like a
+  teammate, because that is exactly what a sighted player sees.
+- **Picking anything up** is spoken - health, ammo, a weapon off the
+  ground, an objective - in the game's own words, with how much it gave
+  you and what you now have. A pack you were too full to use says
+  "already full" rather than sounding like one that helped.
+- **Where you are** - the map's own name for the place, *"Old City
+  Wall"*, *"Axis Command Post"*, taken from the same list that fills in
+  the location when a sighted player types in team chat. So the words
+  mean something to your team. Maps that ship no list fall back to the
+  command map's grid square, so there is always an answer. It waits
+  until you have stopped somewhere rather than naming everywhere you
+  walk through, and the status key reports it on demand, along with
+  whether you have open sky overhead - which is what an airstrike or a
+  mortar round needs to reach you.
+- **Which way you are facing** is announced when it changes, and waits
+  for you to stop turning first - a sweep of the mouse says where you
+  ended up rather than reading out every heading it passed through.
+- **Changing weapon** says the weapon, its loaded rounds and what is
+  left in reserve, however the change happened. Every weapon a class can
+  hold has a name, including the ones the game itself leaves blank.
+- **Repeat and stop** - one key says the last line again, another cuts
+  speech off rather than making you wait out a long report.
+- **Cues** - low health, objective change, something you can interact
+  with, the direction damage came from, and the direction of the
+  objective.
+
+The cues are the game's own sounds played through the engine, so they
+follow your volume settings and the two directional ones are positioned
+in the world like any other sound.
+
+
+## What has been heard, and what has not
+
+Everything in this mod compiles, links and passes an automated suite on
+every change, and the parts where being wrong would be worse than being
+silent - which way to turn, which compass point you are facing, how many
+metres away something is, which surface you are standing on - are
+checked against Wolfenstein: Enemy Territory's own code rather than
+against the mod's idea of it.
+
+None of that can tell you whether a cue fires at the right moment,
+whether the speech is too fast or too frequent to follow, whether it
+talks over your screen reader, or whether a direction means anything
+useful while you are actually moving. Those need ears, and the list of
+what has had them is below.
+
+`INSTALL.md` ends with the specific things worth reporting back.
+
+### What is checked, and what is not
+
+Confirmed working with a real screen reader: the menus, the team and
+class panel, text boxes, navigation assistance, the stance narration,
+the named class weapons, the objectives key, the weapon reports, the
+binoculars, the weapon scope, the door creak, the crosshair tick and
+the location narration.
+
+**The command map survey works.** It was played through a full match
+after the key installer was fixed: holding the map key and walking the
+grid gave a starting point, a route to the first
+objective, and the pump on Oasis - which was then built. That is the
+whole point of the feature, tested end to end by someone who cannot see
+the map.
+
+**The objectives are announced in order.** The same session reported
+the narrator naming the primary objective and working down the list,
+which is what the ordering was written for.
+
+**The interaction icons work.** The pliers icon announced itself on the
+construction in that match, which is how the player knew there was
+something there to build at all.
+
+**The locations work.** *"I reached the enemy camp"*, *"I found the pump
+on Oasis, and I did not know that until the narrator told me."*
+
+Confirmed working by a tester in this release: the Accessibility
+settings page, and the music stepping back for the narrator.
+
+Confirmed in play by the tester of beta-0.00.9: tap turning, the
+compass zoom, the marker and the three-page Accessibility menu.
+
+Confirmed in play by the tester of beta-0.01.0: the scoreboard, the
+player stats and the top shots.
+
+Confirmed in play by the tester of beta-0.01.2: F9, the openings as
+you walk, and the menu labels.
+
+Confirmed in play by the tester of beta-0.01.5: the build progress
+while aiming at the construction.
+
+Reported by the tester of beta-0.01.5: the marker's ping still led into
+the wall. That is what this build fixes, tested by walking a player to
+the marker by the ping in a simulation; it has not been heard in play.
+
+Not yet heard by anyone in play: the marker's ping keeping off the walls
+and the loading screen's speech, which are new in this build; the map
+key as a switch
+and the objectives without their stars, new in beta-0.01.3; the
+team-door creak; changing the accessibility keys from the Key Binds page, which
+could not be done until now; the compass naming each point as a held key
+crosses it; and the up-and-down report, which could not be heard in a
+match until the look keys were fixed; the drop warning and the water narration; the objective distance
+countdown; the amounts reported on a pickup; the stairs report; the
+scenery hold; and the ground underfoot and the lean announcements.
+
+The wall report has been heard and corrected three times. The third
+correction - aiming the probe where the player is going rather than
+where they are looking, and speaking only while they are actually
+stopped - has now been through two full test sessions without being
+reported against, which is not the same as somebody confirming it and
+is the best evidence there is.
+
+The compass was heard and reported as unable to keep up with the mouse.
+Not speaking until the view stops turning was the fix; it has been in
+play since without a further report.
+
+What CI proves on every change, against engine checkouts cloned fresh
+and patched from scratch each run. The first nine are checked on both
+supported trees - ET: Legacy, which is what this download is built
+from, and the 2010 GPL release, which is not shipped here. The last
+three apply to ET: Legacy alone, because the weapon table, the menus and
+the shipped config are what this package installs:
+
+- **The directions are not mirrored.** The real bearing expressions are
+  lifted out of the patched engine and compiled against that engine's
+  own maths, then given a target on the player's right. This project
+  told players to turn left when the objective was on their right, in
+  both integrations, and shipped it.
+- **The runtime is actually started.** Every library subsystem the
+  engine reaches must have its Init reached too, followed through the
+  library's own call graph. Narration wired to a backend nobody
+  initialised is silent, compiles cleanly, and is what made alpha-0.1.0
+  speechless.
+- **The keys cannot hang the game.** The repeat and stop commands hand
+  menu requests between the two mod libraries; if that handover ever
+  named a command both answer, it would loop inside the engine with no
+  output at all.
+- **The navigation can find an objective.** The game's own list of
+  objective types is read out of the engine, and the build fails if the
+  narration cannot place one of them, or if anything announces a
+  distance or a direction it did not get from the single lookup that
+  chooses the target. Before this, the target came from a map script
+  command most maps never run, so the whole feature was silent on most
+  maps and no check here could see it.
+- **The stance is the right one.** Going prone sets the game's crouch
+  flag as well, so narration that checks crouch first would call every
+  prone player crouched and never say "prone". The build reads that
+  overlap out of the game's own movement code and fails if the check is
+  written the wrong way round.
+- **The metres are real metres.** Distances are spoken in metres, and
+  the game measures in its own units with no stated conversion. The
+  game does state the size of a person, though, in five separate places
+  - so the build checks that those five come out human-sized. They do:
+  1.83 m standing, 1.63 m to the eye, 1.22 m crouched. A conversion
+  wrong by even a fifth fails all five at once.
+- **The look-ahead reports what the game sees.** "What is in front of
+  me" is answered by the game's own collision, not a guess, and the
+  materials are the flags it uses for footstep sounds. The build fails
+  if either stops being true.
+- **Every icon the game draws has words.** The list of interaction
+  icons is read out of the engine's own drawing code, and the build
+  fails if the mod has nothing to say for one of them - silence there
+  is indistinguishable from there being nothing to use. The same check
+  fails on a mapping written by icon number rather than by name: the
+  two supported trees number these differently and both leave gaps, so
+  a number that is right in one announces the wrong thing in the other.
+- **Nothing picked up goes unspoken.** The narration hangs on the one
+  place both pickup paths funnel through, and speaks the game's own
+  on-screen message; the build fails if either stops being true.
+- **Every weapon has something to say.** The game leaves fifteen of its
+  weapons unnamed, which is why grenades once announced their ammo and
+  nothing else. The build walks every weapon the number keys can reach
+  and fails if any would be announced nameless.
+- **Typed characters are echoed correctly.** The character extractor is
+  lifted out of the patched engine and compiled against the engine's own
+  UTF-8 code, then asked for characters whose answers are known. An echo
+  off by one, or half a multi-byte character handed to a screen reader
+  to pronounce, compiles perfectly and is wrong only to the person
+  listening.
+- **The keys name things that exist** (ET: Legacy only). Every bind and
+  setting in `autoexec.cfg`, *and* every bind the mod installs for
+  itself, is checked against the engine's real command tables. A
+  misspelled command binds successfully and does nothing; a misspelled
+  setting is stored and never read. The mod's own binds are worse than
+  the config's, because there is no file to inspect when they fail.
+
+Each of those exists because of a defect that reached a release or would
+have. Each fails loudly when it finds nothing to check, because a test
+that quietly tests nothing is how every one of them got through.
+
+What none of it can tell you: whether a cue fires at the right moment,
+whether the speech is too fast or too frequent to follow, whether it
+talks over your screen reader, or whether "turn right" means anything
+useful while you are actually moving. Those need ears.
+
+`INSTALL.md` ends with the specific things worth reporting.
+
+
+@HISTORY@

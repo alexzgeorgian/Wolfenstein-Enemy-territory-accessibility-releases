@@ -1,0 +1,317 @@
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 088d6fd..a54b945 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2221,6 +2221,303 @@ static void ETA_NarrateObjectiveApproach(void)
+ 	ETA_NavigationSystem_UpdateApproach((int)(Distance(ps->origin, objective.origin) * ETA_QU_TO_METERS));
+ }
+ 
++/**
++ * @brief How far ahead the look-ahead probe reaches, in Quake units.
++ *
++ * Binoculars are for looking a long way, so this is generous - about 200
++ * metres. Past that "nothing in range" is the honest answer and a more
++ * distant reading would not help anyone.
++ */
++#define ETA_LOOK_AHEAD_RANGE 8192.0f
++
++/**
++ * @brief How much of a change is worth speaking again while zoomed.
++ *
++ * Sweeping the view across a wall should not narrate every frame, but
++ * sweeping it off the wall and onto a doorway should say so at once. The
++ * text itself is the test: a different surface, a different material or
++ * a different entity all change it, and the distance is compared
++ * separately so that closing on the same wall still reports.
++ */
++#define ETA_LOOK_AHEAD_MIN_INTERVAL 500
++#define ETA_LOOK_AHEAD_DISTANCE_STEP 5
++
++/**
++ * @brief Names the material of a surface, from the engine's own flags.
++ *
++ * These are the flags the engine already uses to pick footstep and
++ * impact sounds, so they are the game's own idea of what a surface is
++ * made of rather than a guess of ours. A surface with none of them set
++ * gets no material word, which is why the caller composes rather than
++ * assuming one is always there.
++ *
++ * @param[in] surfaceFlags
++ * @return the material, or NULL when the engine does not say
++ */
++static const char *ETA_SurfaceMaterial(int surfaceFlags)
++{
++	if (surfaceFlags & SURF_METAL)
++	{
++		return "Metal";
++	}
++	if (surfaceFlags & SURF_WOOD)
++	{
++		return "Wooden";
++	}
++	if (surfaceFlags & SURF_GLASS)
++	{
++		return "Glass";
++	}
++	if (surfaceFlags & SURF_GRASS)
++	{
++		return "Grass";
++	}
++	if (surfaceFlags & SURF_GRAVEL)
++	{
++		return "Gravel";
++	}
++	if (surfaceFlags & SURF_SNOW)
++	{
++		return "Snow";
++	}
++	if (surfaceFlags & SURF_CARPET)
++	{
++		return "Carpet";
++	}
++	if (surfaceFlags & SURF_RUBBLE)
++	{
++		return "Rubble";
++	}
++
++	return NULL;
++}
++
++/**
++ * @brief Describes whatever the player's view runs into.
++ *
++ * The binoculars and the scope are for looking at something specific and
++ * finding out what it is. A sighted player gets that from the picture;
++ * this is the same question answered by a trace along the view, which is
++ * the only honest way to say "what is in front of me" - it reports what
++ * the engine says is there, not what the mod guesses.
++ *
++ * Orientation comes from the impact plane rather than from the surface:
++ * a normal pointing up is ground underfoot, pointing down is a ceiling,
++ * and anything between is a wall. That is what makes "wooden wall" and
++ * "gravel ground" come out right without a table of special cases.
++ *
++ * @param[out] out     description, written only when this returns qtrue
++ * @param[in]  outSize
++ * @param[out] distanceMeters set to -1 where no distance means anything
++ * @return qtrue when there is something to say
++ */
++static qboolean ETA_DescribeLookAhead(char *out, size_t outSize, int *distanceMeters)
++{
++	trace_t trace;
++	vec3_t  start, end, forward;
++	int     entityNum;
++
++	if (!cg.snap)
++	{
++		return qfalse;
++	}
++
++	VectorCopy(cg.refdef.vieworg, start);
++	AngleVectors(cg.refdefViewAngles, forward, NULL, NULL);
++	VectorMA(start, ETA_LOOK_AHEAD_RANGE, forward, end);
++
++	CG_Trace(&trace, start, NULL, NULL, end, cg.snap->ps.clientNum, MASK_SHOT);
++
++	if (trace.fraction == 1.0f)
++	{
++		Q_strncpyz(out, "Nothing in range", outSize);
++		*distanceMeters = -1;
++		return qtrue;
++	}
++
++	*distanceMeters = (int)(Distance(start, trace.endpos) * ETA_QU_TO_METERS);
++
++	/* The skybox is not a thing you can walk into, and a distance to it
++	   would be the distance to the edge of the map. */
++	if (trace.surfaceFlags & SURF_SKY)
++	{
++		Q_strncpyz(out, "Open sky", outSize);
++		*distanceMeters = -1;
++		return qtrue;
++	}
++
++	entityNum = trace.entityNum;
++
++	if (entityNum < MAX_CLIENTS)
++	{
++		const clientInfo_t *ci = &cgs.clientinfo[entityNum];
++
++		Q_strncpyz(out, ci->infoValid && ci->name[0] ? ci->name : "Player", outSize);
++
++		/* Which side they are on is the first thing that matters about a
++		   person at the end of a scope. */
++		Q_strcat(out, outSize,
++		         ci->team == cgs.clientinfo[cg.clientNum].team ? ", teammate" : ", enemy");
++		return qtrue;
++	}
++
++	if (entityNum != ENTITYNUM_WORLD)
++	{
++		switch (cg_entities[entityNum].currentState.eType)
++		{
++		case ET_MOVER:
++			Q_strncpyz(out, "Door", outSize);
++			return qtrue;
++		case ET_EXPLOSIVE:
++			Q_strncpyz(out, "Explosive", outSize);
++			return qtrue;
++		case ET_ITEM:
++			Q_strncpyz(out, "Item", outSize);
++			return qtrue;
++		default:
++			Q_strncpyz(out, "Object", outSize);
++			return qtrue;
++		}
++	}
++
++	{
++		const char *material = ETA_SurfaceMaterial(trace.surfaceFlags);
++		const char *kind;
++
++		if (trace.surfaceFlags & SURF_LADDER)
++		{
++			kind = "ladder";
++		}
++		else if (trace.plane.normal[2] > 0.7f)
++		{
++			kind = "ground";
++		}
++		else if (trace.plane.normal[2] < -0.7f)
++		{
++			kind = "ceiling";
++		}
++		else
++		{
++			kind = "wall";
++		}
++
++		if (material)
++		{
++			Com_sprintf(out, outSize, "%s %s", material, kind);
++		}
++		else
++		{
++			/* No material word, so the surface kind carries the sentence
++			   and has to start it. */
++			Com_sprintf(out, outSize, "%c%s", toupper(kind[0]), kind + 1);
++		}
++	}
++
++	return qtrue;
++}
++
++/**
++ * @brief Announces the binoculars and the scope, and what they are aimed at.
++ *
++ * Saying the zoom engaged is worth it on its own: a scope does not always
++ * come up when asked - some weapons refuse while moving or reloading - so
++ * silence after pressing the key is currently indistinguishable from a
++ * scope that did come up.
++ *
++ * While zoomed, the view is re-read and spoken again whenever what it
++ * meets actually changes, which is what makes sweeping the binoculars
++ * across a scene informative rather than a single snapshot. The rate
++ * limit and the distance step stop a slow pan from narrating every frame.
++ */
++static void ETA_NarrateZoom(void)
++{
++	static ETA_Zoom spoken = ETA_ZOOM_OFF;
++	static char     lastDescription[128];
++	static int      lastDistance;
++	static int      lastTime;
++	ETA_Zoom        zoom;
++	char            description[128];
++	int             distance;
++	qboolean        zoomChanged;
++
++	if (!cg.snap || cg.snap->ps.pm_type != PM_NORMAL)
++	{
++		spoken             = ETA_ZOOM_OFF;
++		lastDescription[0] = '\0';
++		return;
++	}
++
++	if (cg.zoomedBinoc)
++	{
++		zoom = ETA_ZOOM_BINOCULARS;
++	}
++	else if (cg.zoomed)
++	{
++		zoom = ETA_ZOOM_SCOPE;
++	}
++	else
++	{
++		zoom = ETA_ZOOM_OFF;
++	}
++
++	zoomChanged = (zoom != spoken);
++
++	if (zoomChanged)
++	{
++		spoken             = zoom;
++		lastDescription[0] = '\0';
++
++		ETA_Speech_BeginReport();
++		ETA_HudNarrator_SpeakZoom(zoom);
++
++		if (zoom == ETA_ZOOM_OFF)
++		{
++			ETA_Speech_EndReport();
++			return;
++		}
++	}
++	else if (zoom == ETA_ZOOM_OFF)
++	{
++		return;
++	}
++
++	if (!ETA_DescribeLookAhead(description, sizeof(description), &distance))
++	{
++		if (zoomChanged)
++		{
++			ETA_Speech_EndReport();
++		}
++		return;
++	}
++
++	if (!zoomChanged)
++	{
++		/* Same thing, near enough the same distance, too soon: stay quiet.
++		   A pan that crosses onto something else fails the first test and
++		   is spoken at once. */
++		if (!Q_stricmp(description, lastDescription)
++		    && abs(distance - lastDistance) < ETA_LOOK_AHEAD_DISTANCE_STEP)
++		{
++			return;
++		}
++
++		if (cg.time - lastTime < ETA_LOOK_AHEAD_MIN_INTERVAL)
++		{
++			return;
++		}
++
++		ETA_Speech_BeginReport();
++	}
++
++	Q_strncpyz(lastDescription, description, sizeof(lastDescription));
++	lastDistance = distance;
++	lastTime     = cg.time;
++
++	ETA_HudNarrator_SpeakLookAhead(description, distance);
++
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Narrates the player's posture when it changes.
+  *
+@@ -5058,6 +5355,8 @@ void CG_DrawActive()
+ 	/* Last, so everything above still sees the previous frame's totals:
+ 	   this is what a pickup next frame will be measured against. */
+ 	CG_AccessibilitySampleTotals();
++
++	ETA_NarrateZoom();
+ #endif
+ 
+ 	if (!cg.showGameView)

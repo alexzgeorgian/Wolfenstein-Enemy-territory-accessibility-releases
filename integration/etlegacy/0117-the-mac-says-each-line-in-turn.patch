@@ -1,0 +1,57 @@
+diff --git a/src/cgame/cg_loadpanel.c b/src/cgame/cg_loadpanel.c
+index aa6571c..0659308 100644
+--- a/src/cgame/cg_loadpanel.c
++++ b/src/cgame/cg_loadpanel.c
+@@ -818,8 +818,11 @@ static qboolean eta_loadingReadySaid = qtrue;
+    over: a second after it, when the Mac has done announcing the game's
+    window coming back, which cut the start of a line said at once; and as
+    lines of their own, "Loaded", the map and its type first, so the map's
+-   name is never what is lost. */
++   name is never what is lost. Each waits for the one before it to have
++   been said: on a Mac a line cuts off the one still being said, and the
++   three said at once left only the last, the team and class key. */
+ #define ETA_LOADED_WAIT_MS 1000
++#define ETA_LOADED_GAP_MS  500
+ static char eta_loadingTitle[256];
+ static char eta_loadingBriefing[ETA_MAX_SPEECH_TEXT_LENGTH + 1];
+ static int  eta_loadedAt;                   /* in trap_Milliseconds; 0 until the load is over */
+@@ -951,9 +954,9 @@ void CG_AccessibilityLoadingFrame(void)
+ 	}
+ 
+ #ifdef __APPLE__
+-	/* A second after the load: "Loaded", the map and its type; the
+-	   briefing kept from the start of the load; then the team and class
+-	   key - each a line of its own. */
++	/* A second after the load: "Loaded", the map and its type; then,
++	   once that has been said, the briefing kept from the start of the
++	   load; then the team and class key - each a line of its own. */
+ 	if (eta_loadingTitle[0])
+ 	{
+ 		if (!eta_loadedAt)
+@@ -965,11 +968,22 @@ void CG_AccessibilityLoadingFrame(void)
+ 		{
+ 			return;
+ 		}
++		ETA_LoadingSay(eta_loadingTitle);
++		eta_loadingBriefingUntil += ETA_LOADED_GAP_MS;
++		eta_loadingTitle[0]       = '\0';
++		return;
++	}
++	if (eta_loadingBriefing[0])
++	{
++		ETA_LoadingSay(eta_loadingBriefing);
++		eta_loadingBriefingUntil += ETA_LOADED_GAP_MS;
++		eta_loadingBriefing[0]    = '\0';
++		return;
++	}
++	if (eta_loadedAt)
++	{
++		/* "Loaded" has been said, with the map. */
+ 		eta_loadingReadySaid = qtrue;
+-		ETA_Speech_Say(eta_loadingTitle);
+-		eta_loadingTitle[0] = '\0';
+-		ETA_Speech_Say(eta_loadingBriefing);
+-		eta_loadingBriefing[0] = '\0';
+ 		if (cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR)
+ 		{
+ 			return;

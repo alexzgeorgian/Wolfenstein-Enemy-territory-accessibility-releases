@@ -1,0 +1,92 @@
+// The Allied covert ops' M1 Garand as RTCW's Snooper, for the RTCW pack
+// (release/make-rtcw-sounds.py) only: No Quarter 1.0.7b's own
+// weapons/m1_garand_s.weap, its game values unchanged, with RTCW's Garand
+// models and icons in place of Enemy Territory's. The pack's sounds give
+// it the Snooper's shot; the game names it the Snooper.
+weaponDef
+{
+	both {
+		name					"Snooper"
+		statname				"Garand"
+		damage					34
+		spread					250
+		spreadRatio				0.9
+		SpreadScaleAdd			50
+	 	SpreadScaleAddRand		20
+		viewchange2spread
+		CrouchSpreadRatio		0.6
+		ProneSpreadRatio		0.6
+		selfKillMessage			"found a way to shoot himself!"
+		KillMessage				"was killed by"
+		KillMessage2			"'s Snooper."
+		headshotWeapon
+		bulletReflection
+	}
+
+	both_altweap {
+		name					"Snooper"
+		damage					50
+		spread					700
+		spreadRatio				10.0
+		SpreadScaleAdd			200
+		velocity2spread
+		recoilDuration			300
+		recoilPitch				0.5
+		recoilYaw				0.5
+		selfKillMessage			"found a way to shoot himself!"
+		KillMessage				"was silenced by"
+		KillMessage2			"'s Snooper."
+		headshotWeapon
+		bulletReflection
+	}
+
+	client {
+		droppedAnglesHack
+		pickupModel				"models/weapons2/garand/garand.mdc"
+		bounceSound				"sound/weapons/weaponbounce.wav"
+		clipBounceSound			"sound/weapons/clipbounce.wav"
+
+		weaponConfig			"models/weapons2/garand/weapon.cfg"
+		handsModel				"models/weapons2/garand/v_garand_hand.mdc"
+
+		flashDlightColor		1.0 0.6 0.23
+		flashSound				"sound/weapons/garand/m1_fire_silence.wav"
+		lastShotSound			"sound/weapons/garand/m1_fire_silence_last.wav"
+
+		reloadSound				"sound/weapons/garand/m1_reload.wav"
+
+		weaponIcon				"icons/iconw_garand_1"
+		weaponSelectedIcon		"icons/iconw_garand_1_select"
+
+		ejectBrassFunc			"MachineGunEjectBrass"
+		brassmodel				"models/weapons2/shells/3006shell.md3"
+
+		firstPerson {
+			model				"models/weapons2/garand/v_garand.mdc"
+			flashModel			"models/weapons2/garand/v_garand_flash.mdc"
+
+			weaponLink
+			{
+				part 0
+				{
+					tag			"tag_barrel"
+					model		"models/weapons2/garand/v_garand_barrel.mdc"
+				}
+				part 1
+				{
+					tag			"tag_barrel2"
+					model		"models/weapons2/garand/v_garand_barrel2.mdc"
+				}
+				part 2
+				{
+					tag			"tag_barrel3"
+					model		"models/weapons2/garand/v_garand_barrel3.mdc"
+				}
+			}
+		}
+
+		thirdPerson {
+			model				"models/weapons2/garand/garand.mdc"
+		}
+	}
+}

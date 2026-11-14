@@ -1,0 +1,87 @@
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index 36f1c74..1a0dbcf 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -30,6 +30,11 @@ If you have questions concerning this license or the applicable additional terms
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#include "speech/speech_manager.h"
++#endif
++
+ extern void CG_StartShakeCamera( float param );
+ extern void CG_Tracer( vec3_t source, vec3_t dest, int sparks );
+ //==========================================================================
+@@ -424,6 +429,57 @@ CG_ItemPickup
+ A new item was picked up this frame
+ ================
+ */
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * Speaks what the player just picked up.
++ *
++ * A sighted player reads this off the popup feed. Without it, walking
++ * over something gives a sound and nothing else.
++ *
++ * The spoken line is built from the engine's own popup text, character
++ * for character, rather than from a table of our own, so the two cannot
++ * drift apart.
++ *
++ * Where the pickup changes a number the player tracks, the new total
++ * follows - health for a health pack, loaded and reserve rounds for an
++ * ammo pack. Deliberately the resulting total rather than the amount
++ * gained: how much a pack gives depends on the receiver's class and
++ * skill and is decided on the server, while what the player needs to
++ * know is whether they are resupplied. It is the same number, from the
++ * same helper, that the status report gives.
++ */
++static void ETA_NarrateItemPickup( int itemNum ) {
++	gitem_t *item = &bg_itemlist[itemNum];
++	char text[256];
++
++	if ( !cg.snap ) {
++		return;
++	}
++
++	/* Exactly the expression CG_AddPMItem below is given, copied into our
++	   own storage before anything else can reuse va()'s buffers. */
++	Q_strncpyz( text, va( "Picked up %s", CG_PickupItemText( itemNum ) ), sizeof( text ) );
++
++	ETA_Speech_BeginReport();
++
++	ETA_Speech_Say( text );
++
++	if ( item->giType == IT_HEALTH ) {
++		ETA_HudNarrator_SpeakHealth( cg.snap->ps.stats[STAT_HEALTH] );
++	} else if ( item->giType == IT_AMMO || ( item->giType == IT_WEAPON && item->giTag == WP_AMMO ) ) {
++		int ammo, clips, akimboammo;
++
++		CG_PlayerAmmoValue( &ammo, &clips, &akimboammo );
++
++		if ( ammo >= 0 ) {
++			ETA_HudNarrator_SpeakAmmoDetail( ammo + ( akimboammo > 0 ? akimboammo : 0 ), clips );
++		}
++	}
++
++	ETA_Speech_EndReport();
++}
++#endif
++
+ static void CG_ItemPickup( int itemNum ) {
+ 	int itemid;
+ 	int wpbank_cur, wpbank_pickup;
+@@ -432,6 +488,12 @@ static void CG_ItemPickup( int itemNum ) {
+ 
+ 	CG_AddPMItem( PM_MESSAGE, va( "Picked up %s", CG_PickupItemText( itemNum ) ), cgs.media.pmImages[PM_MESSAGE] );
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Both pickup events funnel through here, and only for the local
++	   player, so this is the one place a pickup has to be caught. */
++	ETA_NarrateItemPickup( itemNum );
++#endif
++
+ //	cg.itemPickup			= itemNum;
+ //	cg.itemPickupTime		= cg.time;
+ //	cg.itemPickupBlendTime	= cg.time;

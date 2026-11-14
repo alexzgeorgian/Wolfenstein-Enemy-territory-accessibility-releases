@@ -1,0 +1,103 @@
+diff --git a/src/cgame/cg_event.c b/src/cgame/cg_event.c
+index bef3f82..a78a8a6 100644
+--- a/src/cgame/cg_event.c
++++ b/src/cgame/cg_event.c
+@@ -36,6 +36,11 @@
+ #include "cg_local.h"
+ #include "../game/bg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++#include "hud/hud_narrator.h"
++#include "speech/speech_manager.h"
++#endif
++
+ extern void CG_StartShakeCamera(float param);
+ extern void CG_Tracer(vec3_t source, vec3_t dest, int sparks);
+ //==========================================================================
+@@ -465,6 +470,73 @@ static void CG_Obituary(entityState_t *ent)
+ // from cg_weapons.c
+ extern int CG_WeaponIndex(int weapnum, int *bank, int *cycle);
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Speaks what the player just picked up.
++ *
++ * A sighted player reads this off the popup feed. Without it, walking
++ * over something gives a sound and nothing else - the tester knew what
++ * they had found only because they still remembered the stock sound
++ * effects, which is not something a new player has.
++ *
++ * The spoken line is built from the engine's own popup text, character
++ * for character, rather than from a table of our own: the two cannot
++ * then drift apart, and it inherits the engine's translations for free.
++ *
++ * Where the pickup changes a number the player tracks, the new total
++ * follows - health for a health pack, loaded and reserve rounds for an
++ * ammo pack. Deliberately the resulting total rather than the amount
++ * gained: how much a pack gives depends on the receiver's class and
++ * skill and is decided on the server, whereas what the player actually
++ * needs to know is whether they are resupplied. It is also the same
++ * number, from the same helper, that the health and ammo keys report, so
++ * there is no second vocabulary to disagree with the first.
++ *
++ * Weapons and objectives get the name alone. A weapon announces its own
++ * ammo when it reaches the player's hands, and "an Objective" is the
++ * whole of what matters about carrying one.
++ *
++ * @param[in] itemNum
++ * @param[in] item
++ */
++static void ETA_NarrateItemPickup(int itemNum, const gitem_t *item)
++{
++	char text[256];
++
++	if (!cg.snap)
++	{
++		return;
++	}
++
++	/* Exactly the expression CG_AddPMItem below is given, copied into our
++	   own storage before anything else can reuse va()'s buffers. */
++	Q_strncpyz(text, va(CG_TranslateString("Picked up %s"),
++	                    CG_TranslateString(CG_PickupItemText(itemNum))), sizeof(text));
++
++	ETA_Speech_BeginReport();
++
++	ETA_Speech_Say(text);
++
++	if (item->giType == IT_HEALTH)
++	{
++		ETA_HudNarrator_SpeakHealth(cg.snap->ps.stats[STAT_HEALTH]);
++	}
++	else if (item->giType == IT_AMMO || (item->giType == IT_WEAPON && item->giWeapon == WP_AMMO))
++	{
++		int ammo, clips, akimboammo, maxammo;
++
++		CG_PlayerAmmoValue(&ammo, &clips, &akimboammo, &maxammo, NULL);
++
++		if (ammo >= 0)
++		{
++			ETA_HudNarrator_SpeakAmmoDetail(ammo + (akimboammo > 0 ? akimboammo : 0), clips);
++		}
++	}
++
++	ETA_Speech_EndReport();
++}
++#endif
++
+ /**
+  * @brief A new item was picked up this frame
+  * @param[in] itemNum
+@@ -512,6 +584,12 @@ static void CG_ItemPickup(int itemNum)
+ 	CG_AddPMItem(giType, va(CG_TranslateString("Picked up %s"), CG_TranslateString(CG_PickupItemText(itemNum))), " ", cgs.media.pmImages[giType], 0, 0, colorWhite);
+ #endif
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* Both pickup events funnel through here, and only for the local
++	   player, so this is the one place a pickup has to be caught. */
++	ETA_NarrateItemPickup(itemNum, item);
++#endif
++
+ 	// see if it should be the grabbed weapon
+ 	if (item->giType == IT_WEAPON)
+ 	{

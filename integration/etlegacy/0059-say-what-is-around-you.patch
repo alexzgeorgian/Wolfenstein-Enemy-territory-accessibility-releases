@@ -1,0 +1,543 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 330413e..17331fd 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1564,6 +1564,15 @@ static void CG_AccessibilityMarkerClear_f(void)
+ 	CG_AccessibilityMarkerClear();
+ }
+ 
++/**
++ * @brief "What is around me" - see cg_draw.c.
++ */
++static void CG_AccessibilitySurroundings_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	CG_AccessibilitySurroundings();
++}
++
+ /**
+  * @brief Turning with the keys the way the mouse turns.
+  *
+@@ -4595,6 +4604,7 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
+ 	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
++	{ "accessibilitySurroundings", CG_AccessibilitySurroundings_f },
+ 	{ "+accessibilityTurnLeft",   CG_AccessibilityTurnLeftDown_f },
+ 	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
+ 	{ "+accessibilityTurnRight",  CG_AccessibilityTurnRightDown_f },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 1132a23..1447b71 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -2385,6 +2385,14 @@ static void ETA_DescribeTraceHit(const trace_t *trace, char *out, size_t outSize
+ 
+ 	if (entityNum != ENTITYNUM_WORLD)
+ 	{
++		/* A named thing is its name - "Truck" at the end of the scope
++		   rather than "Object". */
++		if (CG_AccessibilityObjectName(&cg_entities[entityNum].currentState, out, outSize))
++		{
++			out[0] = (char)toupper(out[0]);
++			return;
++		}
++
+ 		switch (cg_entities[entityNum].currentState.eType)
+ 		{
+ 		case ET_MOVER:
+@@ -3257,6 +3265,397 @@ static void ETA_BeaconDoors(void)
+ 	}
+ }
+ 
++/**
++ * @brief A spoken name from a model's file name.
++ *
++ * A sighted player sees a truck; the game only knows a file called
++ * truck_base.md3. The file names are the map makers' own words for what
++ * they placed, so they are the honest source - a handful of common ones
++ * are turned into the word a person would use, and anything else is read
++ * as its file name without the path, the extension or the underscores.
++ */
++static void ETA_NameFromModelPath(const char *path, char *out, size_t outSize)
++{
++	static const struct
++	{
++		const char *fragment;
++		const char *name;
++	} known[] =
++	{
++		{ "tank_trap",   "tank trap"      },
++		{ "tanktrap",    "tank trap"      },
++		{ "truck",       "truck"          },
++		{ "tank",        "tank"           },
++		{ "health",      "health cabinet" },
++		{ "ammo",        "ammo cabinet"   },
++		{ "chair",       "chair"          },
++		{ "table",       "table"          },
++		{ "desk",        "desk"           },
++		{ "bench",       "bench"          },
++		{ "bed",         "bed"            },
++		{ "shelf",       "shelf"          },
++		{ "crate",       "crate"          },
++		{ "barrel",      "barrel"         },
++		{ "sandbag",     "sandbags"       },
++		{ "radio",       "radio"          },
++		{ "flag",        "flag"           },
++		{ "boat",        "boat"           },
++		{ "train",       "train"          },
++		{ "gate",        "gate"           },
++		{ "lamp",        "lamp"           },
++	};
++	const char *start = strrchr(path, '/');
++	char       base[MAX_QPATH];
++	size_t     i, length;
++
++	COM_StripExtension(start ? start + 1 : path, base, sizeof(base));
++	Q_strlwr(base);
++
++	for (i = 0; i < sizeof(known) / sizeof(known[0]); i++)
++	{
++		if (strstr(base, known[i].fragment))
++		{
++			Q_strncpyz(out, known[i].name, outSize);
++			return;
++		}
++	}
++
++	for (i = 0; base[i]; i++)
++	{
++		if (base[i] == '_' || base[i] == '-')
++		{
++			base[i] = ' ';
++		}
++	}
++
++	/* "crate2", "wall_03": a number that only tells copies apart. */
++	length = strlen(base);
++	while (length > 0 && (base[length - 1] == ' ' || (base[length - 1] >= '0' && base[length - 1] <= '9')))
++	{
++		base[--length] = '\0';
++	}
++
++	Q_strncpyz(out, base, outSize);
++}
++
++/**
++ * @brief What an entity is, in words - or qfalse when there is no honest name.
++ *
++ * The engine's own classification first where it has one - a pickup's
++ * name, the chair and door hints - and the model file after that. Nothing
++ * is guessed from shape: a thing with no name is left out rather than
++ * called something it might not be.
++ */
++qboolean CG_AccessibilityObjectName(const entityState_t *es, char *out, size_t outSize)
++{
++	int      index;
++	qboolean opens;
++
++	out[0] = '\0';
++
++	switch (es->eType)
++	{
++	case ET_ITEM:
++	{
++		gitem_t *item = BG_GetItem(es->modelindex);
++
++		if (item && item->pickup_name && item->pickup_name[0])
++		{
++			Q_strncpyz(out, item->pickup_name, outSize);
++			return qtrue;
++		}
++		return qfalse;
++	}
++	case ET_MOVER:
++		if (es->dmgFlags == HINT_CHAIR)
++		{
++			Q_strncpyz(out, "chair", outSize);
++			return qtrue;
++		}
++		if (ETA_HintIsDoor(es->dmgFlags)
++		    || (es->solid == SOLID_BMODEL && CG_AccessibilityDoorModel(es->modelindex, &opens)))
++		{
++			Q_strncpyz(out, "door", outSize);
++			return qtrue;
++		}
++		break;
++	case ET_GENERAL:
++	case ET_GAMEMODEL:
++	case ET_PROP:
++		break;
++	default:
++		return qfalse;
++	}
++
++	/* A brush entity draws its model from the second slot; anything else
++	   from the first. */
++	index = (es->solid == SOLID_BMODEL) ? es->modelindex2 : es->modelindex;
++
++	if (index > 0 && index < MAX_MODELS)
++	{
++		const char *path = CG_ConfigString(CS_MODELS + index);
++
++		if (path && path[0] && path[0] != '*')
++		{
++			ETA_NameFromModelPath(path, out, outSize);
++			return (qboolean)(out[0] != '\0');
++		}
++	}
++
++	return qfalse;
++}
++
++/**
++ * @brief How far "what is around me" looks, and what it lists.
++ *
++ * Fifty metres is further than any room and most streets, so a trace
++ * that gets there is an open way rather than a wall. Eight metres is the
++ * line between the two: past it a direction is somewhere you could go.
++ */
++#define ETA_SURROUND_RANGE        2048.0f
++#define ETA_SURROUND_OPEN_METERS  8
++#define ETA_SURROUND_WINDOW_METERS 15
++#define ETA_SURROUND_OBJECT_RANGE 800.0f
++#define ETA_SURROUND_MAX_OBJECTS  6
++
++typedef struct
++{
++	char  name[64];
++	vec3_t origin;
++	float distance;
++	int   entityNum;    /* -1 for a static model */
++} eta_nearby_t;
++
++static void ETA_SurroundAddNearby(eta_nearby_t *list, int *count, int max,
++                                  const char *name, const vec3_t origin, int entityNum)
++{
++	float distance = Distance(cg.predictedPlayerState.origin, origin);
++	int   i, at;
++
++	if (distance > ETA_SURROUND_OBJECT_RANGE)
++	{
++		return;
++	}
++
++	/* Two halves of a double door, a stack of crates: one mention. */
++	for (i = 0; i < *count; i++)
++	{
++		if (!Q_stricmp(list[i].name, name) && Distance(list[i].origin, origin) < 150.0f)
++		{
++			return;
++		}
++	}
++
++	/* Nearest first; the list is short. */
++	for (at = *count; at > 0 && list[at - 1].distance > distance; at--)
++	{
++		if (at < max)
++		{
++			list[at] = list[at - 1];
++		}
++	}
++
++	if (at >= max)
++	{
++		return;
++	}
++
++	Q_strncpyz(list[at].name, name, sizeof(list[at].name));
++	VectorCopy(origin, list[at].origin);
++	list[at].distance  = distance;
++	list[at].entityNum = entityNum;
++
++	if (*count < max)
++	{
++		(*count)++;
++	}
++}
++
++/**
++ * @brief "What is around me": the ways out, the walls, and what is there.
++ *
++ * A sighted player walking into a room takes it in at once - the doors,
++ * the window, the truck parked across the street - and a tester who
++ * could hear the truck asked how they were meant to know it was there.
++ * This is that glance, on a key.
++ *
++ * The ways out are eight traces at eye height, one per compass point,
++ * against the same collision the player moves through: a direction that
++ * runs more than a few metres is somewhere to go, and one that stops
++ * short is a wall. A trace that ends on glass is a window. The things
++ * are the named objects close by - the snapshot's own, and the static
++ * models the map placed - nearest first, each with its direction and
++ * distance and whether there is a clear line to it.
++ */
++void CG_AccessibilitySurroundings(void)
++{
++	char         open[256];
++	char         walls[160];
++	char         windows[160];
++	char         blocked[192];
++	eta_nearby_t nearby[ETA_SURROUND_MAX_OBJECTS];
++	int          count = 0;
++	vec3_t       eye;
++	int          d, i;
++
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		ETA_Speech_BeginReport();
++		ETA_Speech_Say("Nothing to describe until you are in play");
++		ETA_Speech_EndReport();
++		return;
++	}
++
++	VectorCopy(cg.predictedPlayerState.origin, eye);
++	eye[2] += cg.predictedPlayerState.viewheight;
++
++	open[0] = walls[0] = windows[0] = blocked[0] = '\0';
++
++	for (d = 0; d < 8; d++)
++	{
++		trace_t    trace;
++		vec3_t     angles, forward, end;
++		const char *name = ETA_HudNarrator_FacingName((ETA_Facing)d);
++		char       thing[64];
++		int        meters;
++
++		/* Compass bearing d * 45, clockwise from north; ET's yaw puts
++		   north at 90 and runs the other way. */
++		VectorSet(angles, 0.0f, 90.0f - 45.0f * (float)d, 0.0f);
++		AngleVectors(angles, forward, NULL, NULL);
++		VectorMA(eye, ETA_SURROUND_RANGE, forward, end);
++
++		CG_Trace(&trace, eye, NULL, NULL, end, cg.snap->ps.clientNum, MASK_PLAYERSOLID);
++
++		meters = (int)(trace.fraction * ETA_SURROUND_RANGE * ETA_QU_TO_METERS);
++
++		/* What stops the way, when it is a thing rather than the map:
++		   the truck across the street, a door. */
++		thing[0] = '\0';
++		if (trace.fraction < 1.0f && trace.entityNum != ENTITYNUM_WORLD && trace.entityNum < MAX_GENTITIES)
++		{
++			CG_AccessibilityObjectName(&cg_entities[trace.entityNum].currentState, thing, sizeof(thing));
++		}
++
++		if (trace.fraction >= 1.0f)
++		{
++			Q_strcat(open, sizeof(open), va("%s%s, far", open[0] ? ", " : "", name));
++		}
++		else if (meters > ETA_SURROUND_OPEN_METERS)
++		{
++			Q_strcat(open, sizeof(open), va("%s%s %d meters%s%s", open[0] ? ", " : "", name, meters,
++			                                thing[0] ? " to a " : "", thing));
++		}
++		else if (thing[0])
++		{
++			Q_strcat(blocked, sizeof(blocked), va("%s%s to the %s", blocked[0] ? ", " : "", thing, name));
++		}
++		else
++		{
++			Q_strcat(walls, sizeof(walls), va("%s%s", walls[0] ? ", " : "", name));
++		}
++
++		if (trace.fraction < 1.0f && (trace.surfaceFlags & SURF_GLASS)
++		    && meters <= ETA_SURROUND_WINDOW_METERS)
++		{
++			Q_strcat(windows, sizeof(windows), va("%s%s %d meters", windows[0] ? ", " : "", name, meters));
++		}
++	}
++
++	/* The things close by: the snapshot's entities, then the map's
++	   static models. */
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		char                name[64];
++		vec3_t              origin;
++
++		if (!CG_AccessibilityObjectName(es, name, sizeof(name)))
++		{
++			continue;
++		}
++
++		VectorCopy(cg_entities[es->number].lerpOrigin, origin);
++		if (es->solid == SOLID_BMODEL && es->modelindex > 0 && es->modelindex < MAX_MODELS)
++		{
++			VectorAdd(origin, cgs.inlineModelMidpoints[es->modelindex], origin);
++		}
++
++		ETA_SurroundAddNearby(nearby, &count, ETA_SURROUND_MAX_OBJECTS, name, origin, es->number);
++	}
++
++	for (i = 0; i < cg.numMiscGameModels && i < MAX_STATIC_GAMEMODELS; i++)
++	{
++		const char *path = CG_AccessibilityGameModelPath(i);
++		char       name[64];
++
++		if (!path[0])
++		{
++			continue;
++		}
++
++		ETA_NameFromModelPath(path, name, sizeof(name));
++		if (name[0])
++		{
++			ETA_SurroundAddNearby(nearby, &count, ETA_SURROUND_MAX_OBJECTS, name,
++			                      cgs.miscGameModels[i].org, -1);
++		}
++	}
++
++	ETA_HudNarrator_HoldPassive(cg.time);
++	ETA_Speech_BeginReport();
++
++	ETA_Speech_Say(ETA_OverheadState() == ETA_OVERHEAD_OPEN_SKY ? "Outdoors" : "Indoors");
++
++	ETA_Speech_Say(open[0] ? va("Open to the %s", open) : "No way out further than a few meters");
++
++	if (walls[0])
++	{
++		ETA_Speech_Say(va("Walls close to the %s", walls));
++	}
++
++	if (blocked[0])
++	{
++		ETA_Speech_Say(va("Close by, %s", blocked));
++	}
++
++	if (windows[0])
++	{
++		ETA_Speech_Say(va("Window to the %s", windows));
++	}
++
++	if (count == 0)
++	{
++		ETA_Speech_Say("Nothing named close by");
++	}
++
++	for (i = 0; i < count; i++)
++	{
++		trace_t trace;
++		vec3_t  delta, target;
++		int     meters = (int)(nearby[i].distance * ETA_QU_TO_METERS);
++
++		VectorSubtract(nearby[i].origin, cg.predictedPlayerState.origin, delta);
++
++		/* In sight when nothing solid stands between the eye and it -
++		   the thing itself, being solid, counts as reaching it. Aimed a
++		   little above where it stands: a model's origin is on the
++		   ground, and a line to the floor it sits on is cut by the
++		   floor. */
++		VectorCopy(nearby[i].origin, target);
++		target[2] += 16.0f;
++		CG_Trace(&trace, eye, NULL, NULL, target, cg.snap->ps.clientNum, MASK_SOLID);
++
++		ETA_Speech_Say(va("%s, %d meters %s%s", nearby[i].name, meters,
++		                  ETA_HudNarrator_FacingName(ETA_HudNarrator_FacingFromYaw(vectoyaw(delta))),
++		                  (trace.fraction >= 1.0f
++		                   || (nearby[i].entityNum >= 0 && trace.entityNum == nearby[i].entityNum))
++		                  ? "" : ", out of sight"));
++	}
++
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief Says, continuously, that the crosshair is on somebody.
+  *
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index b560e7f..ff96bfd 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3457,6 +3457,11 @@ void CG_AccessibilityTopshotsPressed(qboolean requested);
+ 
+ /* The map's doors, read from its entity list. See cg_spawn.c. */
+ qboolean CG_AccessibilityDoorModel(int modelindex, qboolean *opens);
++const char *CG_AccessibilityGameModelPath(int index);
++
++/* "What is around me". See cg_draw.c. */
++qboolean CG_AccessibilityObjectName(const entityState_t *es, char *out, size_t outSize);
++void CG_AccessibilitySurroundings(void);
+ qboolean CG_AccessibilityTurnBusy(void);
+ void CG_AccessibilityTurnShutdown(void);
+ 
+diff --git a/src/cgame/cg_spawn.c b/src/cgame/cg_spawn.c
+index 773b890..c9dd9d7 100644
+--- a/src/cgame/cg_spawn.c
++++ b/src/cgame/cg_spawn.c
+@@ -35,6 +35,12 @@
+ 
+ #include "cg_local.h"
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/* The model file behind each of cgs.miscGameModels, by slot. See
++   SP_misc_gamemodel. */
++static char eta_gameModelPaths[MAX_STATIC_GAMEMODELS][MAX_QPATH];
++#endif
++
+ /**
+  * @brief CG_SpawnString
+  * @param[in] key
+@@ -304,6 +310,15 @@ void SP_misc_gamemodel(void)
+ 
+ 	gamemodel = &cgs.miscGameModels[cg.numMiscGameModels++];
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* The furniture a map places as misc_gamemodel is drawn by the cgame
++	   and never sent in a snapshot, so this is the one place its name -
++	   the model file - is known. Kept beside the slot so the
++	   surroundings report can name a table or a crate by it. */
++	Q_strncpyz(eta_gameModelPaths[cg.numMiscGameModels - 1], model,
++	           sizeof(eta_gameModelPaths[0]));
++#endif
++
+ 	// don't register models more than once (f.e. after warmup or map_restart)
+ 	if (gamemodel->model == 0)
+ 	{
+@@ -398,6 +413,19 @@ void SP_team_WOLF_objective(void)
+ }
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief The model file of one of the map's static game models.
++ */
++const char *CG_AccessibilityGameModelPath(int index)
++{
++	if (index < 0 || index >= cg.numMiscGameModels || index >= MAX_STATIC_GAMEMODELS)
++	{
++		return "";
++	}
++
++	return eta_gameModelPaths[index];
++}
++
+ /**
+  * @brief Which brush models are doors, read from the map itself.
+  *
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 1e021ea..bed1be2 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8920,7 +8920,11 @@ void UI_AccessibilityInstallBinds(void)
+ 		   the command this table put there is moved; the plain turns
+ 		   stay on the Key Binds page for anyone who wants them. */
+ 		{ K_LEFTARROW,    "+accessibilityTurnLeft",  "+left",        7 },
+-		{ K_RIGHTARROW,   "+accessibilityTurnRight", "+right",       7 }
++		{ K_RIGHTARROW,   "+accessibilityTurnRight", "+right",       7 },
++		/* "What is around me". F9 is free in the stock right-handed
++		   layout, next to the report keys on F5, F6 and F8; the
++		   left-handed one opens the stats there, and keeps them. */
++		{ K_F9,           "accessibilitySurroundings", NULL,         8 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 079b5b8..eb7f784 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -873,6 +873,7 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },
+ #endif
+ };
+ 

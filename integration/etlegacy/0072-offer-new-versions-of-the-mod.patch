@@ -1,0 +1,389 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 147aa15..5675def 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -37,6 +37,12 @@
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "core/accessibility_runtime.h"
+ #include "menu/menu_narrator.h"
++#include "platform/windows/windows_update.h"
++#include "update/update_check.h"
++#endif
++
++#ifdef FEATURE_ACCESSIBILITY
++static void UI_AccessibilityUpdateFrame(void);
+ #endif
+ #include "../qcommon/q_oss.h"
+ #include "ui_cvars.h"
+@@ -1075,6 +1081,10 @@ void UI_Refresh(int realtime)
+ 		UI_FillRect(-10, -10, 650, 490, colorBlack);
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	UI_AccessibilityUpdateFrame();
++#endif
++
+ 	if (Menu_Count() > 0)
+ 	{
+ 		// paint all the menus
+@@ -1112,6 +1122,9 @@ void UI_Shutdown(void)
+ 	int i = 0;
+ 
+ #ifdef FEATURE_ACCESSIBILITY
++	/* Before anything else: a download still running is on a thread
++	   inside this module, which is about to be unloaded. */
++	ETA_WindowsUpdate_Shutdown();
+ 	ETA_MenuNarrator_Shutdown();
+ 	ETA_AccessibilityRuntime_Shutdown();
+ #endif
+@@ -1587,6 +1600,9 @@ void UI_LoadMenus(const char *menuFile, qboolean reset)
+ 	/* And one for hosting your own game: bots, and friends joining with
+ 	   the plain game. */
+ 	UI_ParseMenu("ui/options_accessibility_hosting.menu");
++
++	/* The popups that offer a newer version of the mod. */
++	UI_ParseMenu("ui/accessibility_update.menu");
+ #endif
+ 
+ 	Com_DPrintf("UI menu load time = %d milli seconds\n", trap_Milliseconds() - start);
+@@ -4956,6 +4972,318 @@ static void UI_AccessibilityHostServer(void)
+ 	                                     (int)Com_Clamp(1, 6, eta_hostBotSkill.integer),
+ 	                                     (int)Com_Clamp(1, MAX_CLIENTS, eta_hostBots.integer)));
+ }
++
++/*
++ * Offering a newer version of the mod from inside the game.
++ *
++ * Once a game run, a few seconds after the main menu is up, the mod asks
++ * its release page for eta-update.txt. If that names a newer version, a
++ * popup reads the offer out: download it, or later. If the new version
++ * is for a newer ET: Legacy than the one running, the popup says to
++ * update the game first instead, because a mod built for another engine
++ * loads to a silent game, and a player who cannot see the screen has no
++ * way to tell that from a broken install.
++ *
++ * The download goes to the Documents copy of the legacy folder, which
++ * the engine searches before the one where the game is installed, and
++ * which needs no administrator to write to. It is checked against the
++ * release's checksum before anything is put in place, and the swap
++ * itself waits for the game to exit (windows_update.c says why).
++ *
++ * The ACCESSIBILITY menu has a button to check by hand, which also
++ * answers when there is nothing new, and eta_updateCheck 0 stops the
++ * check at start-up.
++ */
++static vmCvar_t eta_updateCheck;
++
++typedef enum
++{
++	ETA_UPDATE_STAGE_IDLE = 0,
++	ETA_UPDATE_STAGE_CHECKING,
++	ETA_UPDATE_STAGE_DOWNLOADING,
++	ETA_UPDATE_STAGE_DOWNLOADED
++} etaUpdateStage_t;
++
++static struct
++{
++	etaUpdateStage_t stage;
++	qboolean manual;            /* asked from the menu: answer even "nothing new" */
++	const char *popup;          /* waiting for the menus to be up */
++	int startTime;
++	ETA_UpdateManifest manifest;
++	char target[MAX_OSPATH];    /* where the pk3 goes */
++	char download[MAX_OSPATH];  /* where it lands first */
++} etaUpdate;
++
++static void UI_AccessibilityUpdateSay(const char *text)
++{
++	ETA_MenuNarrator_OnConfirmDialogShown(text);
++}
++
++static void UI_AccessibilityRegisterUpdateCvars(void)
++{
++	trap_Cvar_Register(&eta_updateCheck, "eta_updateCheck", "1", CVAR_ARCHIVE);
++	trap_Cvar_Register(NULL, "eta_updateMessage", "", CVAR_TEMP);
++	/* Survives the ui module being reloaded, so the check is once a run
++	   rather than once each time the menus come back. */
++	trap_Cvar_Register(NULL, "eta_updateAsked", "0", CVAR_TEMP);
++
++	Com_Memset(&etaUpdate, 0, sizeof(etaUpdate));
++	etaUpdate.startTime = trap_Milliseconds();
++}
++
++static qboolean UI_AccessibilityAtMenus(void)
++{
++	uiClientState_t cstate;
++
++	trap_GetClientState(&cstate);
++	return cstate.connState <= CA_DISCONNECTED && Menu_Count() > 0
++	       && (trap_Key_GetCatcher() & KEYCATCH_UI);
++}
++
++static qboolean UI_AccessibilityUpdatePaths(void)
++{
++	char home[MAX_OSPATH];
++	char game[MAX_QPATH];
++
++	trap_Cvar_VariableStringBuffer("fs_homepath", home, sizeof(home));
++	trap_Cvar_VariableStringBuffer("fs_game", game, sizeof(game));
++
++	if (!home[0])
++	{
++		return qfalse;
++	}
++
++	Com_sprintf(etaUpdate.target, sizeof(etaUpdate.target), "%s%c%s%c%s",
++	            home, PATH_SEP, game[0] ? game : "legacy", PATH_SEP, ETA_UPDATE_PACKAGE_NAME);
++	Com_sprintf(etaUpdate.download, sizeof(etaUpdate.download), "%s.download", etaUpdate.target);
++	return qtrue;
++}
++
++static void UI_AccessibilityUpdateStartCheck(qboolean manual)
++{
++	etaUpdate.manual = manual;
++
++	if (ETA_WindowsUpdate_StartFetch(ETA_UPDATE_MANIFEST_URL))
++	{
++		etaUpdate.stage = ETA_UPDATE_STAGE_CHECKING;
++	}
++	else if (manual)
++	{
++		UI_AccessibilityUpdateSay("The update check could not start.");
++	}
++}
++
++static void UI_AccessibilityUpdateChecked(void)
++{
++	char            engine[MAX_CVAR_VALUE_STRING];
++	char            words[512];
++	ETA_UpdateOffer offer = ETA_UPDATE_NONE;
++
++	trap_Cvar_VariableStringBuffer("etVersion", engine, sizeof(engine));
++
++	if (ETA_Update_ParseManifest(ETA_WindowsUpdate_Text(), &etaUpdate.manifest))
++	{
++		offer = ETA_Update_Decide(&etaUpdate.manifest, ETA_Update_InstalledVersion(),
++		                          engine, ETA_Update_BuiltEngine());
++	}
++	else if (etaUpdate.manual)
++	{
++		UI_AccessibilityUpdateSay("The release page did not say which version is newest. Try again later.");
++		return;
++	}
++
++	if (offer == ETA_UPDATE_NONE)
++	{
++		if (etaUpdate.manual)
++		{
++			char version[ETA_UPDATE_MAX_VERSION_LENGTH + 1];
++
++			ETA_Update_SpokenVersion(ETA_Update_InstalledVersion(), version, sizeof(version));
++			UI_AccessibilityUpdateSay(va("You have the newest version, %s.", version));
++		}
++		return;
++	}
++
++	ETA_Update_DescribeOffer(offer, &etaUpdate.manifest, ETA_Update_InstalledVersion(), words, sizeof(words));
++	trap_Cvar_Set("eta_updateMessage", words);
++	etaUpdate.popup = offer == ETA_UPDATE_INSTALL ? "eta_update_offer" : "eta_update_game";
++}
++
++static void UI_AccessibilityUpdateDownloaded(void)
++{
++	char version[ETA_UPDATE_MAX_VERSION_LENGTH + 1];
++
++	/* The size first: a page that cut off part way hashes to something
++	   else as well, but saying so is cheaper than proving it. */
++	if (ETA_WindowsUpdate_DownloadedBytes() != etaUpdate.manifest.size
++	    || Q_stricmp(ETA_WindowsUpdate_DownloadSha256(), etaUpdate.manifest.sha256))
++	{
++		ETA_WindowsUpdate_RemoveFile(etaUpdate.download);
++		etaUpdate.stage = ETA_UPDATE_STAGE_IDLE;
++		UI_AccessibilityUpdateSay("The download arrived damaged, so it was not used. Your version is unchanged. Try again later.");
++		return;
++	}
++
++	ETA_Update_SpokenVersion(etaUpdate.manifest.version, version, sizeof(version));
++	trap_Cvar_Set("eta_updateMessage",
++	              va("Accessibility mode %s is downloaded. Restart the game now to start using it?", version));
++	etaUpdate.stage = ETA_UPDATE_STAGE_DOWNLOADED;
++	etaUpdate.popup = "eta_update_ready";
++}
++
++/**
++ * @brief Runs the update check along, once a frame.
++ */
++static void UI_AccessibilityUpdateFrame(void)
++{
++	ETA_WindowsUpdateState state;
++
++	if (etaUpdate.stage == ETA_UPDATE_STAGE_IDLE && !etaUpdate.popup)
++	{
++		trap_Cvar_Update(&eta_updateCheck);
++
++		/* Eight seconds in, so the offer does not talk over the menu
++		   that has just been read out. */
++		if (eta_updateCheck.integer && ETA_WindowsUpdate_Supported()
++		    && ETA_Update_IsReleaseBuild(ETA_Update_InstalledVersion())
++		    && trap_Cvar_VariableValue("eta_updateAsked") == 0.f
++		    && trap_Milliseconds() - etaUpdate.startTime > 8000
++		    && UI_AccessibilityAtMenus())
++		{
++			trap_Cvar_Set("eta_updateAsked", "1");
++			UI_AccessibilityUpdateStartCheck(qfalse);
++		}
++	}
++
++	state = ETA_WindowsUpdate_Poll();
++
++	if (etaUpdate.stage == ETA_UPDATE_STAGE_CHECKING && state != ETA_WINDOWS_UPDATE_BUSY)
++	{
++		etaUpdate.stage = ETA_UPDATE_STAGE_IDLE;
++
++		if (state == ETA_WINDOWS_UPDATE_DONE)
++		{
++			UI_AccessibilityUpdateChecked();
++		}
++		else if (etaUpdate.manual)
++		{
++			/* A release page that is private, or not there yet, answers
++			   the same way as no connection at all. */
++			UI_AccessibilityUpdateSay("The release page could not be reached. Check the internet connection, and try again later.");
++		}
++	}
++	else if (etaUpdate.stage == ETA_UPDATE_STAGE_DOWNLOADING && state != ETA_WINDOWS_UPDATE_BUSY)
++	{
++		if (state == ETA_WINDOWS_UPDATE_DONE)
++		{
++			UI_AccessibilityUpdateDownloaded();
++		}
++		else
++		{
++			etaUpdate.stage = ETA_UPDATE_STAGE_IDLE;
++			UI_AccessibilityUpdateSay("The download did not finish. Your version is unchanged. Try again later.");
++		}
++	}
++
++	/* An offer waits for the menus: it is never opened over a match. */
++	if (etaUpdate.popup && UI_AccessibilityAtMenus())
++	{
++		Menus_ActivateByName(etaUpdate.popup, qtrue);
++		etaUpdate.popup = NULL;
++	}
++}
++
++/**
++ * @brief The update popups' and the ACCESSIBILITY menu's scripts.
++ * @return qtrue if name was one of them.
++ */
++static qboolean UI_AccessibilityUpdateScript(const char *name)
++{
++	char url[512];
++
++	if (!Q_stricmp(name, "accessibilityUpdateCheck"))
++	{
++		if (!ETA_WindowsUpdate_Supported())
++		{
++			UI_AccessibilityUpdateSay("Updates are only checked for on Windows.");
++		}
++		else if (!ETA_Update_IsReleaseBuild(ETA_Update_InstalledVersion()))
++		{
++			UI_AccessibilityUpdateSay("This is a test build, so it does not check for updates.");
++		}
++		else if (etaUpdate.stage == ETA_UPDATE_STAGE_DOWNLOADED)
++		{
++			UI_AccessibilityUpdateSay("An update is already downloaded. It is put in place when you quit the game.");
++		}
++		else if (etaUpdate.stage != ETA_UPDATE_STAGE_IDLE)
++		{
++			UI_AccessibilityUpdateSay("Already working on it.");
++		}
++		else
++		{
++			UI_AccessibilityUpdateSay("Checking for updates.");
++			UI_AccessibilityUpdateStartCheck(qtrue);
++		}
++		return qtrue;
++	}
++
++	if (!Q_stricmp(name, "accessibilityUpdateDownload"))
++	{
++		char version[ETA_UPDATE_MAX_VERSION_LENGTH + 1];
++
++		if (etaUpdate.stage != ETA_UPDATE_STAGE_IDLE
++		    || !ETA_Update_PackageUrl(etaUpdate.manifest.version, url, sizeof(url))
++		    || !UI_AccessibilityUpdatePaths()
++		    || !ETA_WindowsUpdate_StartDownload(url, etaUpdate.download, etaUpdate.manifest.size))
++		{
++			UI_AccessibilityUpdateSay("The download could not start. Your version is unchanged.");
++			return qtrue;
++		}
++
++		etaUpdate.stage = ETA_UPDATE_STAGE_DOWNLOADING;
++		ETA_Update_SpokenVersion(etaUpdate.manifest.version, version, sizeof(version));
++		UI_AccessibilityUpdateSay(va("Downloading accessibility mode %s. This takes a few seconds.", version));
++		return qtrue;
++	}
++
++	if (!Q_stricmp(name, "accessibilityUpdateRestart") || !Q_stricmp(name, "accessibilityUpdateWhenQuit"))
++	{
++		qboolean restart = !Q_stricmp(name, "accessibilityUpdateRestart");
++
++		if (etaUpdate.stage != ETA_UPDATE_STAGE_DOWNLOADED)
++		{
++			return qtrue;
++		}
++
++		if (!ETA_WindowsUpdate_ScheduleSwap(etaUpdate.download, etaUpdate.target, restart))
++		{
++			UI_AccessibilityUpdateSay("The update could not be put in place. Your version is unchanged.");
++			ETA_WindowsUpdate_RemoveFile(etaUpdate.download);
++			etaUpdate.stage = ETA_UPDATE_STAGE_IDLE;
++			return qtrue;
++		}
++
++		if (restart)
++		{
++			UI_AccessibilityUpdateSay("Restarting.");
++			trap_Cmd_ExecuteText(EXEC_APPEND, "quit\n");
++		}
++		else
++		{
++			UI_AccessibilityUpdateSay("The new version is put in place when you quit the game.");
++		}
++		return qtrue;
++	}
++
++	if (!Q_stricmp(name, "accessibilityUpdateGamePage"))
++	{
++		trap_openURL("https://www.etlegacy.com/download");
++		return qtrue;
++	}
++
++	return qfalse;
++}
+ #endif
+ 
+ /**
+@@ -4971,6 +5299,13 @@ void UI_RunMenuScript(char **args)
+ 
+ 	if (String_Parse(args, &name))
+ 	{
++#ifdef FEATURE_ACCESSIBILITY
++		if (UI_AccessibilityUpdateScript(name))
++		{
++			return;
++		}
++#endif
++
+ 		if (Q_stricmp(name, "StartServer") == 0)
+ 		{
+ 			int val;
+@@ -9305,6 +9640,7 @@ void UI_Init(int etLegacyClient, int clientVersion)
+ 	ETA_MenuNarrator_Init();
+ 	UI_AccessibilityInstallBinds();
+ 	UI_AccessibilityRegisterHostCvars();
++	UI_AccessibilityRegisterUpdateCvars();
+ #endif
+ }
+ 

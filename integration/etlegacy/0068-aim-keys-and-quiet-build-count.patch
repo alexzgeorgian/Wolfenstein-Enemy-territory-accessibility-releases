@@ -1,0 +1,836 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 8aa94d7..7d07957 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1738,6 +1738,326 @@ static void ETA_TurnStopStep(qboolean arrived)
+ 	}
+ }
+ 
++/**
++ * @brief Aiming with a key: at the nearest thing to use, and at an enemy.
++ *
++ * A tester asked for both - a quick way to turn to the thing in front of
++ * them they can use, and a lock that keeps the sights on an enemy - after
++ * a match in which they barely brought one enemy down. The view is turned
++ * the only way this module can turn it: by holding the engine's own turn
++ * and look keys, fast while far off and at the ordinary speed for the
++ * last few degrees, and letting go on the target - the tap turn's way.
++ *
++ *   - "Aim at what you can use": the nearest thing close by that can be
++ *     used, said by name as the view turns to it. Pressed again within a
++ *     few seconds, the next nearest.
++ *   - "Lock on to an enemy", held: the nearest enemy in sight is said and
++ *     followed for as long as the key is down. Lose them and the next one
++ *     in sight is taken; when there is none, "Lock lost". It runs only
++ *     where aim assistance is fair - see CG_AccessibilityAimAssistAllowed.
++ *
++ * Pitch moves too: the keys look up and down as well as turn. The two
++ * key numbers for looking are the turn keys' neighbours, so the player's
++ * own arrow keys on the same buttons are never let go by this.
++ */
++#define ETA_AIM_KEY_UP      "996"
++#define ETA_AIM_KEY_DOWN    "995"
++#define ETA_AIM_SNAP_MS     1500
++#define ETA_AIM_CYCLE_MS    4000
++#define ETA_AIM_LOST_MS     400
++#define ETA_AIM_MAX_TARGETS 16
++
++typedef enum
++{
++	ETA_AIM_NONE,
++	ETA_AIM_SNAP,
++	ETA_AIM_LOCK
++} eta_aimMode_t;
++
++typedef struct
++{
++	eta_aimMode_t mode;
++	int           entityNum;    /* -1: none yet, or a fixed point */
++	vec3_t        point;
++	int           started;
++	int           yaw;          /* the turn key held: -1 left, 1 right */
++	int           pitch;        /* the look key held: -1 up, 1 down */
++	int           lostSince;
++	qboolean      saidLost;
++	int           cycleIndex;
++	int           cycleAt;
++} eta_aim_t;
++
++static eta_aim_t eta_aim;
++
++static void ETA_AimKeys(int yaw, int pitch)
++{
++	if (yaw != eta_aim.yaw)
++	{
++		if (eta_aim.yaw)
++		{
++			ETA_TurnKey(eta_aim.yaw, qfalse);
++		}
++		if (yaw)
++		{
++			ETA_TurnKey(yaw, qtrue);
++		}
++		eta_aim.yaw = yaw;
++	}
++
++	if (pitch != eta_aim.pitch)
++	{
++		if (eta_aim.pitch)
++		{
++			trap_SendConsoleCommand(va("-%s %s\n", eta_aim.pitch < 0 ? "lookup" : "lookdown",
++			                           eta_aim.pitch < 0 ? ETA_AIM_KEY_UP : ETA_AIM_KEY_DOWN));
++		}
++		if (pitch)
++		{
++			trap_SendConsoleCommand(va("+%s %s\n", pitch < 0 ? "lookup" : "lookdown",
++			                           pitch < 0 ? ETA_AIM_KEY_UP : ETA_AIM_KEY_DOWN));
++		}
++		eta_aim.pitch = pitch;
++	}
++}
++
++static void ETA_AimStop(void)
++{
++	ETA_AimKeys(0, 0);
++	ETA_TurnBoost(qfalse);
++	eta_aim.mode = ETA_AIM_NONE;
++}
++
++/**
++ * @brief One frame of steering toward a point. qtrue once on it.
++ *
++ * Turning right lowers the yaw and looking down raises the pitch - the
++ * engine's own sense, in CL_AdjustAngles - so a target at a higher yaw
++ * is to the left, and one at a higher pitch is below.
++ */
++static qboolean ETA_AimSteer(const vec3_t point, float tolerance)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	vec3_t              eye, delta, wanted;
++	float               yawError, pitchError, worst, perFrame, deadzone;
++	int                 yaw = 0, pitch = 0;
++
++	VectorCopy(ps->origin, eye);
++	eye[2] += ps->viewheight;
++	VectorSubtract(point, eye, delta);
++	vectoangles(delta, wanted);
++
++	yawError   = AngleSubtract(wanted[YAW], ps->viewangles[YAW]);
++	pitchError = AngleSubtract(wanted[PITCH], ps->viewangles[PITCH]);
++	worst      = MAX(fabs(yawError), fabs(pitchError));
++
++	ETA_TurnBoost((qboolean)(worst > ETA_TURN_SLOW_DEGREES));
++
++	/* Let go within half a frame's turn of the point, as the tap does. */
++	perFrame = 0.14f * (float)cg.frametime * (eta_turn.fast ? ETA_TURN_FAST_FACTOR : 1.0f);
++	deadzone = MAX(tolerance, perFrame * 0.5f);
++
++	if (fabs(yawError) > deadzone)
++	{
++		yaw = yawError > 0.0f ? -1 : 1;
++	}
++	if (fabs(pitchError) > deadzone)
++	{
++		pitch = pitchError > 0.0f ? 1 : -1;
++	}
++
++	ETA_AimKeys(yaw, pitch);
++
++	return (qboolean)(!yaw && !pitch);
++}
++
++static void ETA_AimSay(const char *what, const vec3_t point)
++{
++	int meters = (int)(Distance(cg.predictedPlayerState.origin, point) * ETA_QU_TO_METERS + 0.5f);
++
++	ETA_Speech_BeginReport();
++	ETA_Speech_Say(va("%s, %s, %d meter%s", what,
++	                  ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(point)),
++	                  meters < 1 ? 1 : meters, meters == 1 ? "" : "s"));
++	ETA_Speech_EndReport();
++}
++
++/* An enemy for the lock: the nearest in sight. qfalse when there is none. */
++static qboolean ETA_AimAcquire(void)
++{
++	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
++
++	if (CG_AccessibilityEnemyTargets(list, ETA_AIM_MAX_TARGETS) <= 0)
++	{
++		return qfalse;
++	}
++
++	eta_aim.entityNum = list[0].entityNum;
++	VectorCopy(list[0].point, eta_aim.point);
++	eta_aim.lostSince = 0;
++	eta_aim.saidLost  = qfalse;
++	return qtrue;
++}
++
++static void CG_AccessibilityAimUse_f(void)
++{
++	etaAimTarget_t list[ETA_AIM_MAX_TARGETS];
++	int            count, index = 0;
++
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL)
++	{
++		ETA_Speech_Say("Nothing to aim at until you are in play");
++		return;
++	}
++
++	count = CG_AccessibilityUseTargets(list, ETA_AIM_MAX_TARGETS);
++
++	if (count <= 0)
++	{
++		ETA_Speech_Say("Nothing to use close by");
++		return;
++	}
++
++	/* Pressed again soon after: the next one along. */
++	if (eta_aim.cycleAt && cg.time >= eta_aim.cycleAt && cg.time - eta_aim.cycleAt < ETA_AIM_CYCLE_MS)
++	{
++		index = (eta_aim.cycleIndex + 1) % count;
++	}
++
++	eta_aim.cycleIndex = index;
++	eta_aim.cycleAt    = cg.time;
++
++	/* A tap turn still running would fight this for the same keys. */
++	if (eta_turn.step)
++	{
++		ETA_TurnStopStep(qfalse);
++	}
++
++	ETA_AimStop();
++	eta_aim.mode      = ETA_AIM_SNAP;
++	eta_aim.entityNum = list[index].entityNum;
++	eta_aim.started   = cg.time;
++	VectorCopy(list[index].point, eta_aim.point);
++
++	ETA_HudNarrator_HoldPassive(cg.time);
++	ETA_AimSay(count > 1 ? va("%s, %d of %d", list[index].name, index + 1, count) : list[index].name,
++	           list[index].point);
++}
++
++static void CG_AccessibilityAimLockDown_f(void)
++{
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL || eta_aim.mode == ETA_AIM_LOCK)
++	{
++		return;
++	}
++
++	if (!CG_AccessibilityAimAssistAllowed())
++	{
++		ETA_Speech_Say("Enemy lock works in a game you host, or on a server that allows it");
++		return;
++	}
++
++	if (eta_turn.step)
++	{
++		ETA_TurnStopStep(qfalse);
++	}
++
++	ETA_AimStop();
++	eta_aim.mode    = ETA_AIM_LOCK;
++	eta_aim.started = cg.time;
++
++	if (ETA_AimAcquire())
++	{
++		ETA_AimSay("Locked, enemy", eta_aim.point);
++	}
++	else
++	{
++		eta_aim.entityNum = -1;
++		eta_aim.saidLost  = qtrue;
++		ETA_Speech_Say("No enemy in sight");
++	}
++}
++
++static void CG_AccessibilityAimLockUp_f(void)
++{
++	if (eta_aim.mode == ETA_AIM_LOCK)
++	{
++		ETA_AimStop();
++	}
++}
++
++/**
++ * @brief Every frame: steers a running aim onto its target.
++ */
++void CG_AccessibilityAimFrame(void)
++{
++	if (eta_aim.mode == ETA_AIM_NONE)
++	{
++		return;
++	}
++
++	if (!cg.snap || cg.predictedPlayerState.pm_type != PM_NORMAL || cg.time < eta_aim.started)
++	{
++		ETA_AimStop();
++		return;
++	}
++
++	if (eta_aim.mode == ETA_AIM_SNAP)
++	{
++		/* A wounded teammate or a dropped weapon can move; follow it. */
++		if (eta_aim.entityNum >= 0 && eta_aim.entityNum < MAX_GENTITIES
++		    && cg_entities[eta_aim.entityNum].currentValid
++		    && cg_entities[eta_aim.entityNum].currentState.eType == ET_ITEM)
++		{
++			VectorCopy(cg_entities[eta_aim.entityNum].lerpOrigin, eta_aim.point);
++			eta_aim.point[2] += 8.0f;
++		}
++
++		if (ETA_AimSteer(eta_aim.point, 2.0f) || cg.time - eta_aim.started > ETA_AIM_SNAP_MS)
++		{
++			ETA_AimStop();
++		}
++		return;
++	}
++
++	/* The lock, while held. */
++	if (eta_aim.entityNum >= 0 && CG_AccessibilityEnemyAimPoint(eta_aim.entityNum, eta_aim.point))
++	{
++		eta_aim.lostSince = 0;
++		ETA_AimSteer(eta_aim.point, 1.0f);
++		return;
++	}
++
++	/* Gone - down, behind a wall, out of view: hold still a moment, then
++	   take the next one in sight, or say it is over. */
++	ETA_AimKeys(0, 0);
++	ETA_TurnBoost(qfalse);
++
++	if (!eta_aim.lostSince)
++	{
++		eta_aim.lostSince = cg.time;
++	}
++
++	if (cg.time - eta_aim.lostSince < ETA_AIM_LOST_MS && eta_aim.entityNum >= 0)
++	{
++		return;
++	}
++
++	if (ETA_AimAcquire())
++	{
++		ETA_AimSay("Locked, enemy", eta_aim.point);
++		return;
++	}
++
++	eta_aim.entityNum = -1;
++
++	if (!eta_aim.saidLost)
++	{
++		eta_aim.saidLost = qtrue;
++		ETA_Speech_Say("Lock lost");
++	}
++}
++
+ static void CG_AccessibilityTurnDown(int direction)
+ {
+ 	/* A second press of a key already down is a repeat, not a tap. The
+@@ -1749,6 +2069,12 @@ static void CG_AccessibilityTurnDown(int direction)
+ 		return;
+ 	}
+ 
++	/* The player turning by hand takes over from any aim. */
++	if (eta_aim.mode != ETA_AIM_NONE)
++	{
++		ETA_AimStop();
++	}
++
+ 	if (!eta_turnSteps.integer)
+ 	{
+ 		eta_turn.passthrough = direction;
+@@ -1914,6 +2240,8 @@ void CG_AccessibilityTurnShutdown(void)
+ 	{
+ 		ETA_TurnKey(eta_turn.passthrough, qfalse);
+ 	}
++	ETA_AimStop();
++	memset(&eta_aim, 0, sizeof(eta_aim));
+ 	ETA_TurnBoost(qfalse);
+ 	ETA_HudNarrator_SetFacingKeyTurn(0);
+ 	memset(&eta_turn, 0, sizeof(eta_turn));
+@@ -4641,6 +4969,9 @@ static consoleCommand_t commands[] =
+ 	{ "-accessibilityTurnLeft",   CG_AccessibilityTurnLeftUp_f   },
+ 	{ "+accessibilityTurnRight",  CG_AccessibilityTurnRightDown_f },
+ 	{ "-accessibilityTurnRight",  CG_AccessibilityTurnRightUp_f  },
++	{ "accessibilityAimUse",      CG_AccessibilityAimUse_f       },
++	{ "+accessibilityAimLock",    CG_AccessibilityAimLockDown_f  },
++	{ "-accessibilityAimLock",    CG_AccessibilityAimLockUp_f    },
+ 	{ "accessibilityHealth",    CG_AccessibilityHealth_f     },
+ 	{ "accessibilityAmmo",      CG_AccessibilityAmmo_f       },
+ 	{ "accessibilityRepeat",    CG_AccessibilityRepeat_f     },
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index af56356..bbca90d 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -3761,6 +3761,352 @@ static int ETA_GatherAwareness(ETA_AwareThing *list, int max, qboolean players,
+ 	return count;
+ }
+ 
++/**
++ * @brief How far a point lies from where the player faces, positive to
++ * the left - the engine's yaw sense, which is what the words for a
++ * direction are written against.
++ */
++float CG_AccessibilityLeftOfView(const vec3_t point)
++{
++	const playerState_t *ps = &cg.predictedPlayerState;
++	vec3_t              delta;
++	float               leftOfView;
++
++	VectorSubtract(point, ps->origin, delta);
++	leftOfView = AngleNormalize180(vectoyaw(delta) - ps->viewangles[YAW]);
++
++	return leftOfView;
++}
++
++/* Whether the eye can see a point, counting the thing itself standing in
++   the way as seeing it - a door's middle is inside the door. */
++static qboolean ETA_SeesPoint(const vec3_t eye, const vec3_t point, int entityNum)
++{
++	trace_t trace;
++
++	CG_Trace(&trace, eye, NULL, NULL, point, cg.snap->ps.clientNum, MASK_SOLID);
++
++	return (qboolean)(trace.fraction >= 1.0f || (entityNum >= 0 && trace.entityNum == entityNum));
++}
++
++static void ETA_AimEye(vec3_t eye)
++{
++	VectorCopy(cg.predictedPlayerState.origin, eye);
++	eye[2] += cg.predictedPlayerState.viewheight;
++}
++
++/* Nearest first; the list is short. */
++static void ETA_AimInsert(etaAimTarget_t *list, int *count, int max, const etaAimTarget_t *add)
++{
++	int at, i;
++
++	/* Two halves of a door, a cabinet and its trigger: one. */
++	for (i = 0; i < *count; i++)
++	{
++		if (!Q_stricmp(list[i].name, add->name) && Distance(list[i].point, add->point) < 128.0f)
++		{
++			return;
++		}
++	}
++
++	for (at = *count; at > 0 && list[at - 1].meters > add->meters; at--)
++	{
++		if (at < max)
++		{
++			list[at] = list[at - 1];
++		}
++	}
++
++	if (at >= max)
++	{
++		return;
++	}
++
++	list[at] = *add;
++
++	if (*count < max)
++	{
++		(*count)++;
++	}
++}
++
++/* Where to aim at a player: the middle of the body as it stands, crouches
++   or lies. */
++static void ETA_PlayerAimPoint(const centity_t *cent, vec3_t out)
++{
++	VectorCopy(cent->lerpOrigin, out);
++
++	if (cent->currentState.eFlags & EF_PRONE)
++	{
++		out[2] -= 16.0f;
++	}
++	else if (cent->currentState.eFlags & EF_CROUCHING)
++	{
++		out[2] += 6.0f;
++	}
++	else
++	{
++		out[2] += 20.0f;
++	}
++}
++
++/**
++ * @brief The things close by the player could use, nearest first.
++ *
++ * Within fifteen metres: the objectives the command map shows for this
++ * player - a construction to build, an enemy one to blow up - and the
++ * things the game draws a use icon for: a door, a health or ammo
++ * cabinet, a mounted gun, something on the ground, a wounded teammate,
++ * and for a covert op an enemy body with its uniform on. Everything but
++ * an objective must be in sight; an objective's own marker sits where
++ * the engine puts it, often inside what it marks.
++ */
++#define ETA_USE_RANGE 600.0f
++
++int CG_AccessibilityUseTargets(etaAimTarget_t *list, int max)
++{
++	const playerState_t *ps   = &cg.predictedPlayerState;
++	const team_t        team  = cgs.clientinfo[cg.clientNum].team;
++	qboolean            covert = (qboolean)(ps->stats[STAT_PLAYER_CLASS] == PC_COVERTOPS);
++	vec3_t              eye;
++	int                 count = 0, i;
++
++	if (!cg.snap || max <= 0)
++	{
++		return 0;
++	}
++
++	ETA_AimEye(eye);
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es   = &cg.snap->entities[i];
++		const centity_t     *cent = &cg_entities[es->number];
++		etaAimTarget_t      target;
++		qboolean            needSight = qtrue;
++
++		memset(&target, 0, sizeof(target));
++		target.entityNum = es->number;
++		VectorCopy(cent->lerpOrigin, target.point);
++
++		switch (es->eType)
++		{
++		case ET_CONSTRUCTIBLE_INDICATOR:
++		case ET_EXPLOSIVE_INDICATOR:
++		{
++			const char *oid = (es->modelindex2 >= 0 && es->modelindex2 < MAX_OID_TRIGGERS)
++			                  ? cgs.oidInfo[es->modelindex2].name : "";
++			qboolean   ours = (qboolean)(es->teamNum == team);
++
++			if (es->eType == ET_EXPLOSIVE_INDICATOR && ours)
++			{
++				/* Ours to defend, not to blow up. */
++				continue;
++			}
++
++			Q_strncpyz(target.name,
++			           va("%s%s%s", oid[0] ? oid : "Objective", oid[0] ? ", " : ", ",
++			              es->eType == ET_EXPLOSIVE_INDICATOR ? "dynamite target"
++			              : (ours ? "to build" : "enemy construction")),
++			           sizeof(target.name));
++			needSight = qfalse;
++			break;
++		}
++		case ET_CABINET_H:
++		case ET_HEALER:
++			Q_strncpyz(target.name, "Health cabinet", sizeof(target.name));
++			break;
++		case ET_CABINET_A:
++		case ET_SUPPLIER:
++			Q_strncpyz(target.name, "Ammo cabinet", sizeof(target.name));
++			break;
++		case ET_MG42_BARREL:
++			Q_strncpyz(target.name, "Mounted machine gun", sizeof(target.name));
++			break;
++		case ET_MOVER:
++		case ET_ITEM:
++			if (!CG_AccessibilityObjectName(es, target.name, sizeof(target.name))
++			    || (es->eType == ET_MOVER && Q_stricmp(target.name, "door")))
++			{
++				continue;
++			}
++			target.name[0] = (char)toupper((unsigned char)target.name[0]);
++			if (es->eType == ET_ITEM)
++			{
++				target.point[2] += 8.0f;
++			}
++			break;
++		case ET_PLAYER:
++			if (!(es->eFlags & EF_DEAD) || es->clientNum < 0 || es->clientNum >= MAX_CLIENTS
++			    || es->clientNum == ps->clientNum || ETA_SeenAsEnemy(es->clientNum))
++			{
++				continue;
++			}
++			Q_strncpyz(target.name, va("Wounded %s", cgs.clientinfo[es->clientNum].name),
++			           sizeof(target.name));
++			target.point[2] -= 16.0f;
++			break;
++		case ET_CORPSE:
++			if (!covert || (es->modelindex != TEAM_AXIS && es->modelindex != TEAM_ALLIES)
++			    || es->modelindex == team || es->time2 == 1)
++			{
++				continue;
++			}
++			Q_strncpyz(target.name, "Enemy body with a uniform", sizeof(target.name));
++			target.point[2] -= 16.0f;
++			break;
++		default:
++			continue;
++		}
++
++		/* A brush - a door, a cabinet's trigger - draws round its middle. */
++		if (es->solid == SOLID_BMODEL && es->modelindex > 0 && es->modelindex < MAX_MODELS
++		    && es->eType != ET_ITEM && es->eType != ET_PLAYER && es->eType != ET_CORPSE)
++		{
++			VectorAdd(target.point, cgs.inlineModelMidpoints[es->modelindex], target.point);
++		}
++
++		target.meters = Distance(ps->origin, target.point) * ETA_QU_TO_METERS;
++
++		if (Distance(ps->origin, target.point) > ETA_USE_RANGE)
++		{
++			continue;
++		}
++
++		if (needSight && !ETA_SeesPoint(eye, target.point, es->number))
++		{
++			continue;
++		}
++
++		ETA_AimInsert(list, &count, max, &target);
++	}
++
++	return count;
++}
++
++/* Whether an enemy may be aimed at: the same rules the callouts keep -
++   in clear sight, and in view unless close enough to hear. */
++static qboolean ETA_EnemyAimable(const centity_t *cent, const vec3_t eye, vec3_t aim)
++{
++	const entityState_t *es = &cent->currentState;
++	vec3_t              head;
++	float               meters, halfView;
++
++	if (es->eType != ET_PLAYER || (es->eFlags & EF_DEAD)
++	    || es->clientNum < 0 || es->clientNum >= MAX_CLIENTS
++	    || es->clientNum == cg.snap->ps.clientNum
++	    || !cgs.clientinfo[es->clientNum].infoValid
++	    || cgs.clientinfo[es->clientNum].team == TEAM_SPECTATOR
++	    || !ETA_SeenAsEnemy(es->clientNum))
++	{
++		return qfalse;
++	}
++
++	ETA_PlayerAimPoint(cent, aim);
++	VectorCopy(cent->lerpOrigin, head);
++	head[2] += 36.0f;
++
++	if (!ETA_ClearLine(eye, aim) && !ETA_ClearLine(eye, head))
++	{
++		return qfalse;
++	}
++
++	meters   = Distance(cg.predictedPlayerState.origin, cent->lerpOrigin) * ETA_QU_TO_METERS;
++	halfView = (cg.refdef_current ? cg.refdef_current->fov_x : 90.0f) * 0.5f + 10.0f;
++
++	if (meters > 10.0f && fabs(CG_AccessibilityLeftOfView(cent->lerpOrigin)) > halfView)
++	{
++		return qfalse;
++	}
++
++	return qtrue;
++}
++
++int CG_AccessibilityEnemyTargets(etaAimTarget_t *list, int max)
++{
++	vec3_t eye;
++	int    count = 0, i;
++
++	if (!cg.snap || max <= 0)
++	{
++		return 0;
++	}
++
++	ETA_AimEye(eye);
++
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		const entityState_t *es = &cg.snap->entities[i];
++		etaAimTarget_t      target;
++
++		memset(&target, 0, sizeof(target));
++
++		if (!ETA_EnemyAimable(&cg_entities[es->number], eye, target.point))
++		{
++			continue;
++		}
++
++		target.entityNum = es->number;
++		target.meters    = Distance(cg.predictedPlayerState.origin, cg_entities[es->number].lerpOrigin)
++		                   * ETA_QU_TO_METERS;
++		/* Each its own entry, even with one name: two enemies are two. */
++		Q_strncpyz(target.name, va("Enemy %d", es->number), sizeof(target.name));
++		ETA_AimInsert(list, &count, max, &target);
++	}
++
++	return count;
++}
++
++qboolean CG_AccessibilityEnemyAimPoint(int entityNum, vec3_t out)
++{
++	vec3_t eye;
++	int    i;
++
++	if (!cg.snap || entityNum < 0 || entityNum >= MAX_CLIENTS)
++	{
++		return qfalse;
++	}
++
++	/* Still in this snapshot: an enemy the server stopped sending is one
++	   the player has no business tracking. */
++	for (i = 0; i < cg.snap->numEntities; i++)
++	{
++		if (cg.snap->entities[i].number == entityNum)
++		{
++			break;
++		}
++	}
++
++	if (i == cg.snap->numEntities)
++	{
++		return qfalse;
++	}
++
++	ETA_AimEye(eye);
++
++	return ETA_EnemyAimable(&cg_entities[entityNum], eye, out);
++}
++
++/**
++ * @brief Whether the enemy lock may run here.
++ *
++ * Turning the view onto an enemy and keeping it there is aim assistance,
++ * and on somebody else's server that is a cheat against every player on
++ * it - the kind of thing anti-cheat exists for, which this mod does not
++ * go round. So it runs in a game the player hosts, where the players are
++ * their friends and their bots, and on a server whose host has said yes
++ * by setting eta_aimAssist 1 in its serverinfo (sets eta_aimAssist 1).
++ */
++qboolean CG_AccessibilityAimAssistAllowed(void)
++{
++	if (cgs.localServer)
++	{
++		return qtrue;
++	}
++
++	return (qboolean)(Q_atoi(Info_ValueForKey(CG_ConfigString(CS_SERVERINFO), "eta_aimAssist")) != 0);
++}
++
+ /**
+  * @brief "What is around me": the ways out, the walls, and what is there.
+  *
+@@ -4104,6 +4450,12 @@ static void ETA_NarrateCrosshair(void)
+  * last said; while an answer the player asked for is still being
+  * spoken, it says nothing.
+  */
++/* Until when a build is being counted out: its words are the answer to
++   what the player is doing, and nothing else talks over them. */
++static int eta_buildBusyUntil;
++
++#define ETA_BUILD_BUSY_MS 2500
++
+ static void ETA_NarrateAwareness(qboolean held)
+ {
+ 	static int     lastSerial = -1;
+@@ -4112,6 +4464,7 @@ static void ETA_NarrateAwareness(qboolean held)
+ 	char           said[160];
+ 	const char     *last;
+ 	int            serial, count, quiet;
++	qboolean       building;
+ 
+ 	serial = ETA_Speech_GetSpokenSerial();
+ 	if (serial != lastSerial || cg.time < lastSpeechAt)
+@@ -4138,7 +4491,10 @@ static void ETA_NarrateAwareness(qboolean held)
+ 	last  = ETA_Speech_GetLastMessage();
+ 	quiet = cg.time - lastSpeechAt - (last ? ETA_Speech_EstimateDurationMs(last) : 0);
+ 
+-	if (ETA_HudNarrator_UpdateAwareness(list, count, cg.time, quiet, said, sizeof(said)))
++	building = (qboolean)(cg.time < eta_buildBusyUntil && eta_buildBusyUntil - cg.time <= ETA_BUILD_BUSY_MS);
++
++	if (ETA_HudNarrator_UpdateAwareness(list, count, cg.time, quiet, building ? 0 : 1,
++	                                    said, sizeof(said)))
+ 	{
+ 		ETA_HudNarrator_SpeakAwareness(said);
+ 	}
+@@ -5272,6 +5628,9 @@ static void ETA_NarrateBuildProgress(void)
+ 	building  = qtrue;
+ 	announced = qfalse;
+ 
++	/* Nothing else talks over the count while the work goes on. */
++	eta_buildBusyUntil = cg.time + ETA_BUILD_BUSY_MS;
++
+ 	/* The same figure the status bar under the icon draws, from the same
+ 	   value, so the words and the bar cannot disagree. */
+ 	percent = (int)MIN(((float)value / 255.0f) * 100.0f, 100.0f);
+@@ -8109,6 +8468,9 @@ void CG_DrawActive()
+ 	   the player just pressed the key and is waiting for the word. */
+ 	CG_AccessibilityTurnFrame();
+ 
++	/* Aiming at something with a key: steered every frame, like a tap. */
++	CG_AccessibilityAimFrame();
++
+ 	/* The scoreboard the player asked for, once the whole of it is in. */
+ 	CG_AccessibilityScoresFrame();
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index ee494ec..8693300 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3469,6 +3469,26 @@ void CG_AccessibilitySurroundings(void);
+ qboolean CG_AccessibilityTurnBusy(void);
+ void CG_AccessibilityTurnShutdown(void);
+ 
++/*
++ * Aiming with a key: at the nearest thing to use, and at an enemy. The
++ * targets are found in cg_draw.c, by the same rules as the callouts; the
++ * view is turned in cg_consolecmds.c, by the same keys as a tap turn.
++ */
++typedef struct
++{
++	int    entityNum;   ///< -1 for an objective known only by its position
++	vec3_t point;       ///< where to aim
++	float  meters;
++	char   name[64];
++} etaAimTarget_t;
++
++int      CG_AccessibilityUseTargets(etaAimTarget_t *list, int max);
++int      CG_AccessibilityEnemyTargets(etaAimTarget_t *list, int max);
++qboolean CG_AccessibilityEnemyAimPoint(int entityNum, vec3_t out);
++qboolean CG_AccessibilityAimAssistAllowed(void);
++float    CG_AccessibilityLeftOfView(const vec3_t point);
++void     CG_AccessibilityAimFrame(void);
++
+ /**
+  * @brief The mod's own looping sounds, shipped inside the pk3.
+  */
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 298f7bd..b52c9b1 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -8994,7 +8994,13 @@ void UI_AccessibilityInstallBinds(void)
+ 		/* "What is around me". F9 is free in the stock right-handed
+ 		   layout, next to the report keys on F5, F6 and F8; the
+ 		   left-handed one opens the stats there, and keeps them. */
+-		{ K_F9,           "accessibilitySurroundings", NULL,         8 }
++		{ K_F9,           "accessibilitySurroundings", NULL,         8 },
++		/* Aiming: Delete turns to the nearest thing to use, Insert held
++		   locks on to an enemy. The pair above the arrow keys, which are
++		   the turn and look keys, so the right hand stays where it
++		   aims; neither is bound in the stock layouts. */
++		{ K_DEL,          "accessibilityAimUse",       NULL,         9 },
++		{ K_INS,          "+accessibilityAimLock",     NULL,         9 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index eb7f784..6bc72ea 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -874,6 +874,8 @@ static bind_t g_bindings[] =
+ 	{ "+accessibilityturnleft",                    -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "+accessibilityturnright",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitysurroundings",                 -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilityaimuse",                       -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "+accessibilityaimlock",                     -1,              -1,  -1,              -1,  -1, -1, -1 },
+ #endif
+ };
+ 
