@@ -1,0 +1,1293 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A push that lands while an earlier run is still going supersedes it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Both engines are pinned to the exact commit this integration was
+  # developed and verified against. The patch series carry context lines
+  # from these trees, so an upstream move is a real event: the run fails
+  # loudly rather than quietly testing something else.
+  ETLEGACY_TAG: v2.86.2
+  ETLEGACY_COMMIT: fdb40f8706b4e5081bf721cdc5726b2791a6e1f9
+  IDSOFTWARE_COMMIT: 40342a9e3690cb5b627a433d4d5cbf30e3c57698
+
+jobs:
+  library:
+    name: Library (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Release matters on its own: it defines NDEBUG, which once
+          # compiled every assertion in the suite out of existence and
+          # left the tests unable to fail. They assert through a macro
+          # that survives it now, and this build is what keeps that true.
+          - name: release
+            build_type: Release
+            cflags: ""
+          - name: debug
+            build_type: Debug
+            cflags: ""
+          # The narrator tests free their input right after each call and
+          # poison it first, which only actually catches a narrator that
+          # kept the caller's pointer when something is watching the heap.
+          - name: sanitizers
+            build_type: Debug
+            cflags: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_C_FLAGS="${{ matrix.cflags }}"
+          -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.cflags }}"
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run the smoke tests
+        run: |
+          set -e
+          for test in eta_accessibility_smoke_test \
+                      eta_menu_narrator_smoke_test \
+                      eta_hud_narrator_smoke_test \
+                      eta_audio_cue_smoke_test \
+                      eta_navigation_smoke_test \
+                      eta_map_survey_smoke_test \
+                      eta_bsp_ladders_smoke_test \
+                      eta_bsp_props_smoke_test \
+                      eta_place_classifier_smoke_test \
+                      eta_sniper_spots_smoke_test \
+                      eta_rooms_smoke_test \
+                      eta_update_check_smoke_test; do
+            echo "::group::$test"
+            ./build/"$test"
+            echo "::endgroup::"
+          done
+
+  # Every other job builds for Linux, where the whole platform/windows
+  # directory compiles to no-op stubs - so the speech, NVDA and audio-cue
+  # backends that players actually run were never compiled as Windows code
+  # by any check. A syntax error in them went green. This is the only job
+  # that builds them, and -Werror is the point of it: these files cannot
+  # be run here, so a warning is the strongest signal available.
+  windows:
+    name: Windows cross-compile (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            cc: x86_64-w64-mingw32-gcc
+            package: gcc-mingw-w64-x86-64
+          - name: i686
+            cc: i686-w64-mingw32-gcc
+            package: gcc-mingw-w64-i686
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.package }}
+          command -v ${{ matrix.cc }} >/dev/null || {
+            echo "::error::${{ matrix.package }} did not provide ${{ matrix.cc }}"
+            exit 1
+          }
+          ${{ matrix.cc }} --version | head -1
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_SYSTEM_NAME=Windows
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DCMAKE_C_FLAGS=-Werror
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      # Guards against the job passing vacuously: if the Windows backends
+      # ever stop being compiled in, the library still builds and links,
+      # and only this step notices.
+      - name: Confirm the Windows speech path was actually compiled in
+        run: |
+          set -e
+          for symbol in nvdaControllerClient.dll \
+                        nvdaController_testIfRunning \
+                        nvdaController_speakText \
+                        nvdaController_cancelSpeech; do
+            if ! strings build/libeta_accessibility.a | grep -qF "$symbol"; then
+              echo "::error::$symbol is missing from the Windows build"
+              exit 1
+            fi
+            echo "found $symbol"
+          done
+          file build/eta_accessibility_smoke_test.exe
+
+      # The updater's Windows half can only be checked on Windows, so the
+      # programs that check it travel to the job below.
+      - name: Keep the updater's test programs for the Windows run
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-tests-${{ matrix.name }}
+          path: |
+            build/eta_update_check_smoke_test.exe
+            build/eta_windows_update_live_test.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  # The in-game updater, on a real Windows machine against the real
+  # GitHub: TLS, the redirects GitHub answers a release address with, a
+  # download that hashes to what Windows says it is, a 404 taken as a
+  # failure, and the helper swapping a pk3 the game is holding open only
+  # once the game has gone. The 32-bit build runs too, under WOW64, which
+  # is where a path to System32 quietly means something else.
+  updater-windows:
+    name: Updater on Windows (${{ matrix.name }})
+    needs: windows
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [x86_64, i686]
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: updater-tests-${{ matrix.name }}
+          path: bin
+
+      - name: Run the updater's decisions on Windows
+        shell: pwsh
+        run: |
+          & .\bin\eta_update_check_smoke_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "the update checks failed on Windows" }
+
+      - name: Fetch a small file through GitHub's redirect
+        shell: pwsh
+        run: |
+          $exe = ".\bin\eta_windows_update_live_test.exe"
+          $commit = "${{ env.ETLEGACY_COMMIT }}"
+          $got = (& $exe fetch "https://github.com/etlegacy/etlegacy/raw/$commit/.gitignore" | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "fetch failed: $got" }
+          Invoke-WebRequest -UseBasicParsing -OutFile expected.txt "https://raw.githubusercontent.com/etlegacy/etlegacy/$commit/.gitignore"
+          $want = "{0} {1}" -f (Get-FileHash -Algorithm SHA256 expected.txt).Hash.ToLower(), (Get-Item expected.txt).Length
+          Write-Host "updater: $got"
+          Write-Host "windows: $want"
+          if ($got -ne $want) { throw "the fetched text is not the file" }
+
+      - name: Take a missing page, and plain http, as failures
+        shell: pwsh
+        run: |
+          $exe = ".\bin\eta_windows_update_live_test.exe"
+          & $exe missing "https://github.com/etlegacy/etlegacy/releases/download/eta-no-such-release/eta-update.txt"
+          if ($LASTEXITCODE -ne 0) { throw "a 404 was taken as an update" }
+          & $exe missing "http://github.com/etlegacy/etlegacy/raw/${{ env.ETLEGACY_COMMIT }}/.gitignore"
+          if ($LASTEXITCODE -ne 0) { throw "plain http was accepted" }
+
+      - name: Download a larger file and check its hash
+        shell: pwsh
+        run: |
+          $exe = ".\bin\eta_windows_update_live_test.exe"
+          $commit = "${{ env.ETLEGACY_COMMIT }}"
+          $dir = New-Item -ItemType Directory -Force "eta update test"
+          $file = Join-Path $dir.FullName "files.c.download"
+          $got = (& $exe download "https://github.com/etlegacy/etlegacy/raw/$commit/src/qcommon/files.c" $file | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "download failed: $got" }
+          $want = "{0} {1}" -f (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower(), (Get-Item $file).Length
+          Write-Host "updater: $got"
+          Write-Host "windows: $want"
+          if ($got -ne $want) { throw "the hash the updater worked out is not the file's" }
+          if ((Get-Item $file).Length -lt 100000) { throw "the download is too short to have taken more than one read" }
+
+      - name: Swap a pk3 that is held open, once the holder exits
+        shell: pwsh
+        run: |
+          $exe = ".\bin\eta_windows_update_live_test.exe"
+          $dir = (New-Item -ItemType Directory -Force "eta update test\legacy").FullName
+          $new = Join-Path $dir "zzz_accessibility.pk3.download"
+          $pk3 = Join-Path $dir "zzz_accessibility.pk3"
+          Set-Content -NoNewline -LiteralPath $new "new"
+          Set-Content -NoNewline -LiteralPath $pk3 "old"
+          & $exe swap $new $pk3
+          if ($LASTEXITCODE -ne 0) { throw "the helper did not start" }
+          for ($i = 0; $i -lt 60 -and (Test-Path -LiteralPath $new); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path -LiteralPath $new) { throw "the download was never moved into place" }
+          if ((Get-Content -Raw -LiteralPath $pk3) -ne "new") { throw "the pk3 is not the new one" }
+          if ((Get-Content -Raw -LiteralPath "$pk3.previous") -ne "old") { throw "the old pk3 was not kept" }
+          Write-Host "swapped after the holder exited, old copy kept"
+
+  etlegacy:
+    name: ET Legacy integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: accessibility-mode
+
+      - name: Clone ET Legacy at the pinned tag
+        run: |
+          set -e
+          git clone --depth 1 --branch "$ETLEGACY_TAG" \
+            https://github.com/etlegacy/etlegacy.git engine
+          cd engine
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$ETLEGACY_COMMIT" ]; then
+            echo "::error::$ETLEGACY_TAG resolved to $actual, expected $ETLEGACY_COMMIT"
+            exit 1
+          fi
+          # Only 'libs' is needed for the mod libraries; it carries cJSON.
+          git submodule update --init --depth 1 libs
+
+      - name: Put the accessibility library where the wiring expects it
+        run: ln -s "$GITHUB_WORKSPACE/accessibility-mode" engine/accessibility-mode
+
+      - name: Apply the patch series to a pristine tree
+        working-directory: engine
+        run: |
+          set -e
+          for patch in "$GITHUB_WORKSPACE"/accessibility-mode/integration/etlegacy/0*.patch; do
+            name="$(basename "$patch")"
+            if ! git apply --check "$patch" 2>/dev/null; then
+              echo "::error file=integration/etlegacy/$name::$name does not apply cleanly to $ETLEGACY_TAG"
+              git apply --check "$patch"
+            fi
+            git apply "$patch"
+            echo "applied $name"
+          done
+
+      # Bearings compile and link whichever way round they are written, so
+      # nothing above this can tell "turn right" from "turn left". This
+      # lifts the real expressions out of the patched tree and checks them
+      # against the engine's own q_math.c.
+      - name: Check the navigation bearings point where they claim to
+        run: |
+          python3 accessibility-mode/tests/bearing_regression_test.py \
+            engine --engine etlegacy
+
+      # The shipped autoexec.cfg is the only thing a player edits, and
+      # every mistake in it is silent: a misspelled command binds fine
+      # and does nothing, a misspelled cvar is stored and never read, a
+      # missing sound plays silence. Check the names against the tree.
+      # The one defect class that has shipped from here, twice: narration
+      # wired into the engine with nothing bringing the runtime up, so
+      # every line reaches a backend that discards it. Compiles, links,
+      # passes every other test, and is silent.
+      - name: Check the engine brings the runtime up
+        run: |
+          python3 accessibility-mode/tests/runtime_init_test.py engine
+
+      # A repeat key that loops inside the engine hangs the game with no
+      # output. Only the two command tables can show that, and only
+      # before anyone runs it.
+      - name: Check the repeat/stop commands cannot loop
+        run: |
+          python3 accessibility-mode/tests/command_wiring_test.py engine
+
+      - name: Check the shipped config names things the engine has
+        run: |
+          python3 accessibility-mode/tests/autoexec_config_test.py engine \
+            --cfg accessibility-mode/release/autoexec.cfg
+
+      # A text box is the one place the player produces the content rather
+      # than picking it, so the character echo is their only feedback. An
+      # echo off by one, or half a multi-byte character, compiles fine and
+      # is wrong only to the person listening.
+      - name: Check typed characters are echoed correctly
+        run: |
+          python3 accessibility-mode/tests/textfield_echo_test.py engine
+
+      # Every spoken distance and every "turn left" needs a target first.
+      # For six releases that came only from a configstring one map script
+      # command sets and most maps never run, so on most maps the mod said
+      # nothing and sounded broken. It compiled, linked, and passed every
+      # check here. This one reads the engine's own list of objective
+      # types and fails if the narration cannot find them.
+      - name: Check the navigation can find an objective
+        run: |
+          python3 accessibility-mode/tests/objective_source_test.py \
+            engine --engine etlegacy
+
+      # The mod speaks distances in metres, and neither engine says what a
+      # Quake unit is worth - the conversion was taken on faith from an
+      # external convention. The engine does state the size of a human
+      # being, in five independent places, so this converts those with the
+      # mod's own constant and requires each to come out human.
+      - name: Check spoken distances are in real metres
+        run: |
+          python3 accessibility-mode/tests/distance_scale_test.py engine
+
+      # Going prone sets the crouch flag as well, so narration that tests
+      # crouch first calls every prone player crouched and never says
+      # "prone" at all. Both orders read as reasonable; only the engine
+      # says which is right, so this reads it out of the engine.
+      - name: Check the stance narration names the right posture
+        run: |
+          python3 accessibility-mode/tests/stance_narration_test.py engine
+
+      # Walking over something gave a sound and nothing else. The
+      # narration hangs off CG_ItemPickup, where the engine builds the
+      # on-screen popup, so this checks both pickup event paths still
+      # reach it and that the spoken line is the popup's own text.
+      - name: Check every pickup shown on screen is also spoken
+        run: |
+          python3 accessibility-mode/tests/pickup_narration_test.py engine
+
+      # "What is in front of me" can only honestly be answered by the
+      # engine's own collision, and the materials have to be the flags it
+      # already uses for footsteps and impacts. A description built from
+      # anything else is confidently wrong exactly when a player is
+      # lining up a shot.
+      - name: Check the look-ahead reports what the engine sees
+        run: |
+          python3 accessibility-mode/tests/look_ahead_test.py engine
+
+      # The ground narration speaks a word chosen by the engine's own
+      # footstep type - the one it picks the footstep sound from - so the
+      # word and the sound cannot disagree. That only holds while the
+      # word table lines up with the enum, and an enum that gains a
+      # member in the middle would have the mod calling gravel metal.
+      - name: Check the spoken ground matches the footstep played
+        run: |
+          python3 accessibility-mode/tests/footing_test.py engine
+
+      # Telling a player they face north when the compass says south is
+      # the worst failure this mod can have: confident, plausible, and
+      # wrong in the direction they then walk. Nothing compiles
+      # differently if it is backwards and a player with no sight has no
+      # second opinion, so this checks it against the ring of cardinal
+      # points the game draws for everyone else.
+      - name: Check the spoken compass matches the game's own
+        run: |
+          python3 accessibility-mode/tests/compass_test.py \
+            engine --engine etlegacy
+
+      # "Deadly drop ahead" is the most dangerous thing this mod says: a
+      # player will walk the long way round because of it, and the mirror
+      # failure - a fatal fall announced as a harmless ledge - costs them
+      # the round. So none of the judgement is ours. This reads the
+      # falling-damage ladder out of PM_CrashLand and requires the two
+      # bands the mod warns on to be the engine's own numbers, then
+      # checks the physics that turns a landing speed back into a height
+      # and that the heights come out human-sized.
+      - name: Check the drop warning uses the engine's own fall damage
+        run: |
+          python3 accessibility-mode/tests/fall_hazard_test.py \
+            engine --engine etlegacy
+
+      # The engine works out how deep the player is every movement frame,
+      # but keeps the answer in pmove_t where the cgame cannot reach it,
+      # so the mod asks the same question again for itself. That makes it
+      # a transcription, and a transcription that drifts still returns
+      # plausible numbers while being wrong about exactly the levels the
+      # words are pinned to - "deep water" means a jump will swim,
+      # "swimming" means falling damage is cancelled.
+      - name: Check the water narration is the engine's own waterlevel
+        run: |
+          python3 accessibility-mode/tests/water_level_test.py \
+            engine --engine etlegacy
+
+      # Silencing the scope toggle had to silence only the scope toggle.
+      # weapAlts also pairs a mortar and a machine gun with their set-down
+      # forms and a rifle with its grenade, and those have no zoom
+      # narration to speak in their place - silencing them would make
+      # setting up a mortar completely silent. This walks the weapon
+      # table and requires exactly the scoped pairs to be suppressed.
+      - name: Check only the scope toggle is silenced as a weapon change
+        run: |
+          python3 accessibility-mode/tests/weapon_switch_test.py \
+            engine --engine etlegacy
+
+      # Saying where you are is only worth anything if it is the same
+      # place a sighted teammate would name. Both routes have to stay
+      # the engine's own: the map's named locations, and the command
+      # map's grid for maps that ship none. Without the second, the
+      # feature goes silent on those maps - and silence reads as "there
+      # is nothing here" rather than "this map has no names".
+      - name: Check the spoken location is the engine's own
+        run: |
+          python3 accessibility-mode/tests/location_test.py \
+            engine --engine etlegacy
+
+      # A sound the engine cannot find plays silence and says nothing
+      # about it - no error, no log line, no difference from a cue that
+      # decided not to fire. These four are generated and packed into
+      # the pk3, so there are three places the chain can break and a
+      # break in any of them is inaudible. This walks all of it.
+      - name: Check the mod's own sounds exist and are usable
+        run: |
+          python3 accessibility-mode/tests/cue_sounds_test.py \
+            engine --engine etlegacy
+
+      # ET_MOVER covers lifts and tank barriers as well as doors, and
+      # dmgFlags means something different on a player than on a mover -
+      # so the beacon needs both the engine's own door hint and an
+      # entity-type guard, or it creaks at things that do not open. The
+      # crosshair half pins the disguise rule: the cue must say what a
+      # sighted player would believe, including when the game is lying
+      # to them.
+      - name: Check the door beacon and the crosshair cue stay honest
+        run: |
+          python3 accessibility-mode/tests/door_and_crosshair_test.py \
+            engine --engine etlegacy
+
+      # This shipped wrong: the narration traced a ray from the eye and
+      # announced whatever it hit, which finds the upright face of every
+      # stair in the game and calls it a wall while the player walks up
+      # it. The probe is the player's own body now, lifted by the
+      # engine's step, so it only speaks when they are actually stopped.
+      # The ordering half matters just as much and is invisible at the
+      # call site: speech cuts off the line in progress, so of two
+      # reports in a frame the later one wins, and a tester lost an
+      # objective distance to a scenery report exactly that way.
+      - name: Check the obstacle report only fires when the way is blocked
+        run: |
+          python3 accessibility-mode/tests/obstacle_blocking_test.py \
+            engine --engine etlegacy
+
+      # A tester lost the same objective distance twice: once to a wall
+      # report in the same frame, which ordering fixed, and once while
+      # deliberately pressing the objectives key - which ordering could
+      # never have fixed, because the key speaks on one frame and the
+      # per-frame narration runs on the next. So an answer the player
+      # asked for holds the scenery quiet. The drop warning is exempt:
+      # the one report worth interrupting anything is being told you are
+      # about to walk off something that will kill you.
+      - name: Check the scenery does not talk over an answer
+        run: |
+          python3 accessibility-mode/tests/speech_hold_test.py \
+            engine --engine etlegacy
+
+      # Fixing the obstacle report by lifting the probe over a stair riser
+      # left stairs silent, which reads exactly like an open corridor.
+      # This is the half that was owed, and its failure mode is a
+      # confident one: a ramp announced as steps sends someone feeling
+      # for treads that are not there. So the tread test has to be far
+      # stricter than the engine's own "can this be walked on".
+      - name: Check the stairs report measures stairs and not ramps
+        run: |
+          python3 accessibility-mode/tests/stairs_test.py \
+            engine --engine etlegacy
+
+      # The cursor hint is how a sighted engineer knows an objective is
+      # workable at all, and the mod answered it with one click. The enum
+      # behind it has holes - HINT_ACTIVATE is 3, HINT_BUILD 38 - so
+      # anything indexed by position announces the wrong thing, and a
+      # hint with no case at all announces nothing, which is what a
+      # player hears when there is nothing there.
+      - name: Check every cursor hint the game draws is spoken
+        run: |
+          python3 accessibility-mode/tests/interaction_hint_test.py \
+            engine --engine etlegacy
+
+      # The survey speaks map squares, and the entire value of doing so
+      # is that "C,3" is the same C,3 a teammate reads off their screen.
+      # This compiles the mod's square lookup and the engine's own
+      # BG_GetLocationString into one harness and compares tens of
+      # thousands of positions - because the row direction is a mirror
+      # waiting to happen: ET counts rows from the north edge down, and
+      # written the natural way round it reverses the whole battlefield
+      # while compiling perfectly.
+      - name: Check the map survey's squares are the engine's squares
+        run: |
+          python3 accessibility-mode/tests/map_grid_test.py engine
+
+      # And the fairness half. The command map holds what the server
+      # chose to send this player's team; cg_entities holds everything
+      # in the snapshot, including enemies nobody spotted. One loop over
+      # the wrong array turns this into a wallhack that compiles clean
+      # and reads as ordinary code.
+      - name: Check the map survey reports the command map and nothing else
+        run: |
+          python3 accessibility-mode/tests/map_survey_test.py engine
+
+      # A tester playing alone spent a match walking between objectives
+      # that could not be started yet, because the narration pointed at
+      # whichever was nearest and ET's maps run them in sequence. The
+      # order and the three states belong to the engine - its own error
+      # message documents 0 default, 1 complete, 2 failed - so this
+      # reads them back out of it and fails if they ever stop meaning
+      # that, or if the chooser goes back to picking by distance.
+      - name: Check objectives are followed in the map's own order
+        run: |
+          python3 accessibility-mode/tests/objective_order_test.py engine
+
+      # A tester reported the medic's zero reserve as a bug; the mod was
+      # right, and the answer went into the shipped install guide as a
+      # paragraph of real figures. That paragraph is a claim about
+      # someone else's code, handed to players, and if upstream
+      # rebalances the medic it would explain away a genuine bug. So the
+      # figures are read back out of the engine on every run.
+      - name: Check the install guide's claims about the game hold
+        run: |
+          python3 accessibility-mode/tests/guide_claims_test.py engine
+
+      # The scope announced nothing while the binoculars worked. Scoping
+      # is a weapon change here, so the weapon report landed a few hundred
+      # milliseconds after the scope report and the backend delivered it
+      # by purging the scope line mid-sentence. Nothing else here can see
+      # that: both reports are correct on their own.
+      - name: Check the scope report is read live and not cut off
+        run: |
+          python3 accessibility-mode/tests/zoom_state_test.py \
+            engine --engine etlegacy
+
+      # Two defects from one test session, both "a mouse can reach it and a
+      # keyboard cannot": the weapon scope, whose command the stock config
+      # binds to MOUSE2 and nothing else, and menu focus, which a parked
+      # cursor stole back on every key press - landing a player on a server
+      # they never chose. Both fixes are one condition each in someone
+      # else's code, and an upstream merge could drop either silently.
+      - name: Check the game is still reachable without a mouse
+        run: |
+          python3 accessibility-mode/tests/keyboard_reachable_test.py \
+            engine --engine etlegacy
+
+      # The mod replaces two stock bindings, and may only do so while the
+      # commands behind them stay incapable of anything. If the engine ever
+      # brings those weapon banks to life, this fails the build rather than
+      # letting the mod quietly steal a key that started working.
+      # A slider was the last control only a mouse could work, and its
+      # keyboard behaviour had to be invented rather than un-broken -
+      # there was no key press to fix. Inventions need checking harder
+      # than transcriptions: this compiles the real stepping out of the
+      # patched tree and walks all fifty-one sliders the stock menus
+      # define, from end to end, in both directions. Ranges run from 0-1
+      # for a volume to 0-10000 for a timeout, and a step that suits one
+      # is useless on the other.
+      - name: Check every slider can be driven from the keyboard
+        run: |
+          python3 accessibility-mode/tests/slider_step_test.py engine
+
+      # A tester opened the controls list, heard "Crouch" and nothing
+      # else, and concluded the controls could not be changed at all.
+      # Two failures with one symptom: the row never said which key it
+      # was on, and Enter could not reach it from the keyboard. The
+      # capture is the dangerous half - pressing Enter makes the next
+      # key you touch the new binding, and a silent version of that is
+      # a trap.
+      - name: Check the controls list can be read and changed by keyboard
+        run: |
+          python3 accessibility-mode/tests/bind_row_test.py \
+            engine --engine etlegacy
+
+      # The compass is a yaw report and says nothing about up and down,
+      # so a player who tipped the view got no acknowledgement at all and
+      # no way to tell a low ceiling from open sky. The obvious fix is
+      # the wrong one: "forty degrees up" is the sky in a field and a
+      # ceiling in a cellar. So the pitch is only a trigger and the
+      # trace is the answer - and the stand-down while zoomed has to
+      # name a flag the tree actually assigns, which is the trap that
+      # left the 2010 scope narration silent for six releases.
+      - name: Check the up-and-down report traces rather than says an angle
+        run: |
+          python3 accessibility-mode/tests/look_around_test.py \
+            engine --engine etlegacy
+
+      # A tester turned the music up and found the narrator underneath it.
+      # Neither mixer can see the other - the music is the engine's and
+      # the speech goes out through Windows - so no volume setting
+      # balances them, and ducking the music while the words are on it is
+      # the only lever there is. The dangerous half is the restore: a
+      # duck that never lifts leaves a player with no music and nothing
+      # to blame but the game, and a restore to full volume overrides the
+      # map scripts that fade the music for their own reasons.
+      - name: Check the music steps back for the narrator and comes back
+        run: |
+          python3 accessibility-mode/tests/music_duck_test.py \
+            engine --engine etlegacy
+
+      # Registering a cvar fills the module's copy once and nothing
+      # refreshes it afterwards. Every setting this mod adds was in that
+      # state on ET: Legacy: changeable, stored, and ignored until the
+      # map reloaded. The 2010 tree never was, because it used the
+      # engine's own cvar table - one mod, two integrations, one defect.
+      - name: Check a setting changed mid-game is actually read
+        run: |
+          python3 accessibility-mode/tests/settings_live_test.py \
+            engine --engine etlegacy
+
+      # The mod ships two menu files now. Its own page shadows nothing and
+      # can only be wrong by naming a setting or a command that does not
+      # exist - silent either way, and invisible to somebody who cannot
+      # see the screen: the row still reads out and still announces a
+      # value. The copy of the game's options menu genuinely does shadow
+      # the original, which freezes that menu at the version it was taken
+      # from; this fails the build when upstream edits it, because
+      # nothing else ever would.
+      - name: Check the shipped menus against the engine they sit on
+        run: |
+          python3 accessibility-mode/tests/menu_override_test.py engine
+
+      # The player's own marker: forgotten with its map, pinging from
+      # within earshot, and cleared when reached. Each failure is silent
+      # and each walks a blind player somewhere wrong or nowhere.
+      - name: Check the marker can be heard, reached and forgotten
+        run: |
+          python3 accessibility-mode/tests/marker_test.py engine
+
+      # A tap on a turn key steps to the next compass point by pressing
+      # the engine's own +left and +right. Turning the wrong way, letting
+      # go of the player's own key, or leaving a key down across a map
+      # change are each one character away.
+      - name: Check a tap turns the right way and lets go
+        run: |
+          python3 accessibility-mode/tests/turn_step_test.py engine
+
+      # The scoreboard, the player stats and the top shots are answers the
+      # server sends after the key is pressed; each half has to be wired
+      # for any of them to speak, and the scoreboard's timing rests on how
+      # the server splits it.
+      - name: Check the scoreboard, stats and top shots are spoken
+        run: |
+          python3 accessibility-mode/tests/scoreboard_speech_test.py engine
+
+      - name: Check what is around you is named and pointed right
+        run: |
+          python3 accessibility-mode/tests/surroundings_test.py engine
+
+      - name: Check objective text is spoken without its stars
+        run: |
+          python3 accessibility-mode/tests/objective_text_test.py engine
+
+      - name: Check the map key opens and closes the map
+        run: |
+          python3 accessibility-mode/tests/map_toggle_test.py engine
+
+      - name: Check the build progress is heard while aiming at it
+        run: |
+          python3 accessibility-mode/tests/build_progress_test.py engine
+
+      - name: Walk to the marker by its ping, round the walls
+        run: |
+          python3 accessibility-mode/tests/marker_route_sim_test.py engine
+
+      - name: Check the loading screen is said
+        run: |
+          python3 accessibility-mode/tests/loading_speech_test.py engine
+
+      - name: Check a Mac says the map, its briefing and the team key one at a time
+        run: |
+          python3 accessibility-mode/tests/mac_loading_order_test.py engine
+
+      - name: Check a hosted game lets friends in and brings bots
+        run: |
+          python3 accessibility-mode/tests/hosting_test.py engine
+
+      - name: Check the updater is wired from the release to the popups
+        run: |
+          python3 accessibility-mode/tests/update_popup_test.py engine
+
+      - name: Check every control on the Play Online page can be heard
+        run: |
+          python3 accessibility-mode/tests/play_online_test.py engine
+
+      - name: Check F keeps an objective on its list however crowded
+        run: |
+          python3 accessibility-mode/tests/use_list_full_test.py engine
+
+      - name: Check F always says something, and passes over icons use cannot act on
+        run: |
+          python3 accessibility-mode/tests/f_never_silent_test.py engine
+
+      - name: Check construction, demolition and flag sounds mark the right side
+        run: |
+          python3 accessibility-mode/tests/site_cues_test.py engine
+
+      - name: Check ladders are found and climbed the way the game climbs
+        run: |
+          python3 accessibility-mode/tests/ladder_climb_test.py engine
+
+      - name: Check ladders are read from the map the way the engine reads it
+        run: |
+          python3 accessibility-mode/tests/ladder_cues_test.py engine
+
+      - name: Check the way up goes where the game lets a player go
+        run: |
+          python3 accessibility-mode/tests/route_up_test.py engine
+
+      - name: Check thrown dynamite can be found and armed
+        run: |
+          python3 accessibility-mode/tests/dynamite_test.py engine
+
+      - name: Check the marker sounds different ahead, to the side and behind
+        run: |
+          python3 accessibility-mode/tests/marker_sound_test.py engine
+
+      - name: Check ] and [ choose what F turns to, and F9 says where you are
+        run: |
+          python3 accessibility-mode/tests/use_chooser_test.py engine
+
+      - name: Check places are measured the way the game will measure them
+        run: |
+          python3 accessibility-mode/tests/place_probe_test.py engine
+
+      - name: Check sniper spots are found, checked for a way up, and offered on a key
+        run: |
+          python3 accessibility-mode/tests/sniper_spot_test.py engine
+
+      - name: Check rooms are found, checked for a way in, and offered on a key
+        run: |
+          python3 accessibility-mode/tests/rooms_test.py engine
+
+      - name: Check stairs are on the F list, and F turns up or down them
+        run: |
+          python3 accessibility-mode/tests/stairs_on_f_test.py engine
+
+      - name: Check nothing the narrator meets is called "Object"
+        run: |
+          python3 accessibility-mode/tests/object_names_test.py engine
+
+      - name: Check a covert op finds an enemy's uniform with F, and takes it
+        run: |
+          python3 accessibility-mode/tests/uniform_test.py engine
+
+      - name: Check the only distances called on the way are the marker's
+        run: |
+          python3 accessibility-mode/tests/marker_distance_only_test.py engine
+
+      - name: Check the game's announcer has a volume of its own
+        run: |
+          python3 accessibility-mode/tests/announcer_volume_test.py engine
+
+      - name: Check the main menu's first button is said as Play online
+        run: |
+          python3 accessibility-mode/tests/play_online_label_test.py engine
+
+      - name: Check each of the mod's sounds has a volume, on the Sound page
+        run: |
+          python3 accessibility-mode/tests/sound_page_test.py engine
+
+      - name: Check the way out of a building is found, and the way in
+        run: |
+          python3 accessibility-mode/tests/way_out_test.py engine
+
+      - name: Check the things in a room are said as the player comes up to them
+        run: |
+          python3 accessibility-mode/tests/furniture_test.py engine
+
+      - name: Check the way goes under a low ceiling crouched, and says so
+        run: |
+          python3 accessibility-mode/tests/crouch_way_test.py engine
+
+      - name: Check health packs, ammo packs, weapons and the tank are heard
+        run: |
+          python3 accessibility-mode/tests/pickup_cues_test.py engine
+
+      - name: Check the landmines the game shows are said, heard and walked round
+        run: |
+          python3 accessibility-mode/tests/landmine_warnings_test.py engine
+
+      - name: Check deaths are said, the one watched described, and the console told
+        run: |
+          python3 accessibility-mode/tests/deaths_watching_console_test.py engine
+
+      - name: Check F never picks up a weapon lying in front of what was chosen
+        run: |
+          python3 accessibility-mode/tests/use_line_test.py engine
+
+      - name: Check F keeps you facing what you chose while you walk to it
+        run: |
+          python3 accessibility-mode/tests/use_follow_test.py engine
+
+      - name: Check walking into a wall thuds, and into a thing knocks
+        run: |
+          python3 accessibility-mode/tests/bump_sounds_test.py engine
+
+      - name: Check SAPI 5 lets each line finish instead of cutting it off
+        run: |
+          python3 accessibility-mode/tests/speech_queue_test.py
+
+      - name: Check spectating and in play are told apart by the game's flags
+        run: |
+          python3 accessibility-mode/tests/play_state_test.py engine
+
+      - name: Check players near you are said only as far as sight reaches
+        run: |
+          python3 accessibility-mode/tests/players_near_test.py engine
+
+      - name: Check the aiming keys, and the lock only where it is fair
+        run: |
+          python3 accessibility-mode/tests/aim_assist_test.py engine
+
+      - name: Check the open map has the keys and gives them back
+        run: |
+          python3 accessibility-mode/tests/map_keys_test.py engine
+
+      - name: Check the claimed weapon banks are still dead
+        run: |
+          python3 accessibility-mode/tests/weapon_bank_test.py engine
+
+      # Both grenades have an empty description in the weapon table, so
+      # the narration announced their ammo and no name at all. Fifteen
+      # weapons are in that state and most are class signature kit, so
+      # this walks every weapon the number keys can reach and fails if
+      # any would be announced nameless or with an internal token.
+      - name: Check every selectable weapon has a name to speak
+        run: |
+          python3 accessibility-mode/tests/weapon_name_test.py engine
+
+      - name: Build the mod libraries with the feature ON
+        run: |
+          set -e
+          cmake -B build-on -S engine \
+            -DBUILD_MOD=ON -DFEATURE_ACCESSIBILITY=ON \
+            -DBUILD_CLIENT=OFF -DBUILD_SERVER=OFF \
+            -DINSTALL_EXTRA=OFF -DCROSS_COMPILE32=OFF
+          cmake --build build-on --target cgame ui -j"$(nproc)"
+
+      # FEATURE_ACCESSIBILITY is opt-in, and the claim that leaving it off
+      # is a true no-op is only worth anything if something checks it.
+      - name: Build the mod libraries with the feature OFF
+        run: |
+          set -e
+          cmake -B build-off -S engine \
+            -DBUILD_MOD=ON -DFEATURE_ACCESSIBILITY=OFF \
+            -DBUILD_CLIENT=OFF -DBUILD_SERVER=OFF \
+            -DINSTALL_EXTRA=OFF -DCROSS_COMPILE32=OFF
+          cmake --build build-off --target cgame ui -j"$(nproc)"
+
+  id-software:
+    name: id Software integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: accessibility-mode
+
+      - name: Clone the 2010 GPL release at the pinned commit
+        run: |
+          set -e
+          git clone --depth 1 \
+            https://github.com/id-Software/Enemy-Territory.git engine
+          cd engine
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$IDSOFTWARE_COMMIT" ]; then
+            echo "::error::id Software master resolved to $actual, expected $IDSOFTWARE_COMMIT"
+            exit 1
+          fi
+
+      - name: Put the accessibility library where the wiring expects it
+        run: ln -s "$GITHUB_WORKSPACE/accessibility-mode" engine/accessibility-mode
+
+      - name: Apply the patch series to a pristine tree
+        working-directory: engine
+        run: |
+          set -e
+          for patch in "$GITHUB_WORKSPACE"/accessibility-mode/integration/id-software/0*.patch; do
+            name="$(basename "$patch")"
+            if ! git apply --check "$patch" 2>/dev/null; then
+              echo "::error file=integration/id-software/$name::$name does not apply cleanly to the GPL release"
+              git apply --check "$patch"
+            fi
+            git apply "$patch"
+            echo "applied $name"
+          done
+
+      - name: Check the navigation bearings point where they claim to
+        run: |
+          python3 accessibility-mode/tests/bearing_regression_test.py \
+            engine --engine id-software
+
+      # The one defect class that has shipped from here, twice: narration
+      # wired into the engine with nothing bringing the runtime up, so
+      # every line reaches a backend that discards it. Compiles, links,
+      # passes every other test, and is silent.
+      - name: Check the engine brings the runtime up
+        run: |
+          python3 accessibility-mode/tests/runtime_init_test.py engine
+
+      # Same loop hazard as the ET: Legacy side, and this tree answers ui
+      # commands with a Q_stricmp chain rather than a table, so the shapes
+      # differ while the failure does not.
+      - name: Check the repeat/stop commands cannot loop
+        run: |
+          python3 accessibility-mode/tests/command_wiring_test.py engine
+
+      # Same silent failure as the ET: Legacy side. This release has no
+      # main objective at all, so the command map's own list is the only
+      # source there is, and a type missing from it is a map the mod has
+      # nothing to say about.
+      - name: Check the navigation can find an objective
+        run: |
+          python3 accessibility-mode/tests/objective_source_test.py \
+            engine --engine id-software
+
+      # The mod speaks distances in metres, and neither engine says what a
+      # Quake unit is worth - the conversion was taken on faith from an
+      # external convention. The engine does state the size of a human
+      # being, in five independent places, so this converts those with the
+      # mod's own constant and requires each to come out human.
+      - name: Check spoken distances are in real metres
+        run: |
+          python3 accessibility-mode/tests/distance_scale_test.py engine
+
+      # Going prone sets the crouch flag as well, so narration that tests
+      # crouch first calls every prone player crouched and never says
+      # "prone" at all. Both orders read as reasonable; only the engine
+      # says which is right, so this reads it out of the engine.
+      - name: Check the stance narration names the right posture
+        run: |
+          python3 accessibility-mode/tests/stance_narration_test.py engine
+
+      # Walking over something gave a sound and nothing else. The
+      # narration hangs off CG_ItemPickup, where the engine builds the
+      # on-screen popup, so this checks both pickup event paths still
+      # reach it and that the spoken line is the popup's own text.
+      - name: Check every pickup shown on screen is also spoken
+        run: |
+          python3 accessibility-mode/tests/pickup_narration_test.py engine
+
+      # "What is in front of me" can only honestly be answered by the
+      # engine's own collision, and the materials have to be the flags it
+      # already uses for footsteps and impacts. A description built from
+      # anything else is confidently wrong exactly when a player is
+      # lining up a shot.
+      - name: Check the look-ahead reports what the engine sees
+        run: |
+          python3 accessibility-mode/tests/look_ahead_test.py engine
+
+      # The compass is a yaw report and says nothing about up and down,
+      # so a player who tipped the view got no acknowledgement at all and
+      # no way to tell a low ceiling from open sky. The obvious fix is
+      # the wrong one: "forty degrees up" is the sky in a field and a
+      # ceiling in a cellar. So the pitch is only a trigger and the
+      # trace is the answer - and the stand-down while zoomed has to
+      # name a flag the tree actually assigns, which is the trap that
+      # left the 2010 scope narration silent for six releases.
+      - name: Check the up-and-down report traces rather than says an angle
+        run: |
+          python3 accessibility-mode/tests/look_around_test.py \
+            engine --engine id-software
+
+      # A tester turned the music up and found the narrator underneath it.
+      # Neither mixer can see the other - the music is the engine's and
+      # the speech goes out through Windows - so no volume setting
+      # balances them, and ducking the music while the words are on it is
+      # the only lever there is. The dangerous half is the restore: a
+      # duck that never lifts leaves a player with no music and nothing
+      # to blame but the game, and a restore to full volume overrides the
+      # map scripts that fade the music for their own reasons.
+      - name: Check the music steps back for the narrator and comes back
+        run: |
+          python3 accessibility-mode/tests/music_duck_test.py \
+            engine --engine id-software
+
+      # Registering a cvar fills the module's copy once and nothing
+      # refreshes it afterwards. Every setting this mod adds was in that
+      # state on ET: Legacy: changeable, stored, and ignored until the
+      # map reloaded. The 2010 tree never was, because it used the
+      # engine's own cvar table - one mod, two integrations, one defect.
+      - name: Check a setting changed mid-game is actually read
+        run: |
+          python3 accessibility-mode/tests/settings_live_test.py \
+            engine --engine id-software
+
+      # Same purge, plus one this tree had on its own: the zoom narration
+      # read cg.zoomed, which this client declares and never assigns, so
+      # its scope branch was unreachable and every scope was silent.
+      - name: Check the scope report is read live and not cut off
+        run: |
+          python3 accessibility-mode/tests/zoom_state_test.py \
+            engine --engine id-software
+
+      # This tree installs no binds, but it has the same parked-cursor
+      # focus reset - older than ET: Legacy's, and without even the
+      # listbox exception that tree grew later.
+      - name: Check the game is still reachable without a mouse
+        run: |
+          python3 accessibility-mode/tests/keyboard_reachable_test.py \
+            engine --engine id-software
+
+      # Same footstep hook and the same hazard: the word table is indexed
+      # by the engine's own footstep type.
+      - name: Check the spoken ground matches the footstep played
+        run: |
+          python3 accessibility-mode/tests/footing_test.py \
+            engine --engine id-software
+
+      # This tree has no ring of cardinal points to read, so the check
+      # here is the convention the ring rests on - the engine's own axes
+      # put north at yaw 90 - plus that the eight points are evenly
+      # spaced and in clockwise order. The strong form of the same check
+      # runs on the ET: Legacy side, over the same shared code.
+      - name: Check the spoken compass matches the engine's axes
+        run: |
+          python3 accessibility-mode/tests/compass_test.py \
+            engine --engine id-software
+
+      # The same three checks against the 2010 tree. Its falling-damage
+      # ladder and its waterlevel sampling are the same code ET: Legacy
+      # inherited, so they are read from this tree rather than assumed to
+      # match. The scope check takes the other route: this tree has no
+      # weapon-type flag, it names its scoped weapons in a switch, so the
+      # mod's list is compared against the weapons that switch zooms.
+      - name: Check the drop warning uses the engine's own fall damage
+        run: |
+          python3 accessibility-mode/tests/fall_hazard_test.py \
+            engine --engine id-software
+
+      - name: Check the water narration is the engine's own waterlevel
+        run: |
+          python3 accessibility-mode/tests/water_level_test.py \
+            engine --engine id-software
+
+      - name: Check only the scope toggle is silenced as a weapon change
+        run: |
+          python3 accessibility-mode/tests/weapon_switch_test.py \
+            engine --engine id-software
+
+      # This shipped wrong: the narration traced a ray from the eye and
+      # announced whatever it hit, which finds the upright face of every
+      # stair in the game and calls it a wall while the player walks up
+      # it. The probe is the player's own body now, lifted by the
+      # engine's step, so it only speaks when they are actually stopped.
+      # The ordering half matters just as much and is invisible at the
+      # call site: speech cuts off the line in progress, so of two
+      # reports in a frame the later one wins, and a tester lost an
+      # objective distance to a scenery report exactly that way.
+      - name: Check the obstacle report only fires when the way is blocked
+        run: |
+          python3 accessibility-mode/tests/obstacle_blocking_test.py \
+            engine --engine id-software
+
+      # A tester lost the same objective distance twice: once to a wall
+      # report in the same frame, which ordering fixed, and once while
+      # deliberately pressing the objectives key - which ordering could
+      # never have fixed, because the key speaks on one frame and the
+      # per-frame narration runs on the next. So an answer the player
+      # asked for holds the scenery quiet. The drop warning is exempt:
+      # the one report worth interrupting anything is being told you are
+      # about to walk off something that will kill you.
+      - name: Check the scenery does not talk over an answer
+        run: |
+          python3 accessibility-mode/tests/speech_hold_test.py \
+            engine --engine id-software
+
+      # Same two checks against the 2010 tree. Its hint enum is the full
+      # Wolfenstein list rather than ET: Legacy's pruned one, so the same
+      # icon is a different number in the two engines - which is the
+      # whole reason the mapping switches on names.
+      - name: Check the stairs report measures stairs and not ramps
+        run: |
+          python3 accessibility-mode/tests/stairs_test.py \
+            engine --engine id-software
+
+      - name: Check every cursor hint the game draws is spoken
+        run: |
+          python3 accessibility-mode/tests/interaction_hint_test.py \
+            engine --engine id-software
+
+      - name: Check the controls list can be read and changed by keyboard
+        run: |
+          python3 accessibility-mode/tests/bind_row_test.py \
+            engine --engine id-software
+
+      # The 2010 tree builds with SCons under Python 2, which is long dead,
+      # so its build scripts cannot run here. build-modules.py reads the
+      # real source lists straight out of SConscript.cgame / SConscript.ui -
+      # including the accessibility_string list patch 0010 adds - so it
+      # fails if that wiring names a file that is missing or will not
+      # compile. It builds each module with the feature off and on and
+      # requires the two warning sets to be identical.
+      - name: Build both modules, with the feature off and on
+        run: |
+          python3 accessibility-mode/integration/id-software/build-modules.py \
+            engine/src --outdir "$RUNNER_TEMP/id-modules"
+
+  # The mod's NVDA speech has always depended on a DLL that NV Access
+  # ships separately from NVDA, and that players had to go and find for
+  # themselves. The release bundles it now, which means this project is
+  # redistributing somebody else's binary - so the thing it redistributes
+  # has to be the thing it says it is, on every run, not on the day
+  # somebody checked.
+  #
+  # The job has two lives. While release/nvda-client.pin is UNPINNED it
+  # reports: it prints the URL that answered, the archive listing and the
+  # checksums, which is how the pins get established. Once pinned it is a
+  # guard and fails on any drift. A release cannot be cut in the first
+  # state - build-release.sh refuses - so the reporting mode cannot
+  # quietly become the permanent one.
+  nvda-client:
+    name: NVDA controller client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch it from NV Access and check it against the pin
+        run: ./release/fetch-nvda-client.sh "$RUNNER_TEMP/nvda" --report
+
+      - name: Show what would be packed
+        run: |
+          set -e
+          find "$RUNNER_TEMP/nvda" -type f | sort | while read -r file; do
+            printf '%s  %s\n' \
+              "$(sha256sum "$file" | cut -d' ' -f1)" \
+              "${file#$RUNNER_TEMP/nvda/}"
+          done
+          # The licence has to be there. Shipping an LGPL binary without
+          # it is not something this project is entitled to do, and the
+          # only moment anyone would notice is after it was published.
+          test -s "$RUNNER_TEMP/nvda/LICENSE.txt" \
+            || { echo "::error::no licence text was packed beside the DLL"; exit 1; }
+
+  # The Mac port: the library and the game's cgame and ui, built on a Mac
+  # for both Apple Silicon and Intel, the way ET: Legacy builds its own
+  # Mac mod (easybuild.sh -mod --osx-arc="x86_64;arm64"). Nothing in this
+  # container can compile Objective-C against the macOS SDK, so this job
+  # is the only place macos_speech.m is ever built before a player runs
+  # it - warnings are failures.
+  macos:
+    name: macOS build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: accessibility-mode
+
+      - name: Build the library and run its smoke tests
+        run: |
+          set -e
+          cmake -S accessibility-mode -B lib \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.14 \
+            -DCMAKE_C_FLAGS="-Werror" -DCMAKE_OBJC_FLAGS="-Werror"
+          cmake --build lib -j
+          cd lib
+          for test in ./eta_*_smoke_test; do
+            echo "== $test"
+            "$test"
+          done
+
+      # The Mac updater, against GitHub as the game will reach it: the
+      # same checks the Windows job makes of WinHTTP and PowerShell.
+      - name: Updater on the Mac - fetch through GitHub's redirect
+        run: |
+          set -e
+          exe=lib/eta_windows_update_live_test
+          got="$("$exe" fetch "https://github.com/etlegacy/etlegacy/raw/$ETLEGACY_COMMIT/.gitignore")"
+          curl -fsSL -o expected.txt "https://raw.githubusercontent.com/etlegacy/etlegacy/$ETLEGACY_COMMIT/.gitignore"
+          want="$(shasum -a 256 expected.txt | cut -d' ' -f1) $(wc -c < expected.txt | tr -d ' ')"
+          echo "updater: $got"
+          echo "mac:     $want"
+          test "$got" = "$want" || { echo "::error::the fetched text is not the file"; exit 1; }
+
+      - name: Updater on the Mac - a missing page, and plain http, are failures
+        run: |
+          exe=lib/eta_windows_update_live_test
+          "$exe" missing "https://github.com/etlegacy/etlegacy/releases/download/eta-no-such-release/eta-update.txt" \
+            || { echo "::error::a 404 was taken as an update"; exit 1; }
+          "$exe" missing "http://github.com/etlegacy/etlegacy/raw/$ETLEGACY_COMMIT/.gitignore" \
+            || { echo "::error::plain http was accepted"; exit 1; }
+
+      - name: Updater on the Mac - download a larger file and check its hash
+        run: |
+          set -e
+          exe=lib/eta_windows_update_live_test
+          mkdir -p "eta update test"
+          file="$PWD/eta update test/files.c.download"
+          got="$("$exe" download "https://github.com/etlegacy/etlegacy/raw/$ETLEGACY_COMMIT/src/qcommon/files.c" "$file")"
+          want="$(shasum -a 256 "$file" | cut -d' ' -f1) $(wc -c < "$file" | tr -d ' ')"
+          echo "updater: $got"
+          echo "mac:     $want"
+          test "$got" = "$want" || { echo "::error::the hash the updater worked out is not the file's"; exit 1; }
+          test "$(wc -c < "$file")" -gt 100000 || { echo "::error::the download is too short to have taken more than one read"; exit 1; }
+
+      - name: Updater on the Mac - swap the pk3 once the game exits
+        run: |
+          set -e
+          exe=lib/eta_windows_update_live_test
+          dir="$PWD/eta update test/legacy"
+          mkdir -p "$dir"
+          new="$dir/zzz_accessibility.pk3.download"
+          pk3="$dir/zzz_accessibility.pk3"
+          printf new > "$new"
+          printf old > "$pk3"
+          "$exe" swap "$new" "$pk3" || { echo "::error::the helper did not start, or moved the pk3 while the game ran"; exit 1; }
+          for i in $(seq 60); do [ -e "$new" ] || break; sleep 1; done
+          test ! -e "$new" || { echo "::error::the download was never moved into place"; exit 1; }
+          test "$(cat "$pk3")" = new || { echo "::error::the pk3 is not the new one"; exit 1; }
+          test "$(cat "$pk3.previous")" = old || { echo "::error::the old pk3 was not kept"; exit 1; }
+          echo "swapped; the old one kept as zzz_accessibility.pk3.previous"
+
+      - name: Updater on the Mac - swap, then start the game again
+        run: |
+          set -e
+          exe="$PWD/lib/eta_windows_update_live_test"
+          dir="$PWD/eta update test/restart"
+          mkdir -p "$dir"
+          new="$dir/zzz_accessibility.pk3.download"
+          pk3="$dir/zzz_accessibility.pk3"
+          printf newer > "$new"
+          printf new > "$pk3"
+          export ETA_RESTART_MARKER="$dir/restarted"
+          "$exe" restart "$new" "$pk3" || { echo "::error::the helper did not start"; exit 1; }
+          for i in $(seq 60); do [ -e "$ETA_RESTART_MARKER" ] && break; sleep 1; done
+          test -e "$ETA_RESTART_MARKER" || { echo "::error::the game was not started again"; exit 1; }
+          test "$(cat "$pk3")" = newer || { echo "::error::the pk3 was not swapped before the restart"; exit 1; }
+          echo "swapped and started again"
+
+      - name: Clone ET Legacy at the pinned tag
+        run: |
+          set -e
+          git clone --depth 1 --branch "$ETLEGACY_TAG" \
+            https://github.com/etlegacy/etlegacy.git engine
+          cd engine
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$ETLEGACY_COMMIT" ]; then
+            echo "::error::$ETLEGACY_TAG resolved to $actual, expected $ETLEGACY_COMMIT"
+            exit 1
+          fi
+          git submodule update --init --depth 1 libs
+          ln -s "$GITHUB_WORKSPACE/accessibility-mode" accessibility-mode
+          for patch in "$GITHUB_WORKSPACE"/accessibility-mode/integration/etlegacy/0*.patch; do
+            git apply "$patch"
+          done
+
+      - name: Build cgame_mac, ui_mac, and qagame_mac with bots
+        run: |
+          accessibility-mode/release/build-mac-libs.sh engine "$RUNNER_TEMP/mac-libs" dev "$ETLEGACY_TAG"
+
+      - name: Check both are universal and carry the Mac speech and updater
+        run: |
+          set -e
+          for lib in cgame_mac ui_mac; do
+            archs="$(lipo -archs "$RUNNER_TEMP/mac-libs/$lib")"
+            echo "$lib: $archs"
+            case " $archs " in *" x86_64 "*) ;; *) echo "::error::$lib has no Intel slice"; exit 1;; esac
+            case " $archs " in *" arm64 "*) ;; *) echo "::error::$lib has no Apple Silicon slice"; exit 1;; esac
+            nm "$RUNNER_TEMP/mac-libs/$lib" > "$RUNNER_TEMP/$lib.symbols"
+            if ! grep -q "ETA_MacSpeech_Speak" "$RUNNER_TEMP/$lib.symbols"; then
+              echo "::error::$lib does not carry the Mac speech"
+              exit 1
+            fi
+          done
+          # The menus hold the updater, and it must be the Mac's, not the
+          # stub that says there is none.
+          if ! grep -q "ETAMacUpdateJob" "$RUNNER_TEMP/ui_mac.symbols"; then
+            echo "::error::ui_mac does not carry the Mac updater"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-libraries
+          path: |
+            ${{ runner.temp }}/mac-libs/cgame_mac
+            ${{ runner.temp }}/mac-libs/ui_mac
+            ${{ runner.temp }}/mac-libs/qagame_mac
