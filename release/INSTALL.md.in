@@ -1331,7 +1331,8 @@ choose.
   way the ping points: *"Facing the way. 40 meters to marker"*. Walk, and
   press it again whenever you have lost the way. Period was the game's
   zoom of the small map on screen; the mod only takes it if it is still
-  on that.
+  on that. **Shift+N** does the same; N by itself still resets the spawn
+  timer, as before.
 - **Keypad star takes it away.** It also goes by itself when you get
   there: walking into the marked square, or back within three metres of
   a marked spot, says *"Marker reached"*.

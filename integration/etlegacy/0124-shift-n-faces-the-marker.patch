@@ -1,0 +1,64 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index bddcea6..472d836 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1618,6 +1618,23 @@ static void CG_AccessibilityMarkerFace_f(void)
+ 	ETA_Speech_Say(meters <= 1 ? "Facing the marker, here" : va("Facing the way. %d meters to marker", meters));
+ }
+ 
++static void CG_TimerReset_f(void);
++
++/*
++ * N: the game's spawn-timer reset, as ever; with Shift, turned toward the
++ * way to the marker. The tester asked for Shift+N for the marker, and N
++ * keeps what it did.
++ */
++static void CG_AccessibilityTimerReset_f(void)
++{
++	if (trap_Key_IsDown(K_LSHIFT) || trap_Key_IsDown(K_RSHIFT))
++	{
++		CG_AccessibilityMarkerFace_f();
++		return;
++	}
++	CG_TimerReset_f();
++}
++
+ static void CG_AccessibilityMarkerClear_f(void)
+ {
+ 	ETA_HudNarrator_HoldPassive(cg.time);
+@@ -6344,6 +6361,7 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
+ 	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+ 	{ "accessibilityMarkerFace", CG_AccessibilityMarkerFace_f },
++	{ "accessibilityTimerReset", CG_AccessibilityTimerReset_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
+ 	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
+ 	{ "accessibilityUseNext",     CG_AccessibilityUseNext_f },
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 19a89c6..7583bd8 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9753,7 +9753,10 @@ void UI_AccessibilityInstallBinds(void)
+ 		/* Period turns toward the way to the marker, as O does in the
+ 		   RTCW mode; taken only from the game's zoom of the on-screen
+ 		   map, which is of no use without sight. */
+-		{ '.',            "accessibilityMarkerFace",   "mapzoomin",  16 }
++		{ '.',            "accessibilityMarkerFace",   "mapzoomin",  16 },
++		/* Shift+N too, as the tester asked: N keeps resetting the spawn
++		   timer, and with Shift turns toward the marker. */
++		{ 'n',            "accessibilityTimerReset",   "timerreset", 17 }
+ 	};
+ 
+ 	vmCvar_t installed;
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index c1c2115..58ec477 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -871,6 +871,7 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymarkerplace",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerwhere",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerface",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
++	{ "accessibilitytimerreset",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerobjective",              -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilityusenext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },

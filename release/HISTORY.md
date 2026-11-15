@@ -9,6 +9,13 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.1 - 14 November 2026
+
+**The main menu's first button is said as "Play online" - this time it works.**
+
+- 1.4.4 meant to say *"Play online"* for the main menu's first button,
+  but it still said *"Play"*. It now says *"Play online"*.
+
 ## 1.4.4 - 14 November 2026
 
 **Period turns you toward the marker, and the main menu says "Play online".**

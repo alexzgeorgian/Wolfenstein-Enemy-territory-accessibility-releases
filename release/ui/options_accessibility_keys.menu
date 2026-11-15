@@ -79,16 +79,17 @@ menuDef {
 // it down, where you stand. Then the ping and the distance callouts walk
 // you there.
 #define MARKER_Y (MAP_Y + MAP_H + SUBWINDOW_OPTION_Y_PADDING)
-#define MARKER_H SUBWINDOW_OPTION_COMPUTE_H(8)
+#define MARKER_H SUBWINDOW_OPTION_COMPUTE_H(9)
 	SUBWINDOW(SUBWINDOW_OPTION_HEADER_X2_START, MARKER_Y, SUBWINDOW_OPTION_HEADER_WIDTH_R, MARKER_H, _("YOUR MARKER"))
 	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 1), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Place Marker:"), .2, 8, "accessibilityMarkerPlace", _("With the map open, on the square under the cursor. Otherwise, where you stand"))
 	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 2), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Where Is Marker:"), .2, 8, "accessibilityMarkerWhere", _("How far it is and which way to turn"))
 	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 3), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Face The Way:"), .2, 8, "accessibilityMarkerFace", _("Turns you toward the way to the marker, round the walls, and says how far it is"))
-	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 4), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Clear Marker:"), .2, 8, "accessibilityMarkerClear", _("Takes the marker away. It also goes by itself when you reach it"))
-	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 5), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Objective:"), .2, 8, "accessibilityMarkerObjective", _("Puts the marker on the objective, and its sound leads the way there - up stairs, ladders and ledges. Press again within five seconds for the next objective"))
-	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 6), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Sniper Spot:"), .2, 8, "accessibilitySniperSpot", _("Puts the marker on the nearest high place that looks out a long way, and says what it sees. Press again within five seconds for the next"))
-	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 7), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Room:"), .2, 8, "accessibilityRoom", _("Puts the marker on the nearest room, with its name, floor and size, and leads you inside. Press again within five seconds for the next"))
-	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 8), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Way Out Or In:"), .2, 8, "accessibilityWayOut", _("Inside a building, puts the marker on the nearest way out and leads you there. Outside, on the nearest way into a building. Press again within five seconds for another"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 4), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Timer, Shift Faces Way:"), .2, 8, "accessibilityTimerReset", _("Resets the spawn timer, as the game's own key does. With Shift held, turns you toward the way to the marker instead"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 5), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Clear Marker:"), .2, 8, "accessibilityMarkerClear", _("Takes the marker away. It also goes by itself when you reach it"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 6), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Objective:"), .2, 8, "accessibilityMarkerObjective", _("Puts the marker on the objective, and its sound leads the way there - up stairs, ladders and ledges. Press again within five seconds for the next objective"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 7), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Sniper Spot:"), .2, 8, "accessibilitySniperSpot", _("Puts the marker on the nearest high place that looks out a long way, and says what it sees. Press again within five seconds for the next"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 8), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Marker On Room:"), .2, 8, "accessibilityRoom", _("Puts the marker on the nearest room, with its name, floor and size, and leads you inside. Press again within five seconds for the next"))
+	BIND(SUBWINDOW_OPTION_X2_START, SUBWINDOW_OPTION_COMPUTE_Y(MARKER_Y, 9), SUBWINDOW_OPTION_WIDTH_R, SUBWINDOW_OPTION_HEIGHT, _("Way Out Or In:"), .2, 8, "accessibilityWayOut", _("Inside a building, puts the marker on the nearest way out and leads you there. Outside, on the nearest way into a building. Press again within five seconds for another"))
 
 // Aiming //
 //

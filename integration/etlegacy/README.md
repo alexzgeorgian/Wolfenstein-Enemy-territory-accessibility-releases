@@ -1891,3 +1891,15 @@ for `playonline` alone, on a button of the menu named `main`.
 `play_online_label_test.py` rebuilds the stock main menu's button action
 the way the parser does and holds the label code's test against it: it
 fails on 0122's code and passes on this.
+
+## 0124: Shift+N faces the marker
+
+The tester wanted the marker's turn on a key next to the ones they
+already use, and N, like U, is taken in the stock config: N is
+`timerreset`. N is now bound to `accessibilityTimerReset`, which runs the
+game's own `timerreset` when Shift is up - nothing is lost - and with
+Shift held runs period's `accessibilityMarkerFace`, turning the player
+toward the way to the marker. Period keeps doing that too. The Key Binds
+page has the row *"Timer, Shift Faces Way"*; `timerreset` joins the
+replaceable commands in `keyboard_reachable_test.py`, since N still does
+it.

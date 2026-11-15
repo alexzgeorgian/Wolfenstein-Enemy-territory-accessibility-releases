@@ -141,6 +141,9 @@ REPLACEABLE = (
     # no word, no effect on play. Without sight it does nothing at all,
     # and period is where the mod turns the player toward the marker.
     "mapzoomin",
+    # N's spawn-timer reset: still done, by the mod's own command, when N
+    # is pressed without Shift; Shift+N turns toward the marker.
+    "timerreset",
 )
 
 
