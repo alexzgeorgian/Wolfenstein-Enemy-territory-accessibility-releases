@@ -1,0 +1,97 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 472d836..9012823 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1588,10 +1588,12 @@ static void CG_AccessibilityMarkerWhere_f(void)
+ }
+ 
+ /*
+- * Period: turned toward the way to the marker, as O turns the player in the
+- * RTCW mode - round the walls, where the ping is - and how far it is.
++ * Shift+N: turned toward the way to the marker, as O turns the player in
++ * the RTCW mode - round the walls, where the ping is - and how far it is.
+  * The tester, used to O there, wanted a key that leads them straight to
+- * the marker rather than turning by ear.
++ * the marker rather than turning by ear. Period did it in 1.4.4, as a
++ * command of its own; the tester wanted the one key, so it is Shift+N's
++ * alone (CG_AccessibilityTimerReset_f).
+  */
+ static void ETA_AimStartSnap(const etaAimTarget_t *target, const char *label);
+ 
+@@ -6360,7 +6362,6 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMapNext",   CG_AccessibilityMapNext_f    },
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
+ 	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+-	{ "accessibilityMarkerFace", CG_AccessibilityMarkerFace_f },
+ 	{ "accessibilityTimerReset", CG_AccessibilityTimerReset_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
+ 	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 7583bd8..eb1380c 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9609,6 +9609,9 @@ static void UI_RunCinematicFrame(int handle)
+  * than it is as a dead weapon bank. Only those exact commands are replaced,
+  * and a test holds the engine to still making them dead.
+  */
++/* The generation at which period was given back to the game. */
++#define ETA_BINDS_PERIOD_BACK 18
++
+ void UI_AccessibilityInstallBinds(void)
+ {
+ 	static const struct
+@@ -9750,12 +9753,10 @@ void UI_AccessibilityInstallBinds(void)
+ 		   semicolon, beside the apostrophe, is bound in neither stock
+ 		   layout. */
+ 		{ ';',            "accessibilityWayOut",       NULL,         15 },
+-		/* Period turns toward the way to the marker, as O does in the
+-		   RTCW mode; taken only from the game's zoom of the on-screen
+-		   map, which is of no use without sight. */
+-		{ '.',            "accessibilityMarkerFace",   "mapzoomin",  16 },
+-		/* Shift+N too, as the tester asked: N keeps resetting the spawn
+-		   timer, and with Shift turns toward the marker. */
++		/* Shift+N turns toward the way to the marker, as O does in the
++		   RTCW mode: N keeps resetting the spawn timer. Period did it
++		   first (generation 16), and is given back below: the tester
++		   wanted the one key. */
+ 		{ 'n',            "accessibilityTimerReset",   "timerreset", 17 }
+ 	};
+ 
+@@ -9834,6 +9835,25 @@ void UI_AccessibilityInstallBinds(void)
+ 		}
+ 	}
+ 
++	/* Period, generation 16's turn toward the marker, given back to the
++	   game's zoom of the on-screen map - only if it is still on the turn,
++	   so a key the player has set since is left alone. */
++	if (installed.integer < ETA_BINDS_PERIOD_BACK)
++	{
++		char current[MAX_STRING_CHARS];
++
++		current[0] = '\0';
++		trap_Key_GetBindingBuf('.', current, sizeof(current));
++		if (!Q_stricmp(current, "accessibilityMarkerFace"))
++		{
++			trap_Key_SetBinding('.', "mapzoomin");
++		}
++	}
++	if (newest < ETA_BINDS_PERIOD_BACK)
++	{
++		newest = ETA_BINDS_PERIOD_BACK;
++	}
++
+ 	/* Records the newest generation offered, not merely "yes". */
+ 	trap_Cvar_Set("eta_bindsInstalled", va("%i", newest));
+ 
+diff --git a/src/ui/ui_shared.c b/src/ui/ui_shared.c
+index 58ec477..469d764 100644
+--- a/src/ui/ui_shared.c
++++ b/src/ui/ui_shared.c
+@@ -870,7 +870,6 @@ static bind_t g_bindings[] =
+ 	{ "accessibilitymapnext",                      -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerplace",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerwhere",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+-	{ "accessibilitymarkerface",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitytimerreset",                   -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerclear",                  -1,              -1,  -1,              -1,  -1, -1, -1 },
+ 	{ "accessibilitymarkerobjective",              -1,              -1,  -1,              -1,  -1, -1, -1 },

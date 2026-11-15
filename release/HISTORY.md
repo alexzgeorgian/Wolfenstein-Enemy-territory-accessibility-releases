@@ -9,6 +9,14 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.2 - 15 November 2026
+
+**Shift+N turns you toward the marker; N still resets the spawn timer.**
+
+- With a marker out, **Shift+N** was meant to turn you toward the way
+  to it; it said *"Facing the way"* but did not turn you, until 1.4.4.3.
+- **N** by itself still resets the spawn timer, as the game's own N does.
+
 ## 1.4.4.1 - 14 November 2026
 
 **The main menu's first button is said as "Play online" - this time it works.**

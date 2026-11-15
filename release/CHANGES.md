@@ -1,14 +1,24 @@
-**Shift+N turns you toward the marker; N still resets the spawn timer.**
+**Shift+N now really turns you toward the marker, and period is the game's again.**
 
-- With a marker out, **Shift+N** turns you toward the way to it - round
-  the walls, where the ping points - and says how far it is, as period
-  does: *"Facing the way. 40 meters to marker"*.
-- **N** by itself still resets the spawn timer, as the game's own N does.
-- On the Key Binds page, N is the row *"Timer, Shift Faces Way"*.
+- **Shift+N** turns you once you let go of Shift, and says *"Facing the
+  way. 40 meters to marker"* only after you have turned. If the turn
+  does not land, it says *"Could not turn all the way"* and which way the
+  marker is, so you can turn yourself.
+- **Period** no longer turns you: it is back to the game's own zoom of
+  the small map, unless you had set it to something else. Shift+N is the
+  one key for the turn, and the Key Binds page has no separate *"Face The
+  Way"* row.
+- **N** by itself still resets the spawn timer.
+
+## What went wrong
+
+In 1.4.4.2, Shift+N said *"Facing the way"* as soon as it was pressed,
+whether or not you were turned, and began the turn with Shift still
+held. Now the turn waits for Shift, and the words wait for the turn.
 
 ## Checked
 
-- The key check passes with N taken: the timer reset it held is still
-  done by N without Shift.
 - Every engine check the CI runs passes, and the mod libraries build
   with the feature on and off.
+- Not tried in the game before release: Enemy Territory's game files
+  cannot be fetched where it is built.

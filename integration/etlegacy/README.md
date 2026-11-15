@@ -1903,3 +1903,26 @@ toward the way to the marker. Period keeps doing that too. The Key Binds
 page has the row *"Timer, Shift Faces Way"*; `timerreset` joins the
 replaceable commands in `keyboard_reachable_test.py`, since N still does
 it.
+
+## 0125: Shift+N alone faces the marker; period given back
+
+The tester wanted the turn toward the marker on one key, Shift+N, and
+period off it. Period's row goes from the installed keys, and generation
+18 gives period back to the game's `mapzoomin` - only while it is still
+on `accessibilityMarkerFace`, so a key the player has set since is left
+alone. The `accessibilityMarkerFace` command, its Key Binds row and its
+`g_bindings` entry go: the turn is Shift+N's alone, through
+`accessibilityTimerReset`. `mapzoomin` leaves the replaceable commands in
+`keyboard_reachable_test.py`, since nothing takes it now.
+
+## 0126: Shift+N turns once Shift is up, and speaks where it landed
+
+On 1.4.4.2 the tester heard "Facing the way" from Shift+N and was not
+turned. The words were said as the snap began, whether it went anywhere
+or not, and the snap began with Shift still held - the one thing that
+set Shift+N apart from F, whose snap turns. The turn now waits for Shift
+to be let go (or a second and a half), and the words come when the snap
+ends, from where the view has landed: "Facing the way. 40 meters to
+marker" within 15 degrees of the way, else "Could not turn all the way:
+the way to the marker is ahead left, 40 meters" - so a turn that fails
+says so, and says which way to turn by hand.

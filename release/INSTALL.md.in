@@ -478,8 +478,7 @@ F5, F6 and F8 are unbound by default. F7 is not.
 If your keyboard has a keypad, most of it is spoken for now:
 `KP_SLASH` is the scope key, the arrow cluster and Keypad 5 walk the
 map, and `KP_INS`, `KP_DEL`, `KP_STAR` and `KP_PLUS` are the marker's
-keys. **Period**, which turns you toward the way to the marker, was the
-game's `mapzoomin`.
+keys.
 `KP_INS` only looked free in any case - the game's left-handed layout
 uses it.
 
@@ -1327,12 +1326,11 @@ choose.
   your way back to a doorway or a corner after a death or a detour.
 - **Keypad dot asks where it is** - the distance, which way to turn, and
   the two compass points.
-- **Period (.) turns you toward the way to it**, round the walls, the
-  way the ping points: *"Facing the way. 40 meters to marker"*. Walk, and
-  press it again whenever you have lost the way. Period was the game's
-  zoom of the small map on screen; the mod only takes it if it is still
-  on that. **Shift+N** does the same; N by itself still resets the spawn
-  timer, as before.
+- **Shift+N turns you toward the way to it**, round the walls, the way
+  the ping points: *"Facing the way. 40 meters to marker"*. Walk, and
+  press it again whenever you have lost the way. N by itself still resets
+  the spawn timer, as before. (In 1.4.4 period did this; period is the
+  game's zoom of the small map again.)
 - **Keypad star takes it away.** It also goes by itself when you get
   there: walking into the marked square, or back within three metres of
   a marked spot, says *"Marker reached"*.
