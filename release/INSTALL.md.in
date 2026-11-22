@@ -1345,7 +1345,9 @@ choose.
   then *"Facing the way"* once you are turned - *"Marker on Command Post.
   40 meters to marker. Facing the way"*. Walk, and press it again
   whenever you have lost the way. **Shift+N** resets the spawn
-  timer, which N did in the stock game. (In 1.4.4 period turned you, and
+  timer, which N did in the stock game. The Key Binds page has a
+  *"Where Is Marker"* row that does the same as N, for any key you
+  would rather use. (In 1.4.4 period turned you, and
   Shift+N in 1.4.4.2 and 1.4.4.3; period is the game's zoom of the small
   map again.)
 - **Keypad star takes it away.** It also goes by itself when you get

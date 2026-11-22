@@ -9,6 +9,15 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.4 - 22 November 2026
+
+**N said where the marker was and turned you toward it; Keypad dot was freed.**
+
+- **N** said what the marker was on, how far and how high, then turned
+  you toward the way to it. **Shift+N** reset the spawn timer.
+- The Key Binds page lost its *"Where Is Marker"* row, and a key you had
+  set to it yourself did nothing, until 1.4.4.5 brought it back.
+
 ## 1.4.4.3 - 15 November 2026
 
 **Shift+N really turned you toward the marker, and period was the game's again.**

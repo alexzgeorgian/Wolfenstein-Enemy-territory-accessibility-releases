@@ -82,6 +82,7 @@ HAZARD = "ETA_NarrateDropAhead"
 MARKER_ASKED = (
     "CG_AccessibilityMarkerPlace_f",
     "CG_AccessibilityTimerReset_f",
+    "CG_AccessibilityMarkerWhere_f",
     "CG_AccessibilityMarkerClear_f",
 )
 MARKER_PASSIVE = ("CG_AccessibilityMarkerApproach",)

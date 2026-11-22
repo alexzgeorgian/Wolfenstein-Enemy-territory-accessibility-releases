@@ -1944,3 +1944,15 @@ still on `accessibilityMarkerWhere`, since N says where the marker is
 now. The command goes with its Key Binds row (every command the mod
 answers has a row: `menu_override_test.py`), and N's row reads "Face
 Marker, Shift Timer".
+
+## 0128: Where Is Marker back, doing what N does
+
+0127 took `accessibilityMarkerWhere` away with Keypad dot's bind, and
+with it the Key Binds row. The tester had put the command on N
+themselves, so on 1.4.4.4 N answered nothing and the marker's beep kept
+telling them they faced the wrong way. The command is back, sharing N's
+code (ETA_MarkerWhereAndFace): what the marker is on, how far and how
+high, then the turn toward the way to it. Its row is back on the Key
+Binds page as "Where Is Marker". No default key: Keypad dot stays
+free, and generation 19 still frees it only where it was the mod's own
+bind. A key the player set to the command keeps working.

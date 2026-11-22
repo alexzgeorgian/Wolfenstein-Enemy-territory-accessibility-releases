@@ -1,0 +1,75 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index 4097c02..f7e462d 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1643,6 +1643,24 @@ static void CG_AccessibilityMarkerFace_f(void)
+ 
+ static void CG_TimerReset_f(void);
+ 
++/* Where the marker is, then the turn toward the way to it: the tester
++   uses one key for both. */
++static void ETA_MarkerWhereAndFace(void)
++{
++	vec3_t point;
++	int    meters;
++
++	if (CG_AccessibilityMarkerFacePoint(point, &meters) && meters > 1)
++	{
++		ETA_HudNarrator_HoldPassive(cg.time);
++		CG_AccessibilityMarkerWhereBrief();
++		CG_AccessibilityMarkerFace_f();
++		eta_face.brief = eta_face.speak;
++		return;
++	}
++	CG_AccessibilityMarkerFace_f();
++}
++
+ /*
+  * N: where the marker is - what it is on, how far, how high - and turned
+  * toward the way to it; with Shift, the game's
+@@ -1657,22 +1675,22 @@ static void CG_AccessibilityTimerReset_f(void)
+ 		CG_TimerReset_f();
+ 		return;
+ 	}
+-	/* Where the marker is, then the turn toward the way to it: the
+-	   tester uses N for both. */
+-	{
+-		vec3_t point;
+-		int    meters;
++	ETA_HudNarrator_HoldPassive(cg.time);
++	ETA_MarkerWhereAndFace();
++}
+ 
+-		if (CG_AccessibilityMarkerFacePoint(point, &meters) && meters > 1)
+-		{
+-			ETA_HudNarrator_HoldPassive(cg.time);
+-			CG_AccessibilityMarkerWhereBrief();
+-			CG_AccessibilityMarkerFace_f();
+-			eta_face.brief = eta_face.speak;
+-			return;
+-		}
+-	}
+-	CG_AccessibilityMarkerFace_f();
++/*
++ * Where Is Marker, on whatever key the player gives it in Key Binds: the
++ * same as N - where the marker is, then turned toward the way to it.
++ * 1.4.4.4 took the command away with Keypad dot's default bind, and the
++ * tester, who had put it on N themselves, was left with a key that did
++ * nothing while the marker's beep kept saying they faced the wrong way.
++ * The command stays, so a key set to it keeps working.
++ */
++static void CG_AccessibilityMarkerWhere_f(void)
++{
++	ETA_HudNarrator_HoldPassive(cg.time);
++	ETA_MarkerWhereAndFace();
+ }
+ 
+ static void CG_AccessibilityMarkerClear_f(void)
+@@ -6425,6 +6443,7 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMapHere",   CG_AccessibilityMapHere_f    },
+ 	{ "accessibilityMapNext",   CG_AccessibilityMapNext_f    },
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
++	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+ 	{ "accessibilityTimerReset", CG_AccessibilityTimerReset_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
+ 	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
