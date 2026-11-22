@@ -64,6 +64,17 @@ tried out before a release. Take the latest release instead.
 6. Start ET: Legacy. With VoiceOver on, the game speaks through
    VoiceOver. With it off, it speaks through the Mac's own voice.
 
+**If ET: Legacy stops answering on a Mac.** If it hangs when it starts
+and the Mac says it is not responding, the Mac may be holding back the
+files ET: Legacy came with, downloaded from the web. Quit it, and in
+Terminal run these two lines, one at a time, then start it again:
+
+    xattr -cr /Applications/ET*Legacy*.app
+    xattr -cr "$HOME/Library/Application Support/etlegacy/legacy"
+
+`INSTALL.md`, in the Mac zip, has more under "If ET: Legacy stops
+answering".
+
 **Bots on a Mac.** ET: Legacy's Mac version comes without bot support.
 Download Omni-bot from its own page and put its `omni-bot` folder in the
 same `legacy` folder, as on Windows. The game then fetches the file that
@@ -101,7 +112,7 @@ updates".
   - a high ping means the marker is in front of you;
   - a lower ping means it is to your left or right;
   - a low double ping means it is behind you.
-- **Keypad dot** says where the marker is. **Keypad star** clears it.
+- **N** says where the marker is and turns you toward it. **Keypad star** clears it.
 
 **No number pad?** Most Mac keyboards have none. Every key can be
 changed: go to Options, then Accessibility, then Key Binds. Arrow to a

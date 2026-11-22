@@ -1,0 +1,203 @@
+diff --git a/src/cgame/cg_commandmap.c b/src/cgame/cg_commandmap.c
+index 72addab..276c6a7 100644
+--- a/src/cgame/cg_commandmap.c
++++ b/src/cgame/cg_commandmap.c
+@@ -5619,6 +5619,32 @@ void CG_AccessibilityMarkerWhere(void)
+ 	ETA_Speech_EndReport();
+ }
+ 
++/**
++ * @brief N's words before it turns the player: what the marker is on,
++ * how far, and how high - not which way to turn, since N makes the turn.
++ */
++void CG_AccessibilityMarkerWhereBrief(void)
++{
++	ETA_Speech_BeginReport();
++	if (eta_marker.square)
++	{
++		char name[32];
++
++		ETA_MarkerSquareName(name, sizeof(name));
++		ETA_Speech_Say(va("Marker on %s", name));
++	}
++	else if (eta_marker.objective)
++	{
++		ETA_Speech_Say(va("Marker on %s", eta_marker.name));
++	}
++	ETA_NavigationSystem_AnnounceMarkerDistance(ETA_MarkerDistance());
++	if (!eta_marker.square)
++	{
++		ETA_NavigationSystem_AnnounceMarkerHeight((eta_marker.origin[2] - cg.predictedPlayerState.origin[2]) * ETA_QU_TO_METERS);
++	}
++	ETA_Speech_EndReport();
++}
++
+ /**
+  * @brief For N: the point to face for the way to the marker - round the
+  * walls, as the ping is placed - and how far the marker is.
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index b471cb2..4097c02 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1581,11 +1581,6 @@ static void CG_AccessibilityMarkerPlace_f(void)
+ 	CG_AccessibilityMarkerPlace();
+ }
+ 
+-static void CG_AccessibilityMarkerWhere_f(void)
+-{
+-	ETA_HudNarrator_HoldPassive(cg.time);
+-	CG_AccessibilityMarkerWhere();
+-}
+ 
+ /*
+  * Shift+N's turn toward the marker. The tester heard "Facing the way" and
+@@ -1599,6 +1594,7 @@ static struct
+ 	qboolean pending;
+ 	int      pendingAt;
+ 	qboolean speak;
++	qboolean brief;    /* N: where the marker is said already */
+ 	int      meters;
+ } eta_face;
+ 
+@@ -1641,26 +1637,42 @@ static void CG_AccessibilityMarkerFace_f(void)
+ 	}
+ 	ETA_AimStartSnap(&target, NULL);
+ 	eta_face.speak  = qtrue;
++	eta_face.brief  = qfalse;
+ 	eta_face.meters = meters;
+ }
+ 
+ static void CG_TimerReset_f(void);
+ 
+ /*
+- * N: the game's spawn-timer reset, as ever; with Shift, turned toward the
+- * way to the marker. The tester asked for Shift+N for the marker, and N
+- * keeps what it did.
++ * N: where the marker is - what it is on, how far, how high - and turned
++ * toward the way to it; with Shift, the game's
++ * spawn-timer reset. Shift+N was the marker's for 1.4.4.2 and 1.4.4.3, and
++ * the tester, on a Mac, found it did nothing: they asked for N alone, and
++ * the timer reset, which they do not use, goes to Shift+N.
+  */
+ static void CG_AccessibilityTimerReset_f(void)
+ {
+ 	if (trap_Key_IsDown(K_LSHIFT) || trap_Key_IsDown(K_RSHIFT))
+ 	{
+-		/* Turned once Shift is let go: see eta_face. */
+-		eta_face.pending   = qtrue;
+-		eta_face.pendingAt = cg.time;
++		CG_TimerReset_f();
+ 		return;
+ 	}
+-	CG_TimerReset_f();
++	/* Where the marker is, then the turn toward the way to it: the
++	   tester uses N for both. */
++	{
++		vec3_t point;
++		int    meters;
++
++		if (CG_AccessibilityMarkerFacePoint(point, &meters) && meters > 1)
++		{
++			ETA_HudNarrator_HoldPassive(cg.time);
++			CG_AccessibilityMarkerWhereBrief();
++			CG_AccessibilityMarkerFace_f();
++			eta_face.brief = eta_face.speak;
++			return;
++		}
++	}
++	CG_AccessibilityMarkerFace_f();
+ }
+ 
+ static void CG_AccessibilityMarkerClear_f(void)
+@@ -3344,7 +3356,7 @@ void CG_AccessibilityAimFrame(void)
+ 				VectorSubtract(eta_aim.point, cg.predictedPlayerState.origin, toward);
+ 				off = fabsf(AngleSubtract(vectoyaw(toward), cg.predictedPlayerState.viewangles[YAW]));
+ 				ETA_Speech_Say(off <= ETA_FACE_LANDED_DEGREES
+-				               ? va("Facing the way. %d meters to marker", eta_face.meters)
++				               ? eta_face.brief ? "Facing the way" : va("Facing the way. %d meters to marker", eta_face.meters)
+ 				               : va("Could not turn all the way: the way to the marker is %s, %d meters",
+ 				                    ETA_HudNarrator_RelativeDirection(CG_AccessibilityLeftOfView(eta_aim.point)),
+ 				                    eta_face.meters));
+@@ -6413,7 +6425,6 @@ static consoleCommand_t commands[] =
+ 	{ "accessibilityMapHere",   CG_AccessibilityMapHere_f    },
+ 	{ "accessibilityMapNext",   CG_AccessibilityMapNext_f    },
+ 	{ "accessibilityMarkerPlace", CG_AccessibilityMarkerPlace_f },
+-	{ "accessibilityMarkerWhere", CG_AccessibilityMarkerWhere_f },
+ 	{ "accessibilityTimerReset", CG_AccessibilityTimerReset_f },
+ 	{ "accessibilityMarkerClear", CG_AccessibilityMarkerClear_f },
+ 	{ "accessibilityMarkerObjective", CG_AccessibilityMarkerObjective_f },
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index 6e9fd91..b3a6b46 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3443,6 +3443,7 @@ void CG_AccessibilityMapClosed(void);
+  */
+ void CG_AccessibilityMarkerPlace(void);
+ void CG_AccessibilityMarkerWhere(void);
++void CG_AccessibilityMarkerWhereBrief(void);
+ qboolean CG_AccessibilityMarkerFacePoint(vec3_t out, int *meters);
+ void CG_AccessibilityMarkerClear(void);
+ void CG_AccessibilityMarkerObjective(void);
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index eb1380c..3eb6f62 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -9611,6 +9611,9 @@ static void UI_RunCinematicFrame(int handle)
+  */
+ /* The generation at which period was given back to the game. */
+ #define ETA_BINDS_PERIOD_BACK 18
++/* Keypad dot, generation 6's "where is the marker", given back: N says
++   where it is and turns the player, and the tester uses N for both. */
++#define ETA_BINDS_KPDEL_BACK  19
+ 
+ void UI_AccessibilityInstallBinds(void)
+ {
+@@ -9702,7 +9705,6 @@ void UI_AccessibilityInstallBinds(void)
+ 		   The left-handed one jumps on keypad 0, and that is left alone
+ 		   by the rule every row here follows. */
+ 		{ K_KP_INS,       "accessibilityMarkerPlace", NULL,          6 },
+-		{ K_KP_DEL,       "accessibilityMarkerWhere", NULL,          6 },
+ 		{ K_KP_STAR,      "accessibilityMarkerClear", NULL,          6 },
+ 		/* Keypad plus, under the marker keys: the marker on the
+ 		   objective, so its way leads up to one on a floor above. The
+@@ -9753,10 +9755,10 @@ void UI_AccessibilityInstallBinds(void)
+ 		   semicolon, beside the apostrophe, is bound in neither stock
+ 		   layout. */
+ 		{ ';',            "accessibilityWayOut",       NULL,         15 },
+-		/* Shift+N turns toward the way to the marker, as O does in the
+-		   RTCW mode: N keeps resetting the spawn timer. Period did it
+-		   first (generation 16), and is given back below: the tester
+-		   wanted the one key. */
++		/* N turns toward the way to the marker, as O does in the RTCW
++		   mode; Shift+N resets the spawn timer. Period did it first
++		   (generation 16), and is given back below: the tester wanted
++		   the one key. */
+ 		{ 'n',            "accessibilityTimerReset",   "timerreset", 17 }
+ 	};
+ 
+@@ -9854,6 +9856,25 @@ void UI_AccessibilityInstallBinds(void)
+ 		newest = ETA_BINDS_PERIOD_BACK;
+ 	}
+ 
++	/* Keypad dot, unbound - nothing in the stock game is on it - if it is
++	   still on the marker's report: N does that now. A key the player
++	   has set since is left alone. */
++	if (installed.integer < ETA_BINDS_KPDEL_BACK)
++	{
++		char current[MAX_STRING_CHARS];
++
++		current[0] = '\0';
++		trap_Key_GetBindingBuf(K_KP_DEL, current, sizeof(current));
++		if (!Q_stricmp(current, "accessibilityMarkerWhere"))
++		{
++			trap_Key_SetBinding(K_KP_DEL, "");
++		}
++	}
++	if (newest < ETA_BINDS_KPDEL_BACK)
++	{
++		newest = ETA_BINDS_KPDEL_BACK;
++	}
++
+ 	/* Records the newest generation offered, not merely "yes". */
+ 	trap_Cvar_Set("eta_bindsInstalled", va("%i", newest));
+ 

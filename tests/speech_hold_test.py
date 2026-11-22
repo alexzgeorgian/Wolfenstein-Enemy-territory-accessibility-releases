@@ -75,12 +75,13 @@ PASSIVE = (
 HAZARD = "ETA_NarrateDropAhead"
 
 # The player's own marker, ET: Legacy only. The three keys answer a
-# question, the distance callouts are scenery, and arriving is not held
-# back: it is the end of the walk the marker exists for, and it happens
-# once.
+# question - N says where it is and turns the player toward it, Keypad
+# dot's old report being N's since 1.4.4.4 - the distance callouts are
+# scenery, and arriving is not held back: it is the end of the walk the
+# marker exists for, and it happens once.
 MARKER_ASKED = (
     "CG_AccessibilityMarkerPlace_f",
-    "CG_AccessibilityMarkerWhere_f",
+    "CG_AccessibilityTimerReset_f",
     "CG_AccessibilityMarkerClear_f",
 )
 MARKER_PASSIVE = ("CG_AccessibilityMarkerApproach",)

@@ -137,8 +137,8 @@ REPLACEABLE = (
     "+left",
     "+right",
     "+activate",
-    # N's spawn-timer reset: still done, by the mod's own command, when N
-    # is pressed without Shift; Shift+N turns toward the marker.
+    # N's spawn-timer reset: still done, by the mod's own command, on
+    # Shift+N; N alone turns toward the marker.
     "timerreset",
 )
 

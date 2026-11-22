@@ -1926,3 +1926,21 @@ ends, from where the view has landed: "Facing the way. 40 meters to
 marker" within 15 degrees of the way, else "Could not turn all the way:
 the way to the marker is ahead left, 40 meters" - so a turn that fails
 says so, and says which way to turn by hand.
+
+## 0127: N alone turns toward the marker; Shift+N resets the timer
+
+On a Mac the tester found Shift+N did nothing, and asked for N itself to
+turn them toward the marker - N being the key they use both to hear
+where it is and to be turned. N now says what the marker is on, how far
+and how high, then turns toward the way to it, round the walls, and says
+"Facing the way" once the turn lands (or which way to turn by hand when
+it cannot); Shift+N is the game's spawn-timer reset, which the tester
+does not use. The bind is the same - N on `accessibilityTimerReset` - so
+nothing in the config changes.
+
+Keypad dot, generation 6's "where is the marker", is given back in
+generation 19: unbound - nothing in the stock game is on it - if it is
+still on `accessibilityMarkerWhere`, since N says where the marker is
+now. The command goes with its Key Binds row (every command the mod
+answers has a row: `menu_override_test.py`), and N's row reads "Face
+Marker, Shift Timer".

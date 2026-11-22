@@ -1,20 +1,21 @@
-**Shift+N now really turns you toward the marker, and period is the game's again.**
+**N says where the marker is and turns you toward it; Keypad dot is free again.**
 
-- **Shift+N** turns you once you let go of Shift, and says *"Facing the
-  way. 40 meters to marker"* only after you have turned. If the turn
-  does not land, it says *"Could not turn all the way"* and which way the
-  marker is, so you can turn yourself.
-- **Period** no longer turns you: it is back to the game's own zoom of
-  the small map, unless you had set it to something else. Shift+N is the
-  one key for the turn, and the Key Binds page has no separate *"Face The
-  Way"* row.
-- **N** by itself still resets the spawn timer.
+- **N** says what the marker is on, how far it is and how high, then
+  turns you toward the way to it and says *"Facing the way"*. If the turn
+  does not land, it says which way the marker is, so you can turn
+  yourself. You use N both to hear where the marker is and to face it.
+- **Shift+N** resets the spawn timer, the game's own N.
+- **Keypad dot** no longer says where the marker is, since N does: it is
+  unbound, unless you had set it to something else. The Key Binds page
+  has no *"Where Is Marker"* row.
+- On a Mac, **if ET: Legacy stops answering** when it starts, the guide
+  now says what fixed it for a tester: clearing the downloaded files'
+  marks with `xattr -cr` in Terminal.
 
 ## What went wrong
 
-In 1.4.4.2, Shift+N said *"Facing the way"* as soon as it was pressed,
-whether or not you were turned, and began the turn with Shift still
-held. Now the turn waits for Shift, and the words wait for the turn.
+In 1.4.4.2 and 1.4.4.3, Shift+N was the key for the turn, and on a Mac
+it did nothing for the tester.
 
 ## Checked
 

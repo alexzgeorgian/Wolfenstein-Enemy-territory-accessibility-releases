@@ -185,6 +185,22 @@ no developer signed. In Terminal, run this once, as one line:
 
     xattr -dr com.apple.quarantine "$HOME/Library/Application Support/etlegacy/legacy"
 
+### If ET: Legacy stops answering
+
+If ET: Legacy hangs when it starts, and the Mac says it is not
+responding, the Mac may be holding back the files ET: Legacy came with,
+because they were downloaded from the web. A tester fixed it by clearing
+those files' marks in Terminal. Quit ET: Legacy, then run these two
+lines, one at a time. The first is for ET: Legacy in Applications, the
+second for the folder the mod is in:
+
+    xattr -cr /Applications/ET*Legacy*.app
+    xattr -cr "$HOME/Library/Application Support/etlegacy/legacy"
+
+`-c` clears the marks, and `-r` does it for every file inside, too. If
+ET: Legacy is somewhere other than Applications, type `xattr -cr`, a
+space, then that app's full path. Then start ET: Legacy again.
+
 ### That is the installation
 
 Start ET: Legacy. With VoiceOver on, the game speaks through VoiceOver;
@@ -477,7 +493,7 @@ F5, F6 and F8 are unbound by default. F7 is not.
 
 If your keyboard has a keypad, most of it is spoken for now:
 `KP_SLASH` is the scope key, the arrow cluster and Keypad 5 walk the
-map, and `KP_INS`, `KP_DEL`, `KP_STAR` and `KP_PLUS` are the marker's
+map, and `KP_INS`, `KP_STAR` and `KP_PLUS` are the marker's
 keys.
 `KP_INS` only looked free in any case - the game's left-handed layout
 uses it.
@@ -1324,13 +1340,14 @@ choose.
   are facing north."* Without the map, Keypad 0 marks the spot you are
   standing on - *"Marker set where you are standing"* - so you can find
   your way back to a doorway or a corner after a death or a detour.
-- **Keypad dot asks where it is** - the distance, which way to turn, and
-  the two compass points.
-- **Shift+N turns you toward the way to it**, round the walls, the way
-  the ping points: *"Facing the way. 40 meters to marker"*. Walk, and
-  press it again whenever you have lost the way. N by itself still resets
-  the spawn timer, as before. (In 1.4.4 period did this; period is the
-  game's zoom of the small map again.)
+- **N says where it is and turns you toward the way to it**, round the
+  walls, the way the ping points: what it is on, how far and how high,
+  then *"Facing the way"* once you are turned - *"Marker on Command Post.
+  40 meters to marker. Facing the way"*. Walk, and press it again
+  whenever you have lost the way. **Shift+N** resets the spawn
+  timer, which N did in the stock game. (In 1.4.4 period turned you, and
+  Shift+N in 1.4.4.2 and 1.4.4.3; period is the game's zoom of the small
+  map again.)
 - **Keypad star takes it away.** It also goes by itself when you get
   there: walking into the marked square, or back within three metres of
   a marked spot, says *"Marker reached"*.
@@ -1445,9 +1462,9 @@ you the ping points at it, and for the last few metres it sits on the
 marker itself. A marker on a map square is reached anywhere in the
 square.
 
-Keypad dot says the same: *"Turn right toward the marker. The way goes
-east. Marker lies north, you are facing north"* - turn right to get
-round what is in between, even though the marker is ahead of you.
+N turns you the same way: toward the way, not straight at the marker -
+to the right to get round what is in between, even when the marker is
+ahead of you.
 
 **Follow the way, not where the marker lies.** *"The way goes"* is the
 direction to walk now; *"Marker lies"* is the straight line to the

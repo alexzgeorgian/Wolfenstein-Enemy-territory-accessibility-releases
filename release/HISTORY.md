@@ -9,6 +9,15 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.3 - 15 November 2026
+
+**Shift+N really turned you toward the marker, and period was the game's again.**
+
+- **Shift+N** turned you once you let go of Shift, and said *"Facing the
+  way"* only after you had turned. On a Mac it did nothing, until 1.4.4.4
+  moved the turn to N.
+- **Period** went back to the game's own zoom of the small map.
+
 ## 1.4.4.2 - 15 November 2026
 
 **Shift+N turns you toward the marker; N still resets the spawn timer.**
