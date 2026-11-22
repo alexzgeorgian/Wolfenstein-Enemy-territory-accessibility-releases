@@ -1956,3 +1956,23 @@ high, then the turn toward the way to it. Its row is back on the Key
 Binds page as "Where Is Marker". No default key: Keypad dot stays
 free, and generation 19 still frees it only where it was the mod's own
 bind. A key the player set to the command keeps working.
+
+## 0129: the way is kept while it is looked for again
+
+On Oasis the tester could not get from the Allied camp to the Old City
+Water Pump: the way there goes through the flooded caves, and the
+marker's beacon kept to the road outside the Old City wall. The way
+was found - on the real map, ten to twelve seconds of searching, 197
+points through the caves - but it is looked for again five seconds
+after it is found and whenever the player strays, and each new search
+began by clearing the old one. For the ten seconds of the search the
+ping pointed at the last point it had; the player walked past it, and
+N turned them east, west and east again. The found way is now copied
+(eta_way) and followed - its stairs, crouches and jumps told from it -
+while the next search runs, and replaced only when that search has an
+answer; no new search is begun while one is running. A fresh marker,
+with no way yet, starts with no jump told (saidJump -1), as before.
+
+Checked on the real Oasis: N and forward only, from the Allied camp to
+the Old City Water Pump through the caves, "Crouch, low ceiling ahead"
+and the ladder out said on the way, reached twice.

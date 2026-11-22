@@ -9,6 +9,13 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.5 - 22 November 2026
+
+**"Where Is Marker" was back on the Key Binds page.**
+
+- **Where Is Marker** did the same as N: it said where the marker was
+  and turned you toward the way to it, on whatever key you gave it.
+
 ## 1.4.4.4 - 22 November 2026
 
 **N said where the marker was and turned you toward it; Keypad dot was freed.**

@@ -150,7 +150,7 @@ def main():
     exact = spots.function_body(commandmap, "ETA_RouteMoveExact")
     nav = spots.read(NAV)
     for ok, what in (
-            ("ETA_PathFinder_PointKind(i) != ETA_PATH_CROUCH" in follow, "a crouch stops the way as a jump or a ladder does"),
+            ("ETA_WayKind(i) != ETA_PATH_CROUCH" in follow, "a crouch stops the way as a jump or a ladder does"),
             ("ETA_RouteSayCrouch(nearest, count, here);" in follow, "the crouch is never said"),
             ('"Crouch, low ceiling ahead%s", ETA_RouteKey("+movedown")' in say and "Stand up" in say,
              "the player is not told to crouch with the key, or to stand once out"),
