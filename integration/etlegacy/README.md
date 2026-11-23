@@ -1976,3 +1976,33 @@ with no way yet, starts with no jump told (saidJump -1), as before.
 Checked on the real Oasis: N and forward only, from the Allied camp to
 the Old City Water Pump through the caves, "Crouch, low ceiling ahead"
 and the ladder out said on the way, reached twice.
+
+## 0130: N turns to a direction, turns keep the run, and the stuck report waits for no marker
+
+Three things the tester found following the marker.
+
+N aimed at the way's next point, a few metres on. Running while the
+view turned, the player reached the point and went past, the direction
+to it swung round behind them, and the turn chased it until the snap
+gave up: "Could not turn all the way". N now turns to the direction to
+that point from where it was pressed, carried 8192 units out, so a few
+steps do not move it; and a turn that falls short is made once more
+before anything is said.
+
+The turns were sped up with the walk key, +speed, which raises the turn
+keys by cl_anglespeedkey - and, with cl_run on, walks the player at half
+speed for as long as it is held. Every N and every compass step slowed
+the player down; the tester asked why they were slower than everyone
+else. ETA_TurnBoost now raises cl_yawspeed five times instead and puts
+it back when the turn ends, with the value it had kept in
+eta_turnYawSaved (archived) so a game closed mid-turn has it put back
+on the next turn. The walk key's number, 997, is no longer pressed.
+
+The stuck detector read out the objective's straight line - "136 meters
+to objective, turn left toward the objective" - whenever a turn of the
+way held the player a moment, and it pointed elsewhere than the
+marker. With a marker out it says nothing now.
+
+Checked on the real Oasis: running with forward held and N every three
+seconds, from the Allied camp to the Old City Water Pump - 24 turns,
+"Facing the way" each time, no "Could not turn", no objective report.

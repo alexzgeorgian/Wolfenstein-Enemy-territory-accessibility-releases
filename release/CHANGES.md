@@ -1,24 +1,29 @@
-**The marker's way holds on long walks, so it leads through the Oasis caves to the Old City.**
+**N turns you even while you run, turning no longer slows you down, and the old objective report is quiet while a marker is out.**
 
-- On a long way - across Oasis from the Allied camp to the **Old City
-  Water Pump**, through the flooded caves - the beacon and N now keep
-  to the way all the time. N turns you along it, the caves' low ceiling
-  is said ("Crouch, low ceiling ahead"), and so is the ladder up out of
-  them.
+- **N** turns you to face the way, then says *"Facing the way"*, even
+  while you are running. If the turn falls short, it turns again by
+  itself instead of saying *"Could not turn all the way"*.
+- **Turning keeps you running.** N's turn, and the compass steps of the
+  turn keys, used to hold the game's walk key to turn faster, which
+  slowed you to a walk for every turn. They now turn just as fast
+  without it, so you keep your full speed.
+- **With a marker out**, getting stuck against a wall no longer reads
+  out the objective's straight line (*"136 meters to objective, turn
+  left toward the objective"*). The marker's sound and N lead the way.
+  Without a marker, it still does.
 
 ## What went wrong
 
-The way to a far marker takes the game ten seconds or more to work out,
-and it is worked out again every few seconds as you walk. Each time,
-the way already found was dropped while the new one was worked out, so
-for most of the walk the beacon pointed at an old spot. N turned you
-east, then west, and you stayed on the road outside the Old City wall.
-Now the way found is followed until the new one is ready.
+N turned you toward a point on the way a few metres ahead. If you were
+running, you reached that point while the view was still turning, the
+direction to it swung round behind you, and the turn gave up. N now
+turns you to a fixed direction, taken when you press it.
 
 ## Checked
 
-- On the real Oasis, walking from the Allied camp with N and forward
-  only: through the caves, crouched under the low ceiling, up the
-  ladder, to the Old City Water Pump. Twice.
+- On the real Oasis, running with forward held and pressing N every
+  three seconds, from the Allied camp to the Old City Water Pump: turned
+  every time, *"Facing the way"* each time, never *"Could not turn"*,
+  and no objective report on the way.
 - Every engine check the CI runs passes, and the mod libraries build
   with the feature on and off.

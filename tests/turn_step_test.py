@@ -156,9 +156,9 @@ def main():
                 "(%s). A bare release lets go of the player's own key on the "
                 "same button" % command.strip())
     numbers = re.findall(r'#define\s+ETA_TURN_KEY_[A-Z]+\s+"(\d+)"', console)
-    if len(numbers) != 3 or len(set(numbers)) != 3 or any(int(n) < 256 for n in numbers):
+    if len(numbers) != 2 or len(set(numbers)) != 2 or any(int(n) < 256 for n in numbers):
         failures.append(
-            "the step's key numbers must be three distinct numbers no "
+            "the step's key numbers must be two distinct numbers no "
             "keyboard sends (256 and up); found %s" % numbers)
     else:
         print("[turn] the step presses and releases only its own keys (%s)"
@@ -176,9 +176,15 @@ def main():
         failures.append(
             "nothing in %s calls CG_AccessibilityTurnShutdown" % MAIN)
     boost = function_body(console, "ETA_TurnBoost")
-    if "savedScale" not in boost:
+    if "savedYaw" not in boost or '"cl_yawspeed"' not in boost:
         failures.append(
-            "ETA_TurnBoost does not put cl_anglespeedkey back to what it was")
+            "ETA_TurnBoost does not put cl_yawspeed back to what it was")
+    # The walk key turns faster - and walks the player at half speed for
+    # as long as it is held: every turn slowed the tester down.
+    if "+speed" in boost:
+        failures.append(
+            "ETA_TurnBoost holds the walk key, which slows the player to a "
+            "walk for every turn")
     if not any("CG_AccessibilityTurnShutdown" in f or "speed boost" in f
                for f in failures):
         print("[turn] a map change lets go of the keys and the speed boost")

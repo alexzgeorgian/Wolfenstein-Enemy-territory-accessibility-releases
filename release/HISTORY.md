@@ -9,6 +9,14 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.6 - 22 November 2026
+
+**The marker's way held on long walks, so it led through the Oasis caves to the Old City.**
+
+- The way already found was followed while the next one was worked
+  out, so the beacon and N kept to it from the Allied camp, through the
+  flooded caves, to the Old City Water Pump.
+
 ## 1.4.4.5 - 22 November 2026
 
 **"Where Is Marker" was back on the Key Binds page.**

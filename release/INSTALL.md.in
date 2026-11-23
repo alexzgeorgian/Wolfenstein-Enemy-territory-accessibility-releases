@@ -424,7 +424,9 @@ and reads out the objective, how far it is and which way to turn - the
 same thing the **O** key gives you. It only speaks when you are actually
 pressing a movement key and getting nowhere, so standing still to listen
 or to aim will not set it off, and it says it once rather than
-repeating.
+repeating. With a marker out it says nothing: the marker's sound and N
+lead the way, and the objective's straight line would point somewhere
+else.
 
 **Audio cues** play on their own: a low health cue below 25 health, a
 cue when you can interact with something, a directional cue when you

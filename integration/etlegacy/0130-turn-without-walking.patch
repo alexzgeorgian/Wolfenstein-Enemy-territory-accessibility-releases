@@ -1,0 +1,217 @@
+diff --git a/src/cgame/cg_consolecmds.c b/src/cgame/cg_consolecmds.c
+index f7e462d..a87b577 100644
+--- a/src/cgame/cg_consolecmds.c
++++ b/src/cgame/cg_consolecmds.c
+@@ -1595,6 +1595,7 @@ static struct
+ 	int      pendingAt;
+ 	qboolean speak;
+ 	qboolean brief;    /* N: where the marker is said already */
++	qboolean again;    /* the turn has been tried a second time */
+ 	int      meters;
+ } eta_face;
+ 
+@@ -1625,19 +1626,39 @@ static void CG_AccessibilityMarkerFace_f(void)
+ 	}
+ 
+ 	/* Faced level: the way's point is on the floor, and looking down at
+-	   it would leave the player staring at their feet. */
++	   it would leave the player staring at their feet.
++
++	   And faced as a direction, not a spot: the way's point is a few
++	   metres on, and a player walking while the view turned reached it
++	   and went past, so the direction to it swung round behind them and
++	   the turn chased it until it gave up - "Could not turn all the way",
++	   which the tester heard instead of being turned. The direction is
++	   the one to the point from where N was pressed, carried far out, so
++	   a few steps either way do not move it. */
+ 	memset(&target, 0, sizeof(target));
+ 	target.entityNum = -1;
+-	VectorCopy(point, target.point);
+-	target.point[2] = cg.predictedPlayerState.origin[2] + cg.predictedPlayerState.viewheight;
+ 	if (meters <= 1)
+ 	{
+ 		ETA_Speech_Say("Facing the marker, here");
+ 		return;
+ 	}
++	{
++		vec3_t flat;
++
++		VectorSubtract(point, cg.predictedPlayerState.origin, flat);
++		flat[2] = 0.0f;
++		if (VectorNormalize(flat) < 1.0f)
++		{
++			ETA_Speech_Say("Facing the marker, here");
++			return;
++		}
++		VectorMA(cg.predictedPlayerState.origin, 8192.0f, flat, target.point);
++		target.point[2] = cg.predictedPlayerState.origin[2] + cg.predictedPlayerState.viewheight;
++	}
+ 	ETA_AimStartSnap(&target, NULL);
+ 	eta_face.speak  = qtrue;
+ 	eta_face.brief  = qfalse;
++	eta_face.again  = qfalse;
+ 	eta_face.meters = meters;
+ }
+ 
+@@ -1758,17 +1779,21 @@ static void CG_AccessibilitySurroundings_f(void)
+  *
+  * Nothing here can write the view angles: that is the client's, and
+  * this is the cgame. What it can do is what a player can - press the
+- * engine's own +left and +right, and the walk key that makes them turn
+- * faster by cl_anglespeedkey - and let go at the right moment. They are
+- * pressed under key numbers no keyboard has, so a player's own keys on
+- * the same buttons are never released by this. cl_anglespeedkey is the
+- * one setting touched, and only while a step runs: it is not saved to
+- * the player's config, and it is put back as soon as the step ends, on
+- * a map change and on shutdown.
++ * engine's own +left and +right - and let go at the right moment. They
++ * are pressed under key numbers no keyboard has, so a player's own keys
++ * on the same buttons are never released by this. For speed, cl_yawspeed
++ * is raised while a turn runs, and put back as soon as it ends, on a map
++ * change and on shutdown; what it was is kept in eta_turnYawSaved until
++ * then, so a game that closes mid-turn has it put back on the next one.
++ *
++ * It was the walk key, which makes the turn keys faster by
++ * cl_anglespeedkey - and makes the player walk, at half the running
++ * speed, for as long as it is held. Every turn N made, and every compass
++ * step, slowed the player down; the tester found themselves slower than
++ * everyone else on the map.
+  */
+ #define ETA_TURN_KEY_LEFT   "998"
+ #define ETA_TURN_KEY_RIGHT  "999"
+-#define ETA_TURN_KEY_SPEED  "997"
+ 
+ /* Shorter than this between press and release is a tap. A tap at 140
+    degrees a second covers about 35 degrees in this time, under a
+@@ -1782,10 +1807,9 @@ static void CG_AccessibilitySurroundings_f(void)
+    sound like a tap that did nothing. */
+ #define ETA_TURN_STEP_MARGIN 10.0f
+ 
+-/* The step's speed: cl_yawspeed times this while the walk key is held
+-   down by the step. 140 x 5 is 700 degrees a second, so a compass point
+-   takes about 65 ms - the length of a flick of the mouse. */
+-#define ETA_TURN_FAST_SCALE "5"
++/* The step's speed: cl_yawspeed times this while the step runs. 140 x 5
++   is 700 degrees a second, so a compass point takes about 65 ms - the
++   length of a flick of the mouse. */
+ #define ETA_TURN_FAST_FACTOR 5.0f
+ 
+ /* The last few degrees go at the ordinary speed, so the view stops on the
+@@ -1806,7 +1830,7 @@ typedef struct
+ 	int      stepStarted;
+ 	float    target;        /* the yaw it stops at */
+ 	qboolean fast;
+-	char     savedScale[32];
++	char     savedYaw[32];
+ } eta_turn_t;
+ 
+ static eta_turn_t eta_turn;
+@@ -1822,16 +1846,39 @@ static void ETA_TurnBoost(qboolean on)
+ {
+ 	if (on && !eta_turn.fast)
+ 	{
+-		trap_Cvar_VariableStringBuffer("cl_anglespeedkey", eta_turn.savedScale,
+-		                               sizeof(eta_turn.savedScale));
+-		trap_Cvar_Set("cl_anglespeedkey", ETA_TURN_FAST_SCALE);
+-		trap_SendConsoleCommand("+speed " ETA_TURN_KEY_SPEED "\n");
++		static qboolean registered;
++		float           yaw;
++
++		/* Kept in the config: a game closed mid-turn would otherwise leave
++		   every turn key five times too fast for good. */
++		if (!registered)
++		{
++			vmCvar_t saved;
++
++			trap_Cvar_Register(&saved, "eta_turnYawSaved", "", CVAR_ARCHIVE);
++			registered = qtrue;
++		}
++
++		/* Left over from a game closed mid-turn: that is what it was. */
++		trap_Cvar_VariableStringBuffer("eta_turnYawSaved", eta_turn.savedYaw, sizeof(eta_turn.savedYaw));
++		if (!eta_turn.savedYaw[0])
++		{
++			trap_Cvar_VariableStringBuffer("cl_yawspeed", eta_turn.savedYaw, sizeof(eta_turn.savedYaw));
++		}
++		yaw = (float)atof(eta_turn.savedYaw);
++		if (yaw <= 0.0f)
++		{
++			Q_strncpyz(eta_turn.savedYaw, "140", sizeof(eta_turn.savedYaw));
++			yaw = 140.0f;
++		}
++		trap_Cvar_Set("eta_turnYawSaved", eta_turn.savedYaw);
++		trap_Cvar_Set("cl_yawspeed", va("%g", yaw * ETA_TURN_FAST_FACTOR));
+ 		eta_turn.fast = qtrue;
+ 	}
+ 	else if (!on && eta_turn.fast)
+ 	{
+-		trap_SendConsoleCommand("-speed " ETA_TURN_KEY_SPEED "\n");
+-		trap_Cvar_Set("cl_anglespeedkey", eta_turn.savedScale[0] ? eta_turn.savedScale : "1.5");
++		trap_Cvar_Set("cl_yawspeed", eta_turn.savedYaw[0] ? eta_turn.savedYaw : "140");
++		trap_Cvar_Set("eta_turnYawSaved", "");
+ 		eta_turn.fast = qfalse;
+ 	}
+ }
+@@ -3365,7 +3412,7 @@ void CG_AccessibilityAimFrame(void)
+ 			qboolean use  = eta_use.pending;
+ 			int      body = eta_aim.entityNum;
+ 
+-			/* Shift+N's words, from where the view has landed. */
++			/* N's words, from where the view has landed. */
+ 			if (eta_face.speak)
+ 			{
+ 				vec3_t toward;
+@@ -3373,6 +3420,21 @@ void CG_AccessibilityAimFrame(void)
+ 
+ 				VectorSubtract(eta_aim.point, cg.predictedPlayerState.origin, toward);
+ 				off = fabsf(AngleSubtract(vectoyaw(toward), cg.predictedPlayerState.viewangles[YAW]));
++				/* Short of the way: turned again, once, before anything is
++				   said - the tester heard "Could not turn all the way" and
++				   had to turn by hand, which is what N is for. */
++				if (off > ETA_FACE_LANDED_DEGREES && !eta_face.again)
++				{
++					etaAimTarget_t again;
++
++					memset(&again, 0, sizeof(again));
++					again.entityNum = -1;
++					VectorCopy(eta_aim.point, again.point);
++					ETA_AimStartSnap(&again, NULL);
++					eta_face.speak = qtrue;
++					eta_face.again = qtrue;
++					return;
++				}
+ 				ETA_Speech_Say(off <= ETA_FACE_LANDED_DEGREES
+ 				               ? eta_face.brief ? "Facing the way" : va("Facing the way. %d meters to marker", eta_face.meters)
+ 				               : va("Could not turn all the way: the way to the marker is %s, %d meters",
+diff --git a/src/cgame/cg_playerstate.c b/src/cgame/cg_playerstate.c
+index 1926613..2b53f51 100644
+--- a/src/cgame/cg_playerstate.c
++++ b/src/cgame/cg_playerstate.c
+@@ -480,10 +480,23 @@ static void ETA_NarrateStuckDetection(playerState_t *ps, playerState_t *ops)
+ 		/* What helps here is where to go, not being told what the player
+ 		   already knows. Same report the objectives key gives, so a player
+ 		   who is wedged or lost hears the way out rather than a label for
+-		   their predicament. */
+-		ETA_Speech_BeginReport();
+-		CG_AccessibilityNarrateObjective();
+-		ETA_Speech_EndReport();
++		   their predicament.
++
++		   Not with a marker out: its sound and N already lead the way, and
++		   this report - the objective's straight line, "turn left toward
++		   the objective" - pointed somewhere else. Following the marker
++		   through the Oasis caves, it was said again and again whenever a
++		   turn of the way held the player a moment; the tester asked for
++		   it gone. */
++		vec3_t marker;
++		int    meters;
++
++		if (!CG_AccessibilityMarkerFacePoint(marker, &meters))
++		{
++			ETA_Speech_BeginReport();
++			CG_AccessibilityNarrateObjective();
++			ETA_Speech_EndReport();
++		}
+ 	}
+ }
+ #endif
