@@ -9,6 +9,19 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.9 - 26 November 2026
+
+**Settings, team, class and weapons were chosen from lists that Enter opened, lists let the arrow keys out, and the Mac's update download was no longer refused.**
+
+- Settings with several choices said *"list"*; Enter opened the list,
+  Up and Down went through it, Enter picked and Escape left it.
+- The limbo menu had five stops - Team, Class, Primary weapon,
+  Secondary weapon, Confirm and spawn - each a list under Enter.
+- Up at the top of a list, or Down at the bottom, moved on to the
+  control before or after it.
+- On a Mac set up for bots, the bots file waited while an update was
+  offered, so the update downloaded.
+
 ## 1.4.4.8 - 26 November 2026
 
 **The host page and the in-match server info read out properly, and the campaign list said how to pick one map.**

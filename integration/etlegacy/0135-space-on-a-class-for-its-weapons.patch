@@ -1,0 +1,111 @@
+diff --git a/src/cgame/cg_limbopanel.c b/src/cgame/cg_limbopanel.c
+index d2a64bd..3666378 100644
+--- a/src/cgame/cg_limbopanel.c
++++ b/src/cgame/cg_limbopanel.c
+@@ -3641,8 +3641,9 @@ static int ETA_LimboPanel_ChoiceCount(const eta_limboStop_t *stop)
+ }
+ 
+ /**
+- * @brief A stop worth stopping on. A spectator has no class and no weapons,
+- * and a class with one weapon in a slot has nothing to choose there.
++ * @brief A stop worth stopping on. A spectator has no class and no weapons.
++ * A slot with one weapon is kept, said "1 of 1": skipped, the tester could
++ * not tell where a class's weapons were.
+  * @param[in] index
+  * @return
+  */
+@@ -3655,7 +3656,7 @@ static qboolean ETA_LimboPanel_StopIsAvailable(int index)
+ 	switch (eta_limboStops[index].kind)
+ 	{
+ 	case ETA_LIMBO_CLASS:  return (qboolean)(ETA_LimboPanel_ChoiceCount(&eta_limboStops[index]) > 0);
+-	case ETA_LIMBO_WEAPON: return (qboolean)(ETA_LimboPanel_ChoiceCount(&eta_limboStops[index]) > 1);
++	case ETA_LIMBO_WEAPON: return (qboolean)(ETA_LimboPanel_ChoiceCount(&eta_limboStops[index]) > 0);
+ 	default:               return qtrue;
+ 	}
+ }
+@@ -3911,6 +3912,44 @@ static void ETA_LimboPanel_TakePick(void)
+ 	}
+ }
+ 
++/**
++ * @brief Space on a class - on the Class stop, or on a class in its open
++ * list - takes it and goes to its weapons: the tester's way, as holding a
++ * mouse button on a class opened its weapons. The walk lands on the
++ * primary weapon; Down is the secondary; Enter opens either's list.
++ */
++static qboolean ETA_LimboPanel_ClassWeapons(void)
++{
++	int i;
++
++	if (eta_limboIndex < 0 || eta_limboIndex >= ETA_LIMBO_STOP_COUNT
++	    || eta_limboStops[eta_limboIndex].kind != ETA_LIMBO_CLASS || CG_LimboPanel_GetTeam() == TEAM_SPECTATOR)
++	{
++		return qfalse;
++	}
++	if (eta_limboOpen)
++	{
++		ETA_LimboPanel_TakePick();
++		eta_limboOpen = qfalse;
++	}
++	for (i = 0; i < ETA_LIMBO_STOP_COUNT; i++)
++	{
++		if (eta_limboStops[i].kind == ETA_LIMBO_WEAPON && eta_limboStops[i].slot == PRIMARY_SLOT
++		    && ETA_LimboPanel_StopIsAvailable(i))
++		{
++			char text[160];
++
++			eta_limboIndex = i;
++			ETA_LimboPanel_MoveCursor();
++			Com_sprintf(text, sizeof(text), "%s, weapons. %s. Down for the secondary; Enter opens a list",
++			            BG_ClassnameForNumber(CG_LimboPanel_GetClass()), ETA_LimboStopText(&eta_limboStops[i]));
++			ETA_Speech_Say(text);
++			return qtrue;
++		}
++	}
++	return qfalse;
++}
++
+ /**
+  * @brief Up and Down walk the stops, Enter opens a stop's list, and in an
+  * open list Up and Down walk the choices, Enter takes one and Backspace
+@@ -3922,6 +3961,11 @@ static qboolean ETA_LimboPanel_HandleKey(int key)
+ {
+ 	int steps;
+ 
++	if (key == K_SPACE && ETA_LimboPanel_ClassWeapons())
++	{
++		return qtrue;
++	}
++
+ 	if (eta_limboOpen && eta_limboIndex >= 0 && eta_limboIndex < ETA_LIMBO_STOP_COUNT)
+ 	{
+ 		int count = ETA_LimboPanel_ChoiceCount(&eta_limboStops[eta_limboIndex]);
+@@ -4038,9 +4082,11 @@ static qboolean ETA_LimboPanel_HandleKey(int key)
+ 		eta_limboOpen = qtrue;
+ 		eta_limboPick = ETA_LimboPanel_CurrentChoice(&eta_limboStops[eta_limboIndex]);
+ 		ETA_LimboPanel_MoveCursor();
+-		ETA_LimboPanel_SpeakPick(va("%s list, %i choices. Up and Down go through them, Enter picks, Backspace leaves it. ",
++		ETA_LimboPanel_SpeakPick(va("%s list, %i %s. Up and Down go through them, Enter picks, %sBackspace leaves it. ",
+ 		                            ETA_LimboPanel_StopName(&eta_limboStops[eta_limboIndex]),
+-		                            ETA_LimboPanel_ChoiceCount(&eta_limboStops[eta_limboIndex])));
++		                            ETA_LimboPanel_ChoiceCount(&eta_limboStops[eta_limboIndex]),
++		                            ETA_LimboPanel_ChoiceCount(&eta_limboStops[eta_limboIndex]) == 1 ? "choice" : "choices",
++		                            eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_CLASS ? "Space picks and goes to its weapons, " : ""));
+ 		return qtrue;
+ 	default:
+ 		return qfalse;
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 96bb076..569a7dd 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -2622,8 +2622,8 @@ int ETA_MenuItem_DropdownKey(itemDef_t *item, int key, qboolean down)
+ 		{
+ 			char before[ETA_MAX_MENU_TEXT_LENGTH];
+ 
+-			Com_sprintf(before, sizeof(before), "%s list, %i choices. Up and Down go through them, Enter picks, Escape leaves it. ",
+-			            ETA_DropLabel(item), ETA_DropCount(item));
++			Com_sprintf(before, sizeof(before), "%s list, %i %s. Up and Down go through them, Enter picks, Escape leaves it. ",
++			            ETA_DropLabel(item), ETA_DropCount(item), ETA_DropCount(item) == 1 ? "choice" : "choices");
+ 			ETA_DropSay(item, before);
+ 		}
+ 		return 1;

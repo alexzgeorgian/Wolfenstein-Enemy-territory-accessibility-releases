@@ -1,0 +1,82 @@
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index b3a6b46..e230bf9 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3533,6 +3533,7 @@ typedef struct
+ qboolean CG_AccessibilityLadderNear(etaLadder_t *out);
+ qboolean CG_AccessibilityClimbing(void);
+ void     CG_AccessibilityLimboOpened(void);
++void     CG_AccessibilitySayServerCenter(const char *text);
+ struct ETA_Place;
+ void     CG_AccessibilityPlace(const vec3_t origin, struct ETA_Place *out);
+ void     CG_AccessibilitySpeakPlayState(void);
+diff --git a/src/cgame/cg_servercmds.c b/src/cgame/cg_servercmds.c
+index bf85ca5..358db05 100644
+--- a/src/cgame/cg_servercmds.c
++++ b/src/cgame/cg_servercmds.c
+@@ -3548,10 +3548,16 @@ static void CG_ServerCommand(void)
+ 				CG_Printf("[cgnotify]*** ^3INFO: ^5%s\n", CG_LocalizeServerCommand(CG_Argv(1)));
+ 			}
+ 			CG_PriorityCenterPrint(s, Q_atoi(CG_Argv(2)));
++#ifdef FEATURE_ACCESSIBILITY
++			CG_AccessibilitySayServerCenter(s);
++#endif
+ 		}
+ 		else
+ 		{
+ 			CPri(CG_Argv(1));
++#ifdef FEATURE_ACCESSIBILITY
++			CG_AccessibilitySayServerCenter(CG_TranslateString(CG_Argv(1)));
++#endif
+ 		}
+ 		return;
+ 	}
+@@ -4085,3 +4091,48 @@ void CG_ExecuteNewServerCommands(int latestSequence)
+ 		}
+ 	}
+ }
++
++#ifdef FEATURE_ACCESSIBILITY
++/**
++ * @brief Says a message the server puts in the middle of the screen.
++ *
++ * Those were only drawn. Joining a team the balance rule refuses is
++ * answered that way alone - "The Axis has too many players." - and the
++ * tester, on a Mac hosting with bots, confirmed Axis again and again and
++ * stayed a spectator without a word of why. Colour codes and line breaks
++ * left out; the same line within three seconds is said once.
++ * @param[in] text
++ */
++void CG_AccessibilitySayServerCenter(const char *text)
++{
++	static char last[256];
++	static int  lastAt;
++	char        clean[256];
++	int         i;
++
++	if (!text || !text[0])
++	{
++		return;
++	}
++	Q_strncpyz(clean, text, sizeof(clean));
++	Q_CleanStr(clean);
++	for (i = 0; clean[i]; i++)
++	{
++		if (clean[i] == '\n' || clean[i] == '\r')
++		{
++			clean[i] = ' ';
++		}
++	}
++	{
++		const char *said = Q_TrimStr(clean);
++
++		if (!said[0] || ( !Q_stricmp(said, last) && cg.time - lastAt < 3000 && cg.time >= lastAt ))
++		{
++			return;
++		}
++		Q_strncpyz(last, said, sizeof(last));
++		lastAt = cg.time;
++		ETA_Speech_Say(said);
++	}
++}
++#endif

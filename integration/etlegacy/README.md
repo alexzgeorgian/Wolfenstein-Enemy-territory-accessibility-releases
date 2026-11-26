@@ -2086,3 +2086,34 @@ is unchanged." With a newer version offered this run, the bots file is
 now left alone; the new version brings its own, fetched on its first
 run.
 
+## 0134: the server's messages in the middle of the screen are said
+
+The server answers some things only with a line drawn in the middle of
+the screen, and none was said. The tester, on a Mac hosting a match with
+bots, chose Axis in the limbo menu, confirmed, and stayed a spectator,
+again and again, with nothing said: with Auto-Configure Server on Public
+Settings the teams are kept even - whatever Balanced Teams is set to,
+the preset sets it - and with a bot more on Axis the server refused,
+"The Axis has too many players.", on the screen alone. On Windows,
+hosting without bots, the teams were even and Axis took them.
+
+Each such line from the server is now said as it is drawn, without its
+colour codes, the same line within three seconds once.
+
+Checked in the game: a centre line sent from the server on Oasis was
+said.
+
+## 0135: Space on a class goes to its weapons
+
+The tester's way of choosing weapons: with the mouse, holding a button
+on a class opened its weapons. In the limbo menu, Space on the Class
+stop, or on a class in its open list, now takes the class and goes to
+its weapons: "Medic, weapons. Primary weapon, THOMPSON, 1 of 1, list.
+Down for the secondary; Enter opens a list". The class list says so as
+it opens. A weapon slot with a single weapon is no longer stepped over:
+it is said "1 of 1", so both slots are always found. "1 choices" is said
+"1 choice".
+
+Checked in the game on Oasis: Allies, the class list, Medic, Space, the
+secondary weapon's list, and back up through the stops.
+
