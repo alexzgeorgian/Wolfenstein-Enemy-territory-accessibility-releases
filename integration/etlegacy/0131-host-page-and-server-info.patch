@@ -1,0 +1,159 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 3eb6f62..b565cd9 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -10505,6 +10505,43 @@ static const char *UI_AccessibilityFeederRow(int feederID, int index)
+ 	const char  *type = NULL;
+ 	int         ping, game, clients, humans, maxclients, i;
+ 
++	/* The server info page's players come last, under a heading row of
++	   "num, score, ping, name", and each was said as its four bare
++	   columns - "0, 0, 0, "tester"". Said as a player, by name. */
++	if (feederID == FEEDER_SERVERSTATUS && index >= 0 && index < uiInfo.serverStatusInfo.numLines)
++	{
++		char **cols = uiInfo.serverStatusInfo.lines[index];
++
++		if (cols[0] && !Q_stricmp(cols[0], "num") && cols[3] && !Q_stricmp(cols[3], "name"))
++		{
++			return "Players";
++		}
++		for (i = index - 1; i >= 0; i--)
++		{
++			if (uiInfo.serverStatusInfo.lines[i][0] && !Q_stricmp(uiInfo.serverStatusInfo.lines[i][0], "num"))
++			{
++				break;
++			}
++		}
++		if (i >= 0 && cols[3] && cols[3][0])
++		{
++			Q_strncpyz(name, cols[3], sizeof(name));
++			Q_CleanStr(name);
++			/* The name comes quoted. */
++			if (name[0] == '"')
++			{
++				memmove(name, name + 1, strlen(name));
++			}
++			if (name[0] && name[strlen(name) - 1] == '"')
++			{
++				name[strlen(name) - 1] = '\0';
++			}
++			Com_sprintf(row, sizeof(row), "%s, score %s, ping %s", name, cols[1] ? cols[1] : "0", cols[2] ? cols[2] : "0");
++			return row;
++		}
++		return NULL;
++	}
++
+ 	if (feederID != FEEDER_SERVERS || index < 0 || index >= uiInfo.serverStatus.numDisplayServers)
+ 	{
+ 		return NULL;
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 3b9d5d0..9cc3041 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -325,6 +325,17 @@ const char *ETA_MenuItem_Label(itemDef_t *item)
+ 			}
+ 		}
+ 	}
++	/* A control drawn with its words beside it as a separate label -
++	   the host game page's Friendly Fire, Anti-Lag and the rest - has no
++	   text of its own, and was silent: the tester, arrowing from the
++	   password to the map list, went through five of them hearing
++	   nothing, and took the page for dead. Its name says what it is:
++	   "labelFriendly Fire". */
++	if (item->window.name && !Q_stricmpn(item->window.name, "label", 5) && item->window.name[5]
++	    && item->type != ITEM_TYPE_TEXT && !( item->window.flags & WINDOW_DECORATION ))
++	{
++		return item->window.name + 5;
++	}
+ 	if (item->type == ITEM_TYPE_LISTBOX)
+ 	{
+ 		switch (item->special)
+@@ -333,6 +344,10 @@ const char *ETA_MenuItem_Label(itemDef_t *item)
+ 			return "Server list";
+ 		case FEEDER_SERVERSTATUS:
+ 			return "Server details";
++		case FEEDER_ALLMAPS:
++		case FEEDER_MAPS:
++			/* The host game page's: campaigns for a campaign, or maps. */
++			return DC->getCVarValue("ui_netGameType") == 4.f ? "Campaign list" : "Map list";
+ 		default:
+ 			return "List";
+ 		}
+@@ -413,6 +428,12 @@ static qboolean ETA_ListBoxRowText(itemDef_t *item, char *out, size_t outSize)
+ 		}
+ 	}
+ 
++	/* A blank line between parts - the server info page's, before its
++	   players: said as one, not as a bare position. */
++	if (!out[0])
++	{
++		Q_strncpyz(out, "blank", outSize);
++	}
+ 	Q_strcat(out, outSize, va(", %i of %i", index + 1, count));
+ 	return qtrue;
+ }
+@@ -523,6 +544,12 @@ const char *ETA_MenuItem_FocusText(itemDef_t *item)
+ 			return text;
+ 		}
+ 		Com_sprintf(text, sizeof(text), "%s, %s", ETA_MenuItem_SpokenLabel(item), row);
++		/* Campaigns only, while the game type is Campaign: the tester,
++		   wanting one map, found only North Africa and Central Europe. */
++		if (( item->special == FEEDER_ALLMAPS || item->special == FEEDER_MAPS ) && DC->getCVarValue("ui_netGameType") == 4.f)
++		{
++			Q_strcat(text, sizeof(text), ". For one map, set Game Type to Single-Map Objective");
++		}
+ 		return text;
+ 	}
+ 
+@@ -3693,7 +3720,50 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ #ifdef FEATURE_ACCESSIBILITY
+ 	{
+ 		int      before  = item->cursorPos;
+-		qboolean handled = Item_ListBox_HandleKey(item, key, down, qfalse);
++		qboolean handled;
++
++		/* A list nothing is chosen from - the server info page's, in the
++		   match's Escape menu - only scrolls under the arrows, and its
++		   row was never said again after the first: the tester could
++		   not read it. The arrows go row by row through it here, the
++		   screen kept on the row, and each is said; nothing is chosen. */
++		if (down && item->typeData && ((listBoxDef_t *)item->typeData)->notselectable
++		    && !( item->window.flags & WINDOW_HORIZONTAL ) && ( item->window.flags & WINDOW_HASFOCUS ))
++		{
++			listBoxDef_t *listPtr = (listBoxDef_t *)item->typeData;
++			int          count    = DC->feederCount(item->special);
++			int          step     = 0;
++
++			switch (key)
++			{
++			case K_UPARROW: case K_KP_UPARROW: case K_PAD0_DPAD_UP: step = -1; break;
++			case K_DOWNARROW: case K_KP_DOWNARROW: case K_PAD0_DPAD_DOWN: step = 1; break;
++			case K_PGUP: case K_KP_PGUP: step = -10; break;
++			case K_PGDN: case K_KP_PGDN: step = 10; break;
++			case K_HOME: case K_KP_HOME: step = -count; break;
++			case K_END: case K_KP_END: step = count; break;
++			default: break;
++			}
++			if (step && count > 0)
++			{
++				int viewmax = listPtr->elementHeight > 0 ? (int)( item->window.rect.h / listPtr->elementHeight ) : 1;
++				int pos     = ( before < 0 ? 0 : before ) + step;
++
++				pos = pos < 0 ? 0 : ( pos >= count ? count - 1 : pos );
++				item->cursorPos = pos;
++				if (pos < listPtr->startPos)
++				{
++					listPtr->startPos = pos;
++				}
++				else if (viewmax > 0 && pos >= listPtr->startPos + viewmax)
++				{
++					listPtr->startPos = pos - viewmax + 1;
++				}
++				ETA_MenuItem_NarrateListRow(item);
++				return qtrue;
++			}
++		}
++		handled = Item_ListBox_HandleKey(item, key, down, qfalse);
+ 
+ 		if (handled && down && item->cursorPos != before)
+ 		{

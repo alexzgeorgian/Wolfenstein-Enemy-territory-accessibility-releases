@@ -2006,3 +2006,31 @@ marker. With a marker out it says nothing now.
 Checked on the real Oasis: running with forward held and N every three
 seconds, from the Allied camp to the Old City Water Pump - 24 turns,
 "Facing the way" each time, no "Could not turn", no objective report.
+
+## 0131: the host game page's checkboxes and map list, and the match's server info
+
+Two menus the tester could not read with NVDA or VoiceOver.
+
+On the host game page, arrowing down from the password went through
+five checkboxes - Friendly Fire, Anti-Lag, Max Lives, Weapon
+Restrictions, Balanced Teams - that are drawn with their words beside
+them as separate labels and have no text of their own, so each was
+silent; the tester, hearing nothing, took the page for dead before the
+map list. A control with no text whose item name starts "label" is now
+said by the rest of its name: "Friendly Fire, On". The list under them
+is called what it lists: "Campaign list, Central Europe, 1 of 2", or the
+map list for the other game types. The tester, wanting one map, found
+only North Africa and Central Europe there: with the game type on
+Campaign the list holds campaigns, so on reaching it that is said too -
+"For one map, set Game Type to Single-Map Objective" - and with that set
+it reads "Map list, Fuel Dump, 1 of 6".
+
+In a match, Escape and Server Info opens a list nothing is chosen from;
+the arrows only scrolled it, and after its first line nothing more was
+said. The arrows, Page Up and Down, Home and End now go row by row
+through such a list, the screen kept on the row, and each is said:
+"Address, localhost, 2 of 43". The players at the end are said by name,
+"tester, score 0, ping 0", under "Players", and a blank row as "blank".
+
+Checked in the game: the host game page from Server Name to Advanced
+and back, and the server info list on Oasis, top to bottom.
