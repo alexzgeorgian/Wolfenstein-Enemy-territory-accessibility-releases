@@ -1,29 +1,30 @@
-**N turns you even while you run, turning no longer slows you down, and the old objective report is quiet while a marker is out.**
+**The host page and the in-match server info read out properly, and the campaign list says how to pick one map.**
 
-- **N** turns you to face the way, then says *"Facing the way"*, even
-  while you are running. If the turn falls short, it turns again by
-  itself instead of saying *"Could not turn all the way"*.
-- **Turning keeps you running.** N's turn, and the compass steps of the
-  turn keys, used to hold the game's walk key to turn faster, which
-  slowed you to a walk for every turn. They now turn just as fast
-  without it, so you keep your full speed.
-- **With a marker out**, getting stuck against a wall no longer reads
-  out the objective's straight line (*"136 meters to objective, turn
-  left toward the objective"*). The marker's sound and N lead the way.
-  Without a marker, it still does.
+- **Host page**: the checkboxes around Password now say their names and
+  whether they are on, and moving up or down into the list of maps or
+  campaigns says which list it is and the row you are on. Up, Down,
+  Page Up, Page Down, Home and End move through it, a row at a time or a
+  page at a time, and each row is read. An empty row is said as
+  *"blank"*.
+- **Choosing one map**: when Game Type is set to campaigns, the list
+  says *"Campaign list"*, and adds *"For one map, set Game Type to
+  Single-Map Objective"*. Set that, and the list becomes the map list.
+- **Server info during a match** (Escape, then Server Info): the player
+  list reads row by row, each player as name, score and ping, after a
+  *"Players"* heading.
 
 ## What went wrong
 
-N turned you toward a point on the way a few metres ahead. If you were
-running, you reached that point while the view was still turning, the
-direction to it swung round behind you, and the turn gave up. N now
-turns you to a fixed direction, taken when you press it.
+The host page's checkboxes had no text of their own, so the screen
+reader had nothing to say for them, and the map list could not take
+focus from the keyboard, so moving into it went silent. The server info
+list was read as one run of columns with no names.
 
 ## Checked
 
-- On the real Oasis, running with forward held and pressing N every
-  three seconds, from the Allied camp to the Old City Water Pump: turned
-  every time, *"Facing the way"* each time, never *"Could not turn"*,
-  and no objective report on the way.
+- On the host page, from Password down: each checkbox said its name and
+  state, the list said its name and each row as Up and Down moved, and
+  switching Game Type swapped the campaign list for the map list.
+- In a match, Server Info read each player's name, score and ping.
 - Every engine check the CI runs passes, and the mod libraries build
   with the feature on and off.

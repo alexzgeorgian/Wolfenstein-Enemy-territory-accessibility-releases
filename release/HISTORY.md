@@ -9,6 +9,19 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.7 - 23 November 2026
+
+**N turned you even while you ran, turning no longer slowed you down, and the old objective report was quiet while a marker was out.**
+
+- **N** turned you to face the way, then said *"Facing the way"*, even
+  while you were running, and turned again by itself if the turn fell
+  short.
+- **Turning kept you running.** N's turn and the compass steps of the
+  turn keys no longer held the walk key, so they no longer slowed you
+  to a walk.
+- **With a marker out**, getting stuck against a wall no longer read out
+  the objective's straight line. Without a marker, it still did.
+
 ## 1.4.4.6 - 22 November 2026
 
 **The marker's way held on long walks, so it led through the Oasis caves to the Old City.**
