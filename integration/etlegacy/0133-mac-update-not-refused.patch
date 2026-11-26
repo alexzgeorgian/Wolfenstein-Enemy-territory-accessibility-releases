@@ -1,0 +1,35 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index b565cd9..7d78bf8 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -5184,6 +5184,7 @@ static struct
+ 	ETA_UpdateManifest manifest;
+ 	char target[MAX_OSPATH];    /* where the pk3 goes */
+ 	char download[MAX_OSPATH];  /* where it lands first */
++	qboolean offered;           /* a newer version was offered this run */
+ } etaUpdate;
+ 
+ static void UI_AccessibilityUpdateSay(const char *text)
+@@ -5372,6 +5373,7 @@ static void UI_AccessibilityUpdateChecked(void)
+ 	/* The offer itself is where the player is now: the popup reads it. */
+ 	etaMenuTitle[0] = '\0';
+ 
++	etaUpdate.offered = qtrue;
+ 	ETA_Update_DescribeOffer(offer, &etaUpdate.manifest, ETA_Update_InstalledVersion(), words, sizeof(words));
+ 	trap_Cvar_Set("eta_updateMessage", words);
+ 	etaUpdate.popup = offer == ETA_UPDATE_INSTALL ? "eta_update_offer" : "eta_update_game";
+@@ -5436,8 +5438,13 @@ static void UI_AccessibilityMacGameFrame(void)
+ 		FILE             *found;
+ 
+ 		trap_Cvar_Update(&eta_updateCheck);
++		/* Not with a newer version offered: the offer's popup opens the
++		   same frame this ran, so its download took the one job there is
++		   and the offer's Download was refused - "The download could not
++		   start" - on every update a Mac set up for bots was offered. The
++		   new version brings its own bots file, fetched on its first run. */
+ 		if ((eta_updateCheck.integer && trap_Cvar_VariableValue("eta_updateAsked") == 0.f)
+-		    || etaUpdate.stage != ETA_UPDATE_STAGE_IDLE || etaUpdate.popup
++		    || etaUpdate.stage != ETA_UPDATE_STAGE_IDLE || etaUpdate.popup || etaUpdate.offered
+ 		    || ETA_WindowsUpdate_Poll() == ETA_WINDOWS_UPDATE_BUSY)
+ 		{
+ 			return;

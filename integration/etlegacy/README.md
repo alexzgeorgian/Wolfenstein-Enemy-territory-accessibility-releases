@@ -2034,3 +2034,55 @@ through such a list, the screen kept on the row, and each is said:
 
 Checked in the game: the host game page from Server Name to Advanced
 and back, and the server info list on Oasis, top to bottom.
+
+## 0132: settings, team, class and weapons chosen from lists
+
+The tester asked for choices to open as lists rather than step on under
+Enter. A setting with several choices - Game Type, Auto-Configure
+Server, Dedicated Server and the like - is said with ", list" after its
+value; Enter opens it, "Game Type list, 5 choices. Up and Down go
+through them, Enter picks, Escape leaves it. Campaign, 1 of 5"; Up and
+Down go through the choices, Enter picks one and runs what the setting
+runs on a change, and Escape, Backspace or Tab closes it unchanged. A
+click still steps the setting on, as it did.
+
+Stepping lost a value that is none of the choices: Auto-Configure Server
+reads "Custom" until something is picked, and after that Custom never
+came round again. The value a setting held when its list was first
+opened, if it is none of the choices, stays in the list as "Custom", the
+first choice, for the rest of the session.
+
+At the first row of a list Up, and at the last Down, now leave it for
+the control before or after. The host page's campaign list kept the
+arrows at its ends: the tester could not get past it to Back, Advanced
+and Start Server, nor back up to the settings.
+
+The limbo menu had a stop for every team and every class and stepped
+the weapons on under Enter. It now has five: Team, Class, Primary
+weapon, Secondary weapon, Confirm and spawn - "Class, Soldier, 1 of 5,
+list". Enter opens a stop's list, walked the same way, each choice said
+with whether it is selected, full or unavailable; Enter takes it through
+the panel's own button or weapon setter, and Backspace leaves it, since
+Escape shuts the panel. A stop with nothing to choose - the class of a
+spectator, a slot with one weapon - is still stepped over.
+
+Checked in the game: on the host page, Game Type changed to Single-Map
+Objective from its list; Auto-Configure Server set to Public Settings
+and back to Custom; Escape left a list unchanged; Down through the
+campaign list to Start Server and Up back to Balanced Teams. On Oasis,
+from spectator: Allies, Medic and spawn; and Allies, Soldier with the
+Flamethrower and then the Bazooka picked from the primary weapon list.
+
+## 0133: the Mac's update download no longer refused by the bots file's
+
+Reported on the downloads page: on a Mac, a new version found at
+start-up could not be downloaded and applied, and the player fetched the
+release by hand. On a Mac set up for bots the ui also keeps the bots
+file, qagame_mac, in step with the version installed, once a run after
+the start-up check - and it began the moment the offer's popup opened,
+the same frame. The updater runs one job at a time, so the offer's
+Download was then refused: "The download could not start. Your version
+is unchanged." With a newer version offered this run, the bots file is
+now left alone; the new version brings its own, fetched on its first
+run.
+

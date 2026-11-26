@@ -1,30 +1,49 @@
-**The host page and the in-match server info read out properly, and the campaign list says how to pick one map.**
+**Settings, team, class and weapons are chosen from lists that Enter opens, Custom can be picked again, and lists no longer trap the arrow keys.**
 
-- **Host page**: the checkboxes around Password now say their names and
-  whether they are on, and moving up or down into the list of maps or
-  campaigns says which list it is and the row you are on. Up, Down,
-  Page Up, Page Down, Home and End move through it, a row at a time or a
-  page at a time, and each row is read. An empty row is said as
-  *"blank"*.
-- **Choosing one map**: when Game Type is set to campaigns, the list
-  says *"Campaign list"*, and adds *"For one map, set Game Type to
-  Single-Map Objective"*. Set that, and the list becomes the map list.
-- **Server info during a match** (Escape, then Server Info): the player
-  list reads row by row, each player as name, score and ping, after a
-  *"Players"* heading.
+- **Settings with several choices** - Game Type, Auto-Configure Server,
+  Dedicated Server and the rest - now say *"list"* after their value.
+  Press **Enter** to open the list: it says how many choices there are
+  and which one is set. **Up** and **Down** go through them, **Enter**
+  picks one, and **Escape** closes the list without changing anything.
+  A mouse click still steps the setting on, as before.
+- **Custom comes back.** Auto-Configure Server reads *"Custom"* until
+  you pick something else; Custom now stays in its list, first, so you
+  can pick it again.
+- **Lists let you out.** Up at the top of a list, or Down at the
+  bottom, moves on to the control before or after it. On the host page,
+  Down past the last campaign or map reaches **Back**, **Advanced** and
+  **Start Server**, and Up from the first goes back to the settings.
+- **The limbo menu** (L) now has five stops: **Team**, **Class**,
+  **Primary weapon**, **Secondary weapon** and **Confirm and spawn**.
+  Each of the first four says what is set, such as *"Class, Soldier, 1
+  of 5, list"*. **Enter** opens its list, Up and Down go through the
+  choices, each said with whether it is selected, full or unavailable,
+  **Enter** picks one, and **Backspace** closes the list unchanged.
+  Escape still closes the whole limbo menu. A weapon slot with only one
+  weapon is skipped.
+- **Updating on the Mac**: when a new version was offered at start-up
+  on a Mac set up for bots, the game began updating its bots file at the
+  same moment, and **Download** was refused. The bots file now waits, so
+  the update downloads.
 
 ## What went wrong
 
-The host page's checkboxes had no text of their own, so the screen
-reader had nothing to say for them, and the map list could not take
-focus from the keyboard, so moving into it went silent. The server info
-list was read as one run of columns with no names.
+Enter stepped a setting on to its next choice, so to reach one you had
+to listen to each in turn, and a value that was none of the choices,
+like Custom, could not be got back once you stepped past it. A list
+kept Up and Down at its ends, so on the host page you could not move
+past the campaign list. The limbo menu listed every team and class as
+its own stop, and stepped the weapons on one at a time.
 
 ## Checked
 
-- On the host page, from Password down: each checkbox said its name and
-  state, the list said its name and each row as Up and Down moved, and
-  switching Game Type swapped the campaign list for the map list.
-- In a match, Server Info read each player's name, score and ping.
+- On the host page: Game Type changed from Campaign to Single-Map
+  Objective from its list; Auto-Configure Server set to Public Settings
+  and back to Custom; Escape closed a list without a change; Down
+  through the campaign list to Start Server, and Up back to Balanced
+  Teams.
+- On Oasis, from spectator: Allies, Medic, then Confirm and spawn put
+  the player in play as an Allied medic; Allies, Soldier, with the
+  Flamethrower and then the Bazooka picked from the primary weapon list.
 - Every engine check the CI runs passes, and the mod libraries build
   with the feature on and off.

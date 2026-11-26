@@ -1,0 +1,900 @@
+diff --git a/src/cgame/cg_limbopanel.c b/src/cgame/cg_limbopanel.c
+index 7ee760d..d2a64bd 100644
+--- a/src/cgame/cg_limbopanel.c
++++ b/src/cgame/cg_limbopanel.c
+@@ -3549,41 +3549,40 @@ qboolean CG_LimboPanel_Draw(void)
+ #define ETA_LIMBO_WEAPON  2
+ #define ETA_LIMBO_CONFIRM 3
+ 
+-typedef struct
+-{
+-	panel_button_t *button;
+-	int            kind;
+-	int            slot;
+-} eta_limboStop_t;
+-
+ /*
+- * The weapon stops carry no button: the panel has no per-weapon control to
+- * drive, only a dropdown. They are driven through the slot lights and
+- * CG_LimboPanel_SetSelectedWeaponNum instead, which is the same pair the
+- * dropdown itself uses.
++ * Five stops: team, class, the two weapons and confirm. Each of the first
++ * four is a list Enter opens - the tester asked for the choices as lists,
++ * as they remembered the panel's weapon list with its slots and types -
++ * walked with Up and Down, Enter picking one and Backspace leaving it as
++ * it was. Escape is the game's: it shuts the whole panel.
+  *
+  * SECONDARY_SLOT is 0 and PRIMARY_SLOT is 1 (cg_local.h), the opposite way
+  * round from how the names read, so the slots here are written as the
+  * constants rather than as numbers.
+  */
++typedef struct
++{
++	int kind;
++	int slot;
++} eta_limboStop_t;
++
+ static eta_limboStop_t eta_limboStops[] =
+ {
+-	{ &teamButton0,  ETA_LIMBO_TEAM,    0              },
+-	{ &teamButton1,  ETA_LIMBO_TEAM,    0              },
+-	{ &teamButton2,  ETA_LIMBO_TEAM,    0              },
+-	{ &classButton0, ETA_LIMBO_CLASS,   0              },
+-	{ &classButton1, ETA_LIMBO_CLASS,   0              },
+-	{ &classButton2, ETA_LIMBO_CLASS,   0              },
+-	{ &classButton3, ETA_LIMBO_CLASS,   0              },
+-	{ &classButton4, ETA_LIMBO_CLASS,   0              },
+-	{ NULL,          ETA_LIMBO_WEAPON,  PRIMARY_SLOT   },
+-	{ NULL,          ETA_LIMBO_WEAPON,  SECONDARY_SLOT },
+-	{ &okButton,     ETA_LIMBO_CONFIRM, 0              }
++	{ ETA_LIMBO_TEAM,    0              },
++	{ ETA_LIMBO_CLASS,   0              },
++	{ ETA_LIMBO_WEAPON,  PRIMARY_SLOT   },
++	{ ETA_LIMBO_WEAPON,  SECONDARY_SLOT },
++	{ ETA_LIMBO_CONFIRM, 0              }
+ };
+ 
+ #define ETA_LIMBO_STOP_COUNT ((int)(sizeof(eta_limboStops) / sizeof(eta_limboStops[0])))
+ 
+-static int eta_limboIndex = -1;
++static panel_button_t *eta_limboTeams[]   = { &teamButton0, &teamButton1, &teamButton2 };
++static panel_button_t *eta_limboClasses[] = { &classButton0, &classButton1, &classButton2, &classButton3, &classButton4 };
++
++static int      eta_limboIndex = -1;
++static qboolean eta_limboOpen;   /* the stop's list is open */
++static int      eta_limboPick;   /* where in it */
+ 
+ /**
+  * @brief Collects the weapons the panel offers for a slot, in the order its
+@@ -3626,147 +3625,222 @@ static int ETA_LimboPanel_WeaponOptions(int slot, weapon_t *out, int max)
+ }
+ 
+ /**
+- * @brief A stop worth stopping on. A class with one weapon in a slot has
+- * nothing to choose there, and a spectator has no weapons at all; walking
+- * onto either would say something the player cannot act on.
++ * @brief How many choices a stop's list has; 0 for confirm.
++ */
++static int ETA_LimboPanel_ChoiceCount(const eta_limboStop_t *stop)
++{
++	weapon_t options[MAX_WEAPS_PER_CLASS];
++
++	switch (stop->kind)
++	{
++	case ETA_LIMBO_TEAM:   return (int)ARRAY_LEN(eta_limboTeams);
++	case ETA_LIMBO_CLASS:  return CG_LimboPanel_GetTeam() == TEAM_SPECTATOR ? 0 : (int)ARRAY_LEN(eta_limboClasses);
++	case ETA_LIMBO_WEAPON: return ETA_LimboPanel_WeaponOptions(stop->slot, options, MAX_WEAPS_PER_CLASS);
++	default:               return 0;
++	}
++}
++
++/**
++ * @brief A stop worth stopping on. A spectator has no class and no weapons,
++ * and a class with one weapon in a slot has nothing to choose there.
+  * @param[in] index
+  * @return
+  */
+ static qboolean ETA_LimboPanel_StopIsAvailable(int index)
+ {
+-	weapon_t options[MAX_WEAPS_PER_CLASS];
+-
+ 	if (index < 0 || index >= ETA_LIMBO_STOP_COUNT)
+ 	{
+ 		return qfalse;
+ 	}
+-
+-	if (eta_limboStops[index].kind != ETA_LIMBO_WEAPON)
++	switch (eta_limboStops[index].kind)
+ 	{
+-		return qtrue;
++	case ETA_LIMBO_CLASS:  return (qboolean)(ETA_LimboPanel_ChoiceCount(&eta_limboStops[index]) > 0);
++	case ETA_LIMBO_WEAPON: return (qboolean)(ETA_LimboPanel_ChoiceCount(&eta_limboStops[index]) > 1);
++	default:               return qtrue;
+ 	}
+-
+-	return (qboolean)(ETA_LimboPanel_WeaponOptions(eta_limboStops[index].slot, options,
+-	                                               MAX_WEAPS_PER_CLASS) > 1);
+ }
+ 
+ /**
+- * @brief Spoken name for one stop, including whether it is the current choice
+- * and whether the server has ruled it out - both of which a sighted player
+- * reads from the button's colour, and neither of which is in its text.
+- * @param[in] stop
+- * @return
++ * @brief Which of a stop's choices is the one now taken.
+  */
+-static const char *ETA_LimboStopText(const eta_limboStop_t *stop)
++static int ETA_LimboPanel_CurrentChoice(const eta_limboStop_t *stop)
+ {
+-	static char text[128];
+-	const char  *name  = NULL;
+-	const char  *state = "";
+-	team_t      team;
++	int i;
+ 
+-	if (stop->kind == ETA_LIMBO_WEAPON)
++	if (stop->kind == ETA_LIMBO_TEAM)
++	{
++		for (i = 0; i < (int)ARRAY_LEN(eta_limboTeams); i++)
++		{
++			if (teamOrder[eta_limboTeams[i]->data[0]] == CG_LimboPanel_GetTeam())
++			{
++				return i;
++			}
++		}
++	}
++	else if (stop->kind == ETA_LIMBO_CLASS)
++	{
++		for (i = 0; i < (int)ARRAY_LEN(eta_limboClasses); i++)
++		{
++			if (eta_limboClasses[i]->data[1] == CG_LimboPanel_GetClass())
++			{
++				return i;
++			}
++		}
++	}
++	else if (stop->kind == ETA_LIMBO_WEAPON)
+ 	{
+ 		weapon_t options[MAX_WEAPS_PER_CLASS];
+ 		weapon_t current = CG_LimboPanel_GetSelectedWeapon(stop->slot);
+ 		int      count   = ETA_LimboPanel_WeaponOptions(stop->slot, options, MAX_WEAPS_PER_CLASS);
+-		int      i, at   = 0;
+ 
+ 		for (i = 0; i < count; i++)
+ 		{
+ 			if (options[i] == current)
+ 			{
+-				at = i + 1;
+-				break;
++				return i;
+ 			}
+ 		}
+-
+-		/* "N of M" is the panel's own phrasing for this - it is what the
+-		   dropdown prints beside each weapon - and M is the count the engine
+-		   works out per class and skill level, not one assumed here. */
+-		Com_sprintf(text, sizeof(text), "%s weapon, %s, %i of %i%s",
+-		            stop->slot == PRIMARY_SLOT ? "Primary" : "Secondary",
+-		            current != WP_NONE ? GetWeaponTableData(current)->desc : "none",
+-		            at, count,
+-		            CG_LimboPanel_RealWeaponIsDisabled(current) ? ", unavailable" : "");
+-		return text;
+ 	}
++	return 0;
++}
+ 
+-	switch (stop->kind)
++/**
++ * @brief One choice, with whether it is the one taken and whether the
++ * server rules it out - both of which a sighted player reads from the
++ * button's colour, and neither of which is in its text.
++ */
++static const char *ETA_LimboPanel_ChoiceText(const eta_limboStop_t *stop, int at)
++{
++	static char text[128];
++	const char  *name   = "none";
++	qboolean    taken   = (qboolean)(at == ETA_LimboPanel_CurrentChoice(stop));
++	qboolean    ruleOut = qfalse;
++
++	if (stop->kind == ETA_LIMBO_TEAM && at >= 0 && at < (int)ARRAY_LEN(eta_limboTeams))
+ 	{
+-	case ETA_LIMBO_TEAM:
+-		team = teamOrder[stop->button->data[0]];
+-		name = (team == TEAM_AXIS) ? "Axis" : ((team == TEAM_ALLIES) ? "Allies" : "Spectator");
++		team_t team = teamOrder[eta_limboTeams[at]->data[0]];
+ 
+-		if (CG_LimboPanel_TeamIsDisabled(team))
+-		{
+-			state = ", full";
+-		}
+-		else if (CG_LimboPanel_GetTeam() == team)
+-		{
+-			state = ", selected";
+-		}
+-		break;
+-	case ETA_LIMBO_CLASS:
+-		name = BG_ClassnameForNumber(stop->button->data[1]);
++		name    = (team == TEAM_AXIS) ? "Axis" : ((team == TEAM_ALLIES) ? "Allies" : "Spectator");
++		ruleOut = CG_LimboPanel_TeamIsDisabled(team);
++		taken   = (qboolean)(CG_LimboPanel_GetTeam() == team);
++	}
++	else if (stop->kind == ETA_LIMBO_CLASS && at >= 0 && at < (int)ARRAY_LEN(eta_limboClasses))
++	{
++		name    = BG_ClassnameForNumber(eta_limboClasses[at]->data[1]);
++		ruleOut = CG_LimboPanel_ClassIsDisabled(CG_LimboPanel_GetTeam(), eta_limboClasses[at]->data[1]);
++	}
++	else if (stop->kind == ETA_LIMBO_WEAPON)
++	{
++		weapon_t options[MAX_WEAPS_PER_CLASS];
++		int      count = ETA_LimboPanel_WeaponOptions(stop->slot, options, MAX_WEAPS_PER_CLASS);
+ 
+-		if (CG_LimboPanel_ClassIsDisabled(CG_LimboPanel_GetTeam(), stop->button->data[1]))
++		if (at >= 0 && at < count)
+ 		{
+-			state = ", unavailable";
++			name    = GetWeaponTableData(options[at])->desc;
++			ruleOut = CG_LimboPanel_RealWeaponIsDisabled(options[at]);
+ 		}
+-		else if (CG_LimboPanel_GetClass() == stop->button->data[1])
++	}
++
++	Com_sprintf(text, sizeof(text), "%s%s%s", name ? name : "Unknown",
++	            ruleOut ? (stop->kind == ETA_LIMBO_TEAM ? ", full" : ", unavailable") : "",
++	            taken ? ", selected" : "");
++	return text;
++}
++
++static const char *ETA_LimboPanel_StopName(const eta_limboStop_t *stop)
++{
++	switch (stop->kind)
++	{
++	case ETA_LIMBO_TEAM:   return "Team";
++	case ETA_LIMBO_CLASS:  return "Class";
++	case ETA_LIMBO_WEAPON: return stop->slot == PRIMARY_SLOT ? "Primary weapon" : "Secondary weapon";
++	default:               return "Confirm and spawn";
++	}
++}
++
++/**
++ * @brief A stop as it is walked onto: its name and what is taken there.
++ */
++static const char *ETA_LimboStopText(const eta_limboStop_t *stop)
++{
++	static char text[160];
++	char        choice[128];
++	int         at, count;
++
++	if (stop->kind == ETA_LIMBO_CONFIRM)
++	{
++		return ETA_LimboPanel_StopName(stop);
++	}
++	at    = ETA_LimboPanel_CurrentChoice(stop);
++	count = ETA_LimboPanel_ChoiceCount(stop);
++	Q_strncpyz(choice, ETA_LimboPanel_ChoiceText(stop, at), sizeof(choice));
++	{
++		/* "selected" belongs to the list; here it is the stop's value. */
++		char *mark = strstr(choice, ", selected");
++
++		if (mark)
+ 		{
+-			state = ", selected";
++			*mark = '\0';
+ 		}
+-		break;
+-	default:
+-		name = "Confirm and spawn";
+-		break;
+ 	}
+-
+-	Com_sprintf(text, sizeof(text), "%s%s", name ? name : "Unknown", state);
++	Com_sprintf(text, sizeof(text), "%s, %s, %i of %i, list", ETA_LimboPanel_StopName(stop), choice, at + 1, count);
+ 	return text;
+ }
+ 
+ /**
+- * @brief Puts the cursor on the current stop, so the panel's own hit testing
++ * @brief Puts the cursor on a control, so the panel's own hit testing
+  * agrees with where the keyboard thinks it is.
+  */
++static void ETA_LimboPanel_CursorTo(panel_button_t *button)
++{
++	cgs.cursorX  = (int)(button->rect.x + button->rect.w / 2.f);
++	cgs.cursorY  = (int)(button->rect.y + button->rect.h / 2.f);
++	cgDC.cursorx = cgs.cursorX;
++	cgDC.cursory = cgs.cursorY;
++}
++
++/**
++ * @brief Puts the cursor on the current stop - in an open list, on the
++ * choice - and, on a weapon stop, shows that slot.
++ */
+ static void ETA_LimboPanel_MoveCursor(void)
+ {
+-	rectDef_t *rect;
++	const eta_limboStop_t *stop;
+ 
+ 	if (eta_limboIndex < 0 || eta_limboIndex >= ETA_LIMBO_STOP_COUNT)
+ 	{
+ 		return;
+ 	}
++	stop = &eta_limboStops[eta_limboIndex];
+ 
+-	if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_WEAPON)
++	switch (stop->kind)
++	{
++	case ETA_LIMBO_TEAM:
++		ETA_LimboPanel_CursorTo(eta_limboTeams[eta_limboOpen ? eta_limboPick : ETA_LimboPanel_CurrentChoice(stop)]);
++		break;
++	case ETA_LIMBO_CLASS:
++		ETA_LimboPanel_CursorTo(eta_limboClasses[eta_limboOpen ? eta_limboPick : ETA_LimboPanel_CurrentChoice(stop)]);
++		break;
++	case ETA_LIMBO_WEAPON:
+ 	{
+-		/* A weapon stop has no control of its own. Landing on it selects that
+-		   slot through the panel's own slot light, so the dropdown on screen
+-		   shows the weapons being spoken, and so the engine's own selectable
+-		   weapon lookup - which reads the live slot - answers for this one.
+-		   weaponLight1 carries SECONDARY_SLOT and weaponLight2 PRIMARY_SLOT;
+-		   that pairing is checked rather than assumed from the names. */
+-		panel_button_t *light = (eta_limboStops[eta_limboIndex].slot == PRIMARY_SLOT)
+-		                        ? &weaponLight2 : &weaponLight1;
++		/* No control per weapon: the slot's own light is clicked, so the
++		   panel shows the weapons being spoken, and the engine's own
++		   selectable weapon lookup - which reads the live slot - answers for
++		   this one. weaponLight1 carries SECONDARY_SLOT and weaponLight2
++		   PRIMARY_SLOT. */
++		panel_button_t *light = (stop->slot == PRIMARY_SLOT) ? &weaponLight2 : &weaponLight1;
+ 
+-		if (cgs.ccSelectedWeaponSlot != eta_limboStops[eta_limboIndex].slot)
++		if (cgs.ccSelectedWeaponSlot != stop->slot)
+ 		{
+ 			CG_LimboPanel_WeaponLights_KeyDown(light, K_MOUSE1);
+ 		}
+-
+-		rect = &light->rect;
++		ETA_LimboPanel_CursorTo(light);
++		break;
+ 	}
+-	else
+-	{
+-		rect = &eta_limboStops[eta_limboIndex].button->rect;
++	default:
++		ETA_LimboPanel_CursorTo(&okButton);
++		break;
+ 	}
+-
+-	cgs.cursorX  = (int)(rect->x + rect->w / 2.f);
+-	cgs.cursorY  = (int)(rect->y + rect->h / 2.f);
+-	cgDC.cursorx = cgs.cursorX;
+-	cgDC.cursory = cgs.cursorY;
+ }
+ 
+ /**
+@@ -3777,6 +3851,7 @@ void CG_AccessibilityLimboOpened(void)
+ 	/* Where the player is, as the panel comes up - the tester asked for
+ 	   every menu to say which one it is. The first stop is said when the
+ 	   arrow keys or Tab move to it. */
++	eta_limboOpen = qfalse;
+ 	ETA_Speech_Say("Limbo menu");
+ }
+ 
+@@ -3790,8 +3865,56 @@ static void ETA_LimboPanel_SpeakCurrent(void)
+ 	ETA_Speech_Say(ETA_LimboStopText(&eta_limboStops[eta_limboIndex]));
+ }
+ 
++static void ETA_LimboPanel_SpeakPick(const char *before)
++{
++	const eta_limboStop_t *stop = &eta_limboStops[eta_limboIndex];
++
++	ETA_Speech_Say(va("%s%s, %i of %i", before ? before : "", ETA_LimboPanel_ChoiceText(stop, eta_limboPick),
++	                  eta_limboPick + 1, ETA_LimboPanel_ChoiceCount(stop)));
++}
++
++/**
++ * @brief Takes the choice the open list is on, by the control's own
++ * handler or, for a weapon, the setter the panel's dropdown calls.
++ */
++static void ETA_LimboPanel_TakePick(void)
++{
++	const eta_limboStop_t *stop = &eta_limboStops[eta_limboIndex];
++	panel_button_t        *button = NULL;
++
++	if (stop->kind == ETA_LIMBO_TEAM)
++	{
++		button = eta_limboTeams[eta_limboPick];
++	}
++	else if (stop->kind == ETA_LIMBO_CLASS)
++	{
++		button = eta_limboClasses[eta_limboPick];
++	}
++	else if (stop->kind == ETA_LIMBO_WEAPON)
++	{
++		weapon_t options[MAX_WEAPS_PER_CLASS];
++		int      count = ETA_LimboPanel_WeaponOptions(stop->slot, options, MAX_WEAPS_PER_CLASS);
++
++		if (eta_limboPick >= 0 && eta_limboPick < count)
++		{
++			CG_LimboPanel_SetSelectedWeaponNum(stop->slot, options[eta_limboPick]);
++			SOUND_SELECT;
++		}
++		return;
++	}
++	if (button && button->onKeyDown)
++	{
++		/* The cursor is already on the control, so its own handler sees
++		   exactly what it would see under a real click. */
++		ETA_LimboPanel_CursorTo(button);
++		button->onKeyDown(button, K_MOUSE1);
++	}
++}
++
+ /**
+- * @brief Arrow keys and Tab walk the stops; Enter presses one.
++ * @brief Up and Down walk the stops, Enter opens a stop's list, and in an
++ * open list Up and Down walk the choices, Enter takes one and Backspace
++ * leaves it.
+  * @param[in] key
+  * @return qtrue when the key was consumed.
+  */
+@@ -3799,13 +3922,50 @@ static qboolean ETA_LimboPanel_HandleKey(int key)
+ {
+ 	int steps;
+ 
++	if (eta_limboOpen && eta_limboIndex >= 0 && eta_limboIndex < ETA_LIMBO_STOP_COUNT)
++	{
++		int count = ETA_LimboPanel_ChoiceCount(&eta_limboStops[eta_limboIndex]);
++		int step  = 0;
++
++		switch (key)
++		{
++		case K_UPARROW: case K_KP_UPARROW: case K_LEFTARROW: case K_KP_LEFTARROW: step = -1; break;
++		case K_DOWNARROW: case K_KP_DOWNARROW: case K_RIGHTARROW: case K_KP_RIGHTARROW: step = 1; break;
++		case K_HOME: case K_KP_HOME: case K_PGUP: case K_KP_PGUP: step = -count; break;
++		case K_END: case K_KP_END: case K_PGDN: case K_KP_PGDN: step = count; break;
++		case K_BACKSPACE: case K_TAB:
++			eta_limboOpen = qfalse;
++			ETA_LimboPanel_MoveCursor();
++			ETA_Speech_Say(va("List closed. %s", ETA_LimboStopText(&eta_limboStops[eta_limboIndex])));
++			return qtrue;
++		case K_ENTER: case K_KP_ENTER:
++			ETA_LimboPanel_TakePick();
++			eta_limboOpen = qfalse;
++			ETA_LimboPanel_MoveCursor();
++			/* Said as the panel now has it: a full team or a class ruled
++			   out is not taken, and the stop says what is. */
++			ETA_Speech_Say(ETA_LimboStopText(&eta_limboStops[eta_limboIndex]));
++			return qtrue;
++		default:
++			return qfalse;
++		}
++		if (count > 0)
++		{
++			eta_limboPick += step;
++			eta_limboPick  = eta_limboPick < 0 ? 0 : (eta_limboPick >= count ? count - 1 : eta_limboPick);
++			ETA_LimboPanel_MoveCursor();
++			ETA_LimboPanel_SpeakPick(NULL);
++		}
++		return qtrue;
++	}
++
+ 	switch (key)
+ 	{
+ 	case K_DOWNARROW:
+ 	case K_UPARROW:
+ 		/* Step over stops the current team and class leave nothing to choose
+ 		   at, rather than announcing a dead end. The bound walk cannot spin:
+-		   team, class and confirm are always available. */
++		   team and confirm are always available. */
+ 		for (steps = 0; steps < ETA_LIMBO_STOP_COUNT; steps++)
+ 		{
+ 			if (key == K_DOWNARROW)
+@@ -3829,10 +3989,8 @@ static qboolean ETA_LimboPanel_HandleKey(int key)
+ 	case K_TAB:
+ 	{
+ 		/* Tab keeps the job it has in the stock panel - swapping which weapon
+-		   slot is shown - and gains a spoken result. MoveCursor clicks the
+-		   slot light exactly as the stock handler below does, so the swap is
+-		   the engine's, and parking the walk on that slot's stop keeps the
+-		   keyboard and the panel pointing at the same thing. */
++		   slot is shown - and gains a spoken result, the walk parked on that
++		   slot's stop. */
+ 		int other = (cgs.ccSelectedWeaponSlot == PRIMARY_SLOT) ? SECONDARY_SLOT : PRIMARY_SLOT;
+ 		int i;
+ 
+@@ -3861,44 +4019,28 @@ static qboolean ETA_LimboPanel_HandleKey(int key)
+ 			return qfalse;
+ 		}
+ 
+-		/* The cursor is already on the control, so its own handler sees
+-		   exactly what it would see under a real click. */
+-		ETA_LimboPanel_MoveCursor();
+-
+-		if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_WEAPON)
++		if (eta_limboStops[eta_limboIndex].kind == ETA_LIMBO_CONFIRM)
+ 		{
+-			weapon_t options[MAX_WEAPS_PER_CLASS];
+-			int      slot    = eta_limboStops[eta_limboIndex].slot;
+-			weapon_t current = CG_LimboPanel_GetSelectedWeapon(slot);
+-			int      count   = ETA_LimboPanel_WeaponOptions(slot, options, MAX_WEAPS_PER_CLASS);
+-			int      i, at   = -1;
+-
+-			/* The panel offers no per-weapon control to click, only a dropdown
+-			   that needs a cursor, so Enter advances the slot to its next
+-			   option instead - the same setter the dropdown calls. */
+-			for (i = 0; i < count; i++)
+-			{
+-				if (options[i] == current)
+-				{
+-					at = i;
+-					break;
+-				}
+-			}
+-
+-			if (count > 0)
++			ETA_LimboPanel_MoveCursor();
++			if (okButton.onKeyDown)
+ 			{
+-				CG_LimboPanel_SetSelectedWeaponNum(slot, options[(at + 1) % count]);
+-				SOUND_SELECT;
++				okButton.onKeyDown(&okButton, K_MOUSE1);
+ 			}
++			ETA_LimboPanel_SpeakCurrent();
++			return qtrue;
+ 		}
+-		else if (eta_limboStops[eta_limboIndex].button->onKeyDown)
++
++		if (ETA_LimboPanel_ChoiceCount(&eta_limboStops[eta_limboIndex]) <= 0)
+ 		{
+-			eta_limboStops[eta_limboIndex].button->onKeyDown(eta_limboStops[eta_limboIndex].button, K_MOUSE1);
++			ETA_LimboPanel_SpeakCurrent();
++			return qtrue;
+ 		}
+-
+-		/* Re-read the same stop: selecting a team, class or weapon changes
+-		   what the panel now says about it. */
+-		ETA_LimboPanel_SpeakCurrent();
++		eta_limboOpen = qtrue;
++		eta_limboPick = ETA_LimboPanel_CurrentChoice(&eta_limboStops[eta_limboIndex]);
++		ETA_LimboPanel_MoveCursor();
++		ETA_LimboPanel_SpeakPick(va("%s list, %i choices. Up and Down go through them, Enter picks, Backspace leaves it. ",
++		                            ETA_LimboPanel_StopName(&eta_limboStops[eta_limboIndex]),
++		                            ETA_LimboPanel_ChoiceCount(&eta_limboStops[eta_limboIndex])));
+ 		return qtrue;
+ 	default:
+ 		return qfalse;
+diff --git a/src/ui/ui_menu.c b/src/ui/ui_menu.c
+index bc2fd4a..854c85d 100644
+--- a/src/ui/ui_menu.c
++++ b/src/ui/ui_menu.c
+@@ -1264,6 +1264,25 @@ void Menu_HandleKey(menuDef_t *menu, int key, qboolean down)
+ 		}
+ 	}
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	/* A setting with several choices opens them as a list under Enter;
++	   while it is open, the list has the keys. */
++	if (menu && !g_editingField && !g_waitingForKey)
++	{
++		itemDef_t *focus = Menu_GetFocusedItem(menu);
++		int       taken  = ETA_MenuItem_DropdownKey(focus, key, down);
++
++		if (taken)
++		{
++			if (taken == 2)
++			{
++				Item_Action(focus);
++			}
++			return;
++		}
++	}
++#endif
++
+ 	// enter key handling for the window supercedes item enter handling
+ 	if (down && ((key == K_ENTER || key == K_KP_ENTER) && menu->onEnter))
+ 	{
+diff --git a/src/ui/ui_menuitem.c b/src/ui/ui_menuitem.c
+index 9cc3041..96bb076 100644
+--- a/src/ui/ui_menuitem.c
++++ b/src/ui/ui_menuitem.c
+@@ -138,6 +138,7 @@ static qboolean ETA_CharacterAt(const char *text, int index, char *out, size_t s
+ /* Defined further down this file and declared in no header, so the
+    accessibility block above its definition needs this. */
+ const char *Item_Multi_Setting(itemDef_t *item);
++qboolean ETA_MenuItem_IsDropdown(itemDef_t *item);
+ 
+ /**
+  * @brief Fields whose contents speech must not read out.
+@@ -565,7 +566,7 @@ const char *ETA_MenuItem_FocusText(itemDef_t *item)
+ 			return label;
+ 		}
+ 
+-		Com_sprintf(text, sizeof(text), "%s, %s", label, setting);
++		Com_sprintf(text, sizeof(text), "%s, %s%s", label, setting, ETA_MenuItem_IsDropdown(item) ? ", list" : "");
+ 		return text;
+ 	}
+ 
+@@ -2453,6 +2454,248 @@ qboolean Item_Multi_HandleKey(itemDef_t *item, int key)
+ 	return qfalse;
+ }
+ 
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * A choice opened as a list. Enter on a setting with several choices
++ * stepped it on to the next one, and the tester asked for a list instead:
++ * Enter opens it, Up and Down go through the choices, Enter picks one and
++ * Escape leaves it as it was. Stepping also lost a setting that was none
++ * of the choices: Auto-Configure Server reads "Custom" until one is
++ * picked, and after that Custom was never offered again. It stays in the
++ * list, as the first choice, keeping what the setting held.
++ *
++ * The mouse is left as it was: a click steps the setting on.
++ */
++#define ETA_DROP_KEPT 16
++
++static itemDef_t *eta_dropItem;
++static int       eta_dropAt;
++static int       eta_dropOpenedAt;
++
++/* What a setting held that none of its choices is, by item, kept for the
++   session so "Custom" can be picked again. */
++static struct
++{
++	itemDef_t *item;
++	char      value[256];
++} eta_dropKept[ETA_DROP_KEPT];
++
++static int ETA_DropListed(itemDef_t *item)
++{
++	multiDef_t *multiPtr = (multiDef_t *)item->typeData;
++	char       buff[256];
++	float      value = 0.f;
++	int        i;
++
++	if (multiPtr->strDef)
++	{
++		DC->getCVarString(item->cvar, buff, sizeof(buff));
++	}
++	else
++	{
++		value = DC->getCVarValue(item->cvar);
++	}
++	for (i = 0; i < multiPtr->count; i++)
++	{
++		if (multiPtr->strDef ? !Q_stricmp(buff, multiPtr->cvarStr[i]) : multiPtr->cvarValue[i] == value)
++		{
++			return i;
++		}
++	}
++	return -1;
++}
++
++/* The kept value for the item, NULL with none; with remember, the
++   setting's present value is kept when it is none of the choices. */
++static const char *ETA_DropKept(itemDef_t *item, qboolean remember)
++{
++	int i, free = -1;
++
++	for (i = 0; i < ETA_DROP_KEPT; i++)
++	{
++		if (eta_dropKept[i].item == item)
++		{
++			break;
++		}
++		if (!eta_dropKept[i].item && free < 0)
++		{
++			free = i;
++		}
++	}
++	if (i == ETA_DROP_KEPT && remember && free >= 0 && ETA_DropListed(item) < 0)
++	{
++		i                    = free;
++		eta_dropKept[i].item = item;
++		DC->getCVarString(item->cvar, eta_dropKept[i].value, sizeof(eta_dropKept[i].value));
++	}
++	return i < ETA_DROP_KEPT ? eta_dropKept[i].value : NULL;
++}
++
++/* Choices in the list: Custom first when kept, then the setting's own. */
++static int ETA_DropCount(itemDef_t *item)
++{
++	return ((multiDef_t *)item->typeData)->count + (ETA_DropKept(item, qfalse) ? 1 : 0);
++}
++
++static const char *ETA_DropName(itemDef_t *item, int at)
++{
++	multiDef_t *multiPtr = (multiDef_t *)item->typeData;
++
++	if (ETA_DropKept(item, qfalse))
++	{
++		if (at == 0)
++		{
++			return DC->translateString(_("Custom"));
++		}
++		at--;
++	}
++	return (at >= 0 && at < multiPtr->count) ? multiPtr->cvarList[at] : "";
++}
++
++/* The setting's name without the colon the screen shows after it. */
++static const char *ETA_DropLabel(itemDef_t *item)
++{
++	static char label[ETA_MAX_MENU_TEXT_LENGTH];
++	size_t      length;
++
++	Q_strncpyz(label, ETA_MenuItem_SpokenLabel(item) ? ETA_MenuItem_SpokenLabel(item) : "Setting", sizeof(label));
++	length = strlen(label);
++	while (length > 0 && ( label[length - 1] == ':' || label[length - 1] == ' ' ))
++	{
++		label[--length] = '\0';
++	}
++	return label;
++}
++
++static void ETA_DropSay(itemDef_t *item, const char *before)
++{
++	menuDef_t *parent = (menuDef_t *)item->parent;
++	char      text[ETA_MAX_MENU_TEXT_LENGTH];
++
++	Com_sprintf(text, sizeof(text), "%s%s, %i of %i", before ? before : "", ETA_DropName(item, eta_dropAt),
++	            eta_dropAt + 1, ETA_DropCount(item));
++	ETA_MenuNarrator_OnFocusChanged(parent ? parent->window.name : NULL, text);
++}
++
++/* Where the setting is now, in the list's count. */
++static int ETA_DropCurrent(itemDef_t *item)
++{
++	int listed = ETA_DropListed(item);
++
++	if (ETA_DropKept(item, qfalse))
++	{
++		return listed + 1;   /* -1, none of the choices, is Custom: 0 */
++	}
++	return listed < 0 ? 0 : listed;
++}
++
++/**
++ * @brief A key while a setting is focused, for its list: 0 not taken, 1
++ * taken, 2 taken and a choice made, for the item's action to run.
++ */
++int ETA_MenuItem_DropdownKey(itemDef_t *item, int key, qboolean down)
++{
++	multiDef_t *multiPtr;
++	int        count, step = 0;
++
++	if (eta_dropItem && eta_dropItem != item)
++	{
++		eta_dropItem = NULL;   /* focus went elsewhere: the list is shut */
++	}
++	if (!item || item->type != ITEM_TYPE_MULTI || !item->cvar || !item->typeData
++	    || !(item->window.flags & WINDOW_HASFOCUS) || !((multiDef_t *)item->typeData)->count)
++	{
++		return 0;
++	}
++	multiPtr = (multiDef_t *)item->typeData;
++
++	if (!eta_dropItem)
++	{
++		if (!down || (key != K_ENTER && key != K_KP_ENTER))
++		{
++			return 0;
++		}
++		ETA_DropKept(item, qtrue);
++		eta_dropItem     = item;
++		eta_dropAt       = ETA_DropCurrent(item);
++		eta_dropOpenedAt = eta_dropAt;
++		{
++			char before[ETA_MAX_MENU_TEXT_LENGTH];
++
++			Com_sprintf(before, sizeof(before), "%s list, %i choices. Up and Down go through them, Enter picks, Escape leaves it. ",
++			            ETA_DropLabel(item), ETA_DropCount(item));
++			ETA_DropSay(item, before);
++		}
++		return 1;
++	}
++
++	if (!down)
++	{
++		return 1;
++	}
++	count = ETA_DropCount(item);
++	switch (key)
++	{
++	case K_UPARROW: case K_KP_UPARROW: case K_PAD0_DPAD_UP: case K_LEFTARROW: case K_KP_LEFTARROW: step = -1; break;
++	case K_DOWNARROW: case K_KP_DOWNARROW: case K_PAD0_DPAD_DOWN: case K_RIGHTARROW: case K_KP_RIGHTARROW: step = 1; break;
++	case K_HOME: case K_KP_HOME: case K_PGUP: case K_KP_PGUP: step = -count; break;
++	case K_END: case K_KP_END: case K_PGDN: case K_KP_PGDN: step = count; break;
++	case K_ESCAPE: case K_PAD0_BACK: case K_BACKSPACE: case K_TAB:
++		eta_dropItem = NULL;
++	{
++		char text[ETA_MAX_MENU_TEXT_LENGTH];
++
++		Com_sprintf(text, sizeof(text), "List closed. %s, %s", ETA_DropLabel(item), Item_Multi_Setting(item));
++		ETA_MenuNarrator_OnFocusChanged(((menuDef_t *)item->parent) ? ((menuDef_t *)item->parent)->window.name : NULL, text);
++	}
++		return 1;
++	case K_ENTER: case K_KP_ENTER:
++	{
++		const char *kept = ETA_DropKept(item, qfalse);
++		int        at    = eta_dropAt - (kept ? 1 : 0);
++
++		eta_dropItem = NULL;
++		if (eta_dropAt == eta_dropOpenedAt)
++		{
++			ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), va("%s, kept", Item_Multi_Setting(item)));
++			return 1;
++		}
++		if (at < 0)
++		{
++			DC->setCVar(item->cvar, kept);
++		}
++		else if (multiPtr->strDef)
++		{
++			DC->setCVar(item->cvar, multiPtr->cvarStr[at]);
++		}
++		else if ((float)(int)multiPtr->cvarValue[at] == multiPtr->cvarValue[at])
++		{
++			DC->setCVar(item->cvar, va("%i", (int)multiPtr->cvarValue[at]));
++		}
++		else
++		{
++			DC->setCVar(item->cvar, va("%f", multiPtr->cvarValue[at]));
++		}
++		ETA_MenuNarrator_OnValueChanged(ETA_MenuItem_SpokenLabel(item), va("%s, picked", ETA_DropName(item, eta_dropAt)));
++		return 2;
++	}
++	default:
++		return 1;   /* nothing else while the list is open */
++	}
++	eta_dropAt += step;
++	eta_dropAt  = eta_dropAt < 0 ? 0 : (eta_dropAt >= count ? count - 1 : eta_dropAt);
++	ETA_DropSay(item, NULL);
++	return 1;
++}
++
++/* Said with a setting's name when it is focused: Enter opens its list. */
++qboolean ETA_MenuItem_IsDropdown(itemDef_t *item)
++{
++	return (qboolean)(item && item->type == ITEM_TYPE_MULTI && item->cvar && item->typeData
++	                  && ((multiDef_t *)item->typeData)->count > 1);
++}
++#endif
++
+ /**
+  * @brief Item_ComboSelect
+  * @param[in] item
+@@ -3722,6 +3965,22 @@ qboolean Item_HandleKey(itemDef_t *item, int key, qboolean down)
+ 		int      before  = item->cursorPos;
+ 		qboolean handled;
+ 
++		/* At the first row Up, and at the last Down, leave the list for
++		   the control before or after it. The host page's campaign list
++		   kept the arrows at its ends, and the tester could not get past
++		   it to the buttons below, nor back up to the settings. */
++		if (down && item->typeData && !( item->window.flags & WINDOW_HORIZONTAL ) && ( item->window.flags & WINDOW_HASFOCUS ))
++		{
++			int count = DC->feederCount(item->special);
++			int up    = ( key == K_UPARROW || key == K_KP_UPARROW || key == K_PAD0_DPAD_UP );
++			int dn    = ( key == K_DOWNARROW || key == K_KP_DOWNARROW || key == K_PAD0_DPAD_DOWN );
++
++			if (( up && ( count <= 0 || before <= 0 ) ) || ( dn && ( count <= 0 || before >= count - 1 ) ))
++			{
++				return qfalse;
++			}
++		}
++
+ 		/* A list nothing is chosen from - the server info page's, in the
+ 		   match's Escape menu - only scrolls under the arrows, and its
+ 		   row was never said again after the first: the tester could
+diff --git a/src/ui/ui_shared.h b/src/ui/ui_shared.h
+index bb4f433..95f224b 100644
+--- a/src/ui/ui_shared.h
++++ b/src/ui/ui_shared.h
+@@ -676,6 +676,7 @@ const char *ETA_MenuItem_SettingText(itemDef_t *item);
+ const char *ETA_MenuItem_FocusText(itemDef_t *item);
+ const char *ETA_MenuItem_Label(itemDef_t *item);
+ void ETA_MenuItem_NarrateListRow(itemDef_t *item);
++int ETA_MenuItem_DropdownKey(itemDef_t *item, int key, qboolean down);
+ extern const char *(*ETA_FeederRowText)(int feederID, int index);
+ void ETA_MenuItem_NarrateTextFieldKey(itemDef_t *item, const char *before, int beforeCursor);
+ void ETA_MenuItem_NarrateTextFieldValue(itemDef_t *item);

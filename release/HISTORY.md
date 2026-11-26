@@ -9,6 +9,19 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.8 - 26 November 2026
+
+**The host page and the in-match server info read out properly, and the campaign list said how to pick one map.**
+
+- **Host page**: the checkboxes around Password said their names and
+  whether they were on, and the list of maps or campaigns said which
+  list it was and read each row as Up and Down moved through it.
+- **Choosing one map**: with Game Type on campaigns, the list said
+  *"Campaign list"* and *"For one map, set Game Type to Single-Map
+  Objective"*.
+- **Server info during a match** read the players row by row: name,
+  score and ping.
+
 ## 1.4.4.7 - 23 November 2026
 
 **N turned you even while you ran, turning no longer slowed you down, and the old objective report was quiet while a marker was out.**
