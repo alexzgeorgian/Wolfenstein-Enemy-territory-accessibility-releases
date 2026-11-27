@@ -1,0 +1,114 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 7d78bf8..8a9702c 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -36,6 +36,7 @@
+ 
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "core/accessibility_runtime.h"
++#include "speech/speech_manager.h"
+ #include "menu/menu_narrator.h"
+ #include "platform/windows/windows_update.h"
+ #include "update/update_check.h"
+@@ -47,6 +48,7 @@ static void UI_AccessibilityConsoleFrame(void);
+ static void UI_AccessibilityBotsFrame(void);
+ static void UI_AccessibilityUpdateSay(const char *text);
+ static const char *UI_AccessibilityFeederRow(int feederID, int index);
++static void UI_AccessibilityIntroFrame(void);
+ #endif
+ #include "../qcommon/q_oss.h"
+ #include "ui_cvars.h"
+@@ -184,6 +186,11 @@ Q_EXPORT intptr_t vmMain(intptr_t command, intptr_t arg0, intptr_t arg1, intptr_
+ 		UI_Refresh(arg0);
+ 		return 0;
+ 	case UI_IS_FULLSCREEN:
++#ifdef FEATURE_ACCESSIBILITY
++		/* Asked every frame, the intro movie's too: the one call the
++		   menu gets while it plays. */
++		UI_AccessibilityIntroFrame();
++#endif
+ 		return _UI_IsFullscreen();
+ 	case UI_SET_ACTIVE_MENU:
+ 		UI_SetActiveMenu((uiMenuCommand_t)arg0);
+@@ -5192,6 +5199,67 @@ static void UI_AccessibilityUpdateSay(const char *text)
+ 	ETA_MenuNarrator_OnConfirmDialogShown(text);
+ }
+ 
++/*
++ * The intro movie, described. The tester asked for it: a minute of
++ * music over pictures, the game's opening, with nothing to hear of what
++ * is shown. Said in the movie's own time, each line as its scene comes
++ * up - the words are the mod's; the movie is the player's own, from the
++ * game. Played at the game's first start, and again from Options,
++ * Accessibility, "Watch the intro, described".
++ */
++static const struct
++{
++	int        at;   /* milliseconds into the movie */
++	const char *text;
++} etaIntroLines[] =
++{
++	/* Short enough to be said before the next scene: a line cut off by
++	   the next would lose its end. */
++	{ 300,   "The intro. Night, and fog over a dark hillside with a lone pine tree" },
++	{ 2000,  "An id Software game" },
++	{ 3900,  "Produced by Activision" },
++	{ 5000,  "Developed by Splash Damage" },
++	{ 7800,  "The Wolfenstein: Enemy Territory emblem, an eagle with spread wings" },
++	{ 11800, "A war map of Europe, the Central Europe campaign, with three targets: Würzburg radar, fuel dump, rail gun" },
++	{ 17000, "The Würzburg radar, a dish on a wooden tower, at night in the rain. Allied soldiers attack" },
++	{ 21500, "A grenade blasts the tower. A soldier plants explosives by the dish, runs, and the radar blows apart" },
++	{ 26300, "On the map, the fuel dump. Snowy mountains: an Allied tank rolls on, firing at Germans" },
++	{ 32000, "The tank blasts through a fortified gate. German gunners fire back from the walls" },
++	{ 40000, "On the map, the rail gun. A snowy rail yard: a train rolls in, carrying a huge gun barrel" },
++	{ 45000, "From above: soldiers fight among crates in the falling snow" },
++	{ 49300, "An Allied soldier takes aim at an armoured train, and the giant railway gun raises its barrel" },
++	{ 54000, "The map, all three targets marked" },
++	{ 56000, "Fire fills the screen, and the Wolfenstein: Enemy Territory emblem burns into view" },
++	{ 61800, "The intro ends" }
++};
++
++static void UI_AccessibilityIntroFrame(void)
++{
++	static int      startedAt;
++	static int      next;
++	static qboolean playing;
++	uiClientState_t cstate;
++	int             now = trap_Milliseconds();
++
++	trap_GetClientState(&cstate);
++	if (cstate.connState != CA_CINEMATIC)
++	{
++		playing = qfalse;
++		return;
++	}
++	if (!playing)
++	{
++		playing   = qtrue;
++		startedAt = now;
++		next      = 0;
++	}
++	if (next < (int)ARRAY_LEN(etaIntroLines) && now - startedAt >= etaIntroLines[next].at)
++	{
++		ETA_Speech_Say(etaIntroLines[next].text);
++		next++;
++	}
++}
++
+ /*
+  * Where the player is, said as the main menu or the in-game menu opens.
+  * The tester asked for it: at start-up the update check's answer first,
+@@ -10104,6 +10172,13 @@ void UI_Init(int etLegacyClient, int clientVersion)
+ 	UI_AccessibilityRegisterHostCvars();
+ 	UI_AccessibilityRegisterUpdateCvars();
+ 	ETA_FeederRowText = UI_AccessibilityFeederRow;
++
++	/* The intro at every start, as the game played it when the tester
++	   could see it - and skipped it with Escape. The game plays it only
++	   while com_introplayed is 0, then sets it, so with the mod it was
++	   never heard. This module is loaded just before the game looks;
++	   the intro comes described (UI_AccessibilityIntroFrame). */
++	trap_Cvar_Set("com_introplayed", "0");
+ #endif
+ }
+ 

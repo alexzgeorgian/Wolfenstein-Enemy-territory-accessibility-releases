@@ -2117,3 +2117,56 @@ it is said "1 of 1", so both slots are always found. "1 choices" is said
 Checked in the game on Oasis: Allies, the class list, Medic, Space, the
 secondary weapon's list, and back up through the stops.
 
+
+## 0136: why a team is closed, the match asked anyway; the results said
+
+On a Mac hosting with bots, the tester was kept out of Axis with only
+"Axis, full", though they had fewer bots and the team limit raised, and
+Allies let them in. "full" was the menu's one word for three of its own
+checks - the team at the match's player limit, every class at its
+limit, a shoutcaster - and picking a team it calls closed did nothing,
+so Confirm sent nothing and the match was never asked. Now the team list
+says each team with how many are on it, and why the menu calls it closed
+with the numbers: "Axis, 3 players, closed by the menu: Axis has 3
+players, and this match allows 3 a team". Picking it takes it all the
+same; Confirm sends the join, and the match's answer is said (0134).
+
+In a game the player hosts, "The Axis team is full!" from the match
+means it runs with a team limit (team_maxplayers) though Host Game showed
+0 to the tester: it is their own server, so the mod lifts the limit,
+says so with the number, and sends the join again.
+
+The results screen at the end of a match is said once the scores are
+in: who won, where the player came of how many and with how many XP,
+the best three by XP as the screen orders them, and the seconds to the
+next map.
+
+Checked in the game on Oasis: with every class limit at 0, Axis was
+said closed for that reason, taken, and the match's "Soldier is not
+available!" was said on Confirm; a match ended by its time limit said
+"Match over: Axis win. You came 1 of 1, with 0 XP. Best: 1,
+ETLegacyPlayer, 0 XP. Next map in about 59 seconds". With a team limit of 3, Axis
+picked, and "The Axis team is full!" sent from the server console, the
+limit was lifted to 0, said, and the player joined Axis.
+
+## 0137: the intro movie, described
+
+The tester asked for the game's intro to be described: a minute of
+music over pictures, the opening of the game, with nothing to hear of
+what it shows. The menu module is asked every frame whether it covers
+the screen, the intro's frames too; there, while a movie plays, it says
+a line as each scene comes up, in the movie's own time - the logos, the
+war map of Europe and its three targets, the attack on the Würzburg
+radar, the tank at the fuel dump, the rail gun, and the burning emblem.
+The words are the mod's; the movie is the player's own, from the game.
+The game plays the intro only while com_introplayed is 0, then sets
+it, so the tester, who skipped it at every start when they could see,
+never heard it with the mod. The menu module is loaded just before the
+game looks, and sets it back to 0: the intro plays at every start,
+described, and Escape skips it as before. It can be watched again from
+Options, Accessibility, "Watch the intro, described", a button the
+mod's menu file adds.
+
+Checked in the game: "cinematic etintro.roq" said all sixteen lines in
+turn, then "The intro ends", then the main menu. Started with com_introplayed 1,
+the game played the intro, described.

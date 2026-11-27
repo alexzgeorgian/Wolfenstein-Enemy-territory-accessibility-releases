@@ -9,6 +9,15 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.10 - 26 November 2026
+
+**Messages the server shows in the middle of the screen were said - among them why a team would not take you - and Space on a class went to its weapons.**
+
+- A line the server put in the middle of the screen was said: a refused
+  team, among others.
+- Space on a class in the limbo menu took the class and went to its
+  weapons; a slot with one weapon was said "1 of 1".
+
 ## 1.4.4.9 - 26 November 2026
 
 **Settings, team, class and weapons were chosen from lists that Enter opened, lists let the arrow keys out, and the Mac's update download was no longer refused.**

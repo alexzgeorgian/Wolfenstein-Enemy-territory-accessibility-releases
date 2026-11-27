@@ -1,0 +1,350 @@
+diff --git a/src/cgame/cg_debriefing.c b/src/cgame/cg_debriefing.c
+index 373a9f2..0dc8449 100644
+--- a/src/cgame/cg_debriefing.c
++++ b/src/cgame/cg_debriefing.c
+@@ -33,6 +33,9 @@
+  */
+ 
+ #include "cg_local.h"
++#ifdef FEATURE_ACCESSIBILITY
++#include "speech/speech_manager.h"
++#endif
+ 
+ team_t CG_Debriefing_FindWinningTeam(void);
+ team_t CG_Debriefing_FindOveralWinningTeam(void);
+@@ -1824,10 +1827,96 @@ void CG_Debriefing_InfoRequests(void)
+  * @brief CG_Debriefing_Draw
+  * @return
+  */
++#ifdef FEATURE_ACCESSIBILITY
++/*
++ * The end of the match, said: the results screen was only drawn. The
++ * tester, hearing server messages read, asked for the results too. Who
++ * won, where the player came, and the best three, by experience points
++ * as the screen orders them; once each match end, when the scores have
++ * come in.
++ */
++static void ETA_Debriefing_Say(void)
++{
++	static int saidFor = -1;
++	const char *s, *buf, *winner;
++	int        order[MAX_CLIENTS], count = 0, i, j, me = -1;
++	char       top[512];
++
++	if (saidFor == cgs.intermissionStartTime || cg.time - cgs.intermissionStartTime < 1500 || cg.numScores <= 0)
++	{
++		return;
++	}
++	saidFor = cgs.intermissionStartTime;
++
++	if (cg_gameType.integer == GT_WOLF_STOPWATCH)
++	{
++		winner = cgs.currentRound ? "First round over" : "Match over";
++	}
++	else
++	{
++		s      = CG_ConfigString(CS_MULTI_MAPWINNER);
++		buf    = Info_ValueForKey(s, "w");
++		winner = atoi(buf) == -1 ? "Match over: a tie" : atoi(buf) ? "Match over: Allies win" : "Match over: Axis win";
++	}
++
++	for (i = 0; i < cgs.maxclients && i < MAX_CLIENTS; i++)
++	{
++		if (cgs.clientinfo[i].infoValid && cgs.clientinfo[i].team != TEAM_SPECTATOR)
++		{
++			order[count++] = i;
++		}
++	}
++	for (i = 1; i < count; i++)
++	{
++		int c = order[i];
++
++		for (j = i; j > 0 && cgs.clientinfo[order[j - 1]].score < cgs.clientinfo[c].score; j--)
++		{
++			order[j] = order[j - 1];
++		}
++		order[j] = c;
++	}
++
++	top[0] = 0;
++	for (i = 0; i < count; i++)
++	{
++		char name[MAX_QPATH];
++
++		if (order[i] == cg.clientNum)
++		{
++			me = i;
++		}
++		if (i < 3)
++		{
++			Q_strncpyz(name, cgs.clientinfo[order[i]].name, sizeof(name));
++			Q_CleanStr(name);
++			Q_strcat(top, sizeof(top), va("%s%i, %s, %i XP", i ? "; " : "", i + 1, name, cgs.clientinfo[order[i]].score));
++		}
++	}
++
++	{
++		char mine[96] = "";
++		char said[768];
++
++		if (me >= 0)
++		{
++			Com_sprintf(mine, sizeof(mine), "You came %i of %i, with %i XP. ", me + 1, count, cgs.clientinfo[cg.clientNum].score);
++		}
++		Com_sprintf(said, sizeof(said), "%s. %sBest: %s. Next map in about %i seconds", winner, mine, top[0] ? top : "nobody",
++		            MAX(60 - (cg.time - cgs.intermissionStartTime) / 1000, 0));
++		ETA_Speech_Say(said);
++	}
++}
++#endif
++
+ qboolean CG_Debriefing_Draw(void)
+ {
+ 	int i;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++	ETA_Debriefing_Say();
++#endif
++
+ 	if (!cgs.dbShowing)
+ 	{
+ 		CG_Debriefing_Startup();
+diff --git a/src/cgame/cg_draw.c b/src/cgame/cg_draw.c
+index 57cbbc2..413dc1b 100644
+--- a/src/cgame/cg_draw.c
++++ b/src/cgame/cg_draw.c
+@@ -11000,6 +11000,10 @@ void CG_DrawActive()
+ 	/* The scoreboard the player asked for, once the whole of it is in. */
+ 	CG_AccessibilityScoresFrame();
+ 
++	/* A join the match it hosts turned down for its team limit, sent
++	   again once the limit is lifted. */
++	CG_AccessibilityTeamFullFrame();
++
+ 	/* Where the dynamite just thrown came to rest: the answer to the
+ 	   throw, and the one way to know where to arm it. */
+ 	ETA_NarrateDynamiteDown();
+diff --git a/src/cgame/cg_limbopanel.c b/src/cgame/cg_limbopanel.c
+index 3666378..ea545d4 100644
+--- a/src/cgame/cg_limbopanel.c
++++ b/src/cgame/cg_limbopanel.c
+@@ -38,6 +38,65 @@ extern const char *cg_skillRewards[SK_NUM_SKILLS][NUM_SKILL_LEVELS - 1];
+ extern const char *cg_skillRewardsDetails[SK_NUM_SKILLS][NUM_SKILL_LEVELS - 1];
+ #ifdef FEATURE_ACCESSIBILITY
+ #include "speech/speech_manager.h"
++/* Set while the keyboard's team list takes a team the menu calls
++   closed (ETA_LimboPanel_TakePick). */
++static qboolean eta_limboTakeClosedTeam;
++qboolean CG_LimboPanel_TeamIsFull(team_t checkTeam);
++void CG_LimboPanel_SendSetupMsg(qboolean forceteam);
++
++static int ETA_CvarInt(const char *name)
++{
++	char buf[32];
++
++	trap_Cvar_VariableStringBuffer(name, buf, sizeof(buf));
++	return Q_atoi(buf);
++}
++
++/*
++ * The match the player hosts answered a join with "The Axis team is
++ * full!". On a Mac hosting with bots, the tester heard that for Axis
++ * with Max Players Per Team at 0 in Host Game, fewer bots and balance
++ * off, while Allies let them in: the match they host ran with a team
++ * limit after all. In a game they host it is their own setting, so the
++ * mod lifts it and joins them again; on someone else's server the
++ * match's answer stands, said as it is.
++ */
++static int eta_teamFullRetryAt;
++
++void CG_AccessibilityTeamFull(void)
++{
++	int limit;
++
++	if (!ETA_CvarInt("sv_running") || CG_LimboPanel_GetTeam() == TEAM_SPECTATOR)
++	{
++		return;
++	}
++	limit = ETA_CvarInt("team_maxplayers");
++	if (limit <= 0)
++	{
++		return;
++	}
++	trap_SendConsoleCommand("team_maxplayers 0\n");
++	eta_teamFullRetryAt = cg.time + 600;
++	ETA_Speech_Say(va("The match you host limits each team to %i %s. As its host, the limit is lifted, and you join again",
++	                  limit, limit == 1 ? "player" : "players"));
++}
++
++/* Every frame: the join sent again, once the match has the limit lifted. */
++void CG_AccessibilityTeamFullFrame(void)
++{
++	if (!eta_teamFullRetryAt || cg.time < eta_teamFullRetryAt - 5000)
++	{
++		eta_teamFullRetryAt = 0;
++		return;
++	}
++	if (cg.time < eta_teamFullRetryAt)
++	{
++		return;
++	}
++	eta_teamFullRetryAt = 0;
++	CG_LimboPanel_SendSetupMsg(qtrue);
++}
+ #endif
+ 
+ #define SOUNDEVENT(sound) trap_S_StartLocalSound(sound, CHAN_LOCAL_SOUND)
+@@ -1460,7 +1519,12 @@ qboolean CG_LimboPanel_TeamButton_KeyDown(panel_button_t *button, int key)
+ 	{
+ 		SOUND_SELECT;
+ 
++#ifdef FEATURE_ACCESSIBILITY
++		if (cgs.ccSelectedTeam != button->data[0]
++		    && ( !CG_LimboPanel_TeamIsDisabled(teamOrder[button->data[0]]) || eta_limboTakeClosedTeam ))
++#else
+ 		if (cgs.ccSelectedTeam != button->data[0] && !CG_LimboPanel_TeamIsDisabled(teamOrder[button->data[0]]))
++#endif
+ 		{
+ 			int oldmax  = CG_LimboPanel_GetMaxObjectives();
+ 			int oldteam = cgs.ccSelectedTeam;
+@@ -1474,6 +1538,12 @@ qboolean CG_LimboPanel_TeamButton_KeyDown(panel_button_t *button, int key)
+ 
+ 			if (teamOrder[button->data[0]] != TEAM_SPECTATOR && CG_LimboPanel_ClassIsDisabled(teamOrder[button->data[0]], CG_LimboPanel_GetClass()))
+ 			{
++#ifdef FEATURE_ACCESSIBILITY
++				/* A team taken though the menu calls it closed may have no
++				   class free by the menu's count: the class kept, and the
++				   match decides. */
++				if (CG_LimboPanel_FindFreeClass(teamOrder[button->data[0]]) >= 0)
++#endif
+ 				cgs.ccSelectedClass = CG_LimboPanel_FindFreeClass(teamOrder[button->data[0]]);
+ 			}
+ 
+@@ -3710,6 +3780,51 @@ static int ETA_LimboPanel_CurrentChoice(const eta_limboStop_t *stop)
+  * server rules it out - both of which a sighted player reads from the
+  * button's colour, and neither of which is in its text.
+  */
++/* Players on a team as the menu counts them: everyone else on it, bots
++   too. */
++static int ETA_LimboPanel_TeamPlayers(team_t team)
++{
++	int i, count = 0;
++
++	for (i = 0; i < MAX_CLIENTS; i++)
++	{
++		if (i != cg.clientNum && cgs.clientinfo[i].infoValid && cgs.clientinfo[i].team == team)
++		{
++			count++;
++		}
++	}
++	return count;
++}
++
++/*
++ * Why the menu calls a team closed, with its numbers; NULL when it does
++ * not. On a Mac hosting with bots the tester heard "Axis, full", though
++ * they had fewer bots than before and the team limit raised, and Allies
++ * let them in: "full" was the menu's one word for three different checks.
++ */
++static const char *ETA_LimboPanel_TeamRefusal(team_t team)
++{
++	const char *name = team == TEAM_AXIS ? "Axis" : "Allies";
++
++	if (team != TEAM_AXIS && team != TEAM_ALLIES)
++	{
++		return NULL;
++	}
++	if (cgs.clientinfo[cg.clientNum].shoutcaster)
++	{
++		return "a shoutcaster joins no team";
++	}
++	if (CG_LimboPanel_TeamIsFull(team))
++	{
++		return va("%s has %i players, and this match allows %i a team", name, ETA_LimboPanel_TeamPlayers(team), cg.maxPlayers);
++	}
++	if (CG_LimboPanel_FindFreeClass(team) == -1)
++	{
++		return va("every %s class is at the match's limit for it", name);
++	}
++	return NULL;
++}
++
+ static const char *ETA_LimboPanel_ChoiceText(const eta_limboStop_t *stop, int at)
+ {
+ 	static char text[128];
+@@ -3742,6 +3857,19 @@ static const char *ETA_LimboPanel_ChoiceText(const eta_limboStop_t *stop, int at
+ 		}
+ 	}
+ 
++	if (stop->kind == ETA_LIMBO_TEAM && at >= 0 && at < (int)ARRAY_LEN(eta_limboTeams)
++	    && teamOrder[eta_limboTeams[at]->data[0]] != TEAM_SPECTATOR)
++	{
++		/* Each team with how many are on it, and what closes it, said. */
++		team_t team  = teamOrder[eta_limboTeams[at]->data[0]];
++		int    count = ETA_LimboPanel_TeamPlayers(team);
++		const char *why = ruleOut ? ETA_LimboPanel_TeamRefusal(team) : NULL;
++
++		Com_sprintf(text, sizeof(text), "%s, %i %s%s%s%s", name ? name : "Unknown", count, count == 1 ? "player" : "players",
++		            ruleOut ? ", closed by the menu: " : "", why ? why : ( ruleOut ? "full" : "" ),
++		            taken ? ", selected" : "");
++		return text;
++	}
+ 	Com_sprintf(text, sizeof(text), "%s%s%s", name ? name : "Unknown",
+ 	            ruleOut ? (stop->kind == ETA_LIMBO_TEAM ? ", full" : ", unavailable") : "",
+ 	            taken ? ", selected" : "");
+@@ -3905,10 +4033,27 @@ static void ETA_LimboPanel_TakePick(void)
+ 	}
+ 	if (button && button->onKeyDown)
+ 	{
++		/* A team the menu calls closed is taken all the same, and
++		   Confirm asks the match, whose answer is said: the menu's own
++		   count kept the tester out of Axis on a Mac, saying only
++		   "full", while the match itself was never asked. */
++		qboolean closedTeam = (qboolean)( stop->kind == ETA_LIMBO_TEAM
++		                                  && teamOrder[button->data[0]] != TEAM_SPECTATOR
++		                                  && CG_LimboPanel_TeamIsDisabled(teamOrder[button->data[0]]) );
++
+ 		/* The cursor is already on the control, so its own handler sees
+ 		   exactly what it would see under a real click. */
+ 		ETA_LimboPanel_CursorTo(button);
++		eta_limboTakeClosedTeam = closedTeam;
+ 		button->onKeyDown(button, K_MOUSE1);
++		eta_limboTakeClosedTeam = qfalse;
++		if (closedTeam && CG_LimboPanel_GetTeam() == teamOrder[button->data[0]])
++		{
++			const char *why = ETA_LimboPanel_TeamRefusal(teamOrder[button->data[0]]);
++
++			ETA_Speech_Say(va("Taken, though the menu calls it closed%s%s. Confirm asks the match, and its answer is said",
++			                  why ? ": " : "", why ? why : ""));
++		}
+ 	}
+ }
+ 
+diff --git a/src/cgame/cg_local.h b/src/cgame/cg_local.h
+index e230bf9..82a0484 100644
+--- a/src/cgame/cg_local.h
++++ b/src/cgame/cg_local.h
+@@ -3534,6 +3534,8 @@ qboolean CG_AccessibilityLadderNear(etaLadder_t *out);
+ qboolean CG_AccessibilityClimbing(void);
+ void     CG_AccessibilityLimboOpened(void);
+ void     CG_AccessibilitySayServerCenter(const char *text);
++void     CG_AccessibilityTeamFull(void);
++void     CG_AccessibilityTeamFullFrame(void);
+ struct ETA_Place;
+ void     CG_AccessibilityPlace(const vec3_t origin, struct ETA_Place *out);
+ void     CG_AccessibilitySpeakPlayState(void);
+diff --git a/src/cgame/cg_servercmds.c b/src/cgame/cg_servercmds.c
+index 358db05..661974d 100644
+--- a/src/cgame/cg_servercmds.c
++++ b/src/cgame/cg_servercmds.c
+@@ -4133,6 +4133,10 @@ void CG_AccessibilitySayServerCenter(const char *text)
+ 		Q_strncpyz(last, said, sizeof(last));
+ 		lastAt = cg.time;
+ 		ETA_Speech_Say(said);
++		if (Q_stristr(said, "team is full"))
++		{
++			CG_AccessibilityTeamFull();
++		}
+ 	}
+ }
+ #endif

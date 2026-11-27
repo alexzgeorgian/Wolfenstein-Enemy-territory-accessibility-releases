@@ -15,7 +15,8 @@
 //
 // and, below them, updates: whether the game asks the release page for
 // a newer version of the mod each time it starts, and a button to ask it
-// now, which also says when there is nothing new.
+// now, which also says when there is nothing new; then the game's intro
+// movie, played again with what it shows described.
 //
 // The tester's arrangement. It was one long page for a release, and
 // before that the keys lived under CONTROLS; this puts each kind of
@@ -28,7 +29,7 @@
 #define WINDOW_X      16
 #define WINDOW_Y      16
 #define WINDOW_WIDTH  160
-#define WINDOW_HEIGHT 224
+#define WINDOW_HEIGHT 248
 #define GROUP_NAME    "grpOptionsAccessibility"
 
 menuDef {
@@ -44,7 +45,7 @@ menuDef {
 	}
 
 // Window //
-	WINDOW(_("ACCESSIBILITY"), 226)
+	WINDOW(_("ACCESSIBILITY"), 250)
 
 // Buttons //
 	BUTTON(6, 32, WINDOW_WIDTH - 12, 18, _("ENVIRONMENT"), .3, 14, close options_accessibility ; open options_accessibility_environment)
@@ -54,5 +55,6 @@ menuDef {
 	BUTTON(6, 128, WINDOW_WIDTH - 12, 18, _("HOSTING"), .3, 14, close options_accessibility ; open options_accessibility_hosting)
 	YESNO(6, 152, WINDOW_WIDTH - 12, 18, _("Check for updates at start:"), .2, 14, "eta_updateCheck", _("Yes: a few seconds after the game starts, it asks the release page for a newer version of this mod, and offers it if there is one"))
 	BUTTON(6, 176, WINDOW_WIDTH - 12, 18, _("CHECK FOR UPDATES"), .25, 14, uiScript accessibilityUpdateCheck)
-	BUTTON(6, 200, WINDOW_WIDTH - 12, 18, _("MSGID_MENU_BACK"), .3, 14, close options_accessibility ; open options)
+	BUTTON(6, 200, WINDOW_WIDTH - 12, 18, _("WATCH THE INTRO, DESCRIBED"), .25, 14, close options_accessibility ; exec "cinematic etintro.roq")
+	BUTTON(6, 224, WINDOW_WIDTH - 12, 18, _("MSGID_MENU_BACK"), .3, 14, close options_accessibility ; open options)
 }
