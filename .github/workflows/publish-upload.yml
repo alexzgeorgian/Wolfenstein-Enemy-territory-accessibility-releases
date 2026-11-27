@@ -1,0 +1,76 @@
+name: Publish an uploaded release
+
+# A release is built in the private accessibility-mode repository, whose
+# releases nobody signed out - the game's updater - can see. Its files
+# are pushed here, to a branch named upload/VERSION, and this workflow
+# makes the public release from them with this repository's own
+# built-in key. Before, the private repository copied each release here
+# with a personal key, and when that key expired, 1.4.4.11 could not be
+# published; this one never expires.
+#
+# The branch holds one folder, upload/: the release's files, and VERSION,
+# TITLE and NOTES.md for its page. It is deleted once the release is up.
+# A tag this workflow creates starts no other workflow (GitHub's rule
+# for its built-in key), so the old release.yml here is not run by it.
+on:
+  push:
+    branches: ['upload/**']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-upload
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make the release from the uploaded files
+        working-directory: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          version="$(cat VERSION)"
+          title="$(cat TITLE)"
+          test -n "$version" && test -s NOTES.md
+          # The files are those the private release checked.
+          sha256sum -c SHA256SUMS
+          files=()
+          for f in *; do
+            case "$f" in VERSION|TITLE|NOTES.md) ;; *) files+=("$f") ;; esac
+          done
+          if gh release view "$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$version" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$version" --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --notes-file NOTES.md --prerelease=false --latest
+          else
+            gh release create "$version" "${files[@]}" --repo "$GITHUB_REPOSITORY" --target main \
+              --title "$title" --notes-file NOTES.md --latest
+          fi
+
+      - name: Check the game is handed this version
+        working-directory: upload
+        run: |
+          set -e
+          # Fetched the way the game fetches it: no sign-in, through
+          # releases/latest.
+          url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/eta-update.txt"
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL "$url" -o public-manifest.txt && cmp -s public-manifest.txt eta-update.txt; then
+              echo "the public page serves $(cat VERSION)'s eta-update.txt without signing in"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$url does not serve $(cat VERSION)'s eta-update.txt"
+          exit 1
+
+      - name: Take the upload branch down
+        if: success()
+        run: git push origin --delete "$GITHUB_REF_NAME"
