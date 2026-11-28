@@ -16,9 +16,8 @@ fails silently:
 - GitHub's releases/latest never names a pre-release, so a workflow that
   goes back to marking releases as pre-releases breaks every check;
 - this repository is private, so the game reads a public copy of each
-  release in another repository - the one the workflow copies to has to
-  be the one the game asks, and a missing token has to stop the run
-  rather than leave the public page a version behind with nobody told.
+  release in another repository, which publishes it itself - the one
+  the workflow names has to be the one the game asks.
 
     ./update_popup_test.py <engine-root>
 """
@@ -185,50 +184,50 @@ def main():
 
     release = read(RELEASE)
     private_at = release.find("- name: Publish the release")
-    public_at = release.find("- name: Copy the release to the public downloads page")
-    if private_at < 0 or public_at < private_at:
-        failures.append("the release workflow does not publish the release "
-                        "and then copy it to the public downloads page")
-        public_at = len(release)
-    for where, publish in (("this repository", release[private_at:public_at]),
-                           ("the public downloads page", release[public_at:])):
-        for asset in ("zzz_accessibility.pk3", "eta-update.txt"):
-            if publish.count(asset) < 2:
-                failures.append("the release workflow does not upload %s to %s "
-                                "on both a new release and a re-run" % (asset, where))
-        if re.search(r"^\s*--prerelease\s*\\?$", publish, re.M):
-            failures.append("the release workflow marks releases on %s as "
-                            "pre-releases, which GitHub's releases/latest never "
-                            "names - the game would never find an update" % where)
-        if publish.count("--latest") < 2:
-            failures.append("the release workflow does not mark every release "
-                            "on %s as the latest" % where)
+    if private_at < 0:
+        failures.append("the release workflow does not publish the release")
+        private_at = 0
+    publish = release[private_at:]
+    for asset in ("zzz_accessibility.pk3", "eta-update.txt"):
+        if publish.count(asset) < 2:
+            failures.append("the release workflow does not upload %s on both "
+                            "a new release and a re-run" % asset)
+    if re.search(r"^\s*--prerelease\s*\\?$", publish, re.M):
+        failures.append("the release workflow marks releases as pre-releases, "
+                        "which GitHub's releases/latest never names - the game "
+                        "would never find an update")
+    if publish.count("--latest") < 2:
+        failures.append("the release workflow does not mark every release as "
+                        "the latest")
 
-    # The copy the game reads: the same repository on both sides, written
-    # with a token that can reach it, and no silent skip without one.
-    public = release[public_at:]
+    # The copy the game reads is made by the public repository itself, from
+    # an upload branch, with its own built-in key: the one the workflow
+    # names has to be the one the game asks. The personal key the copy was
+    # once written with expired and failed the run; it is not to come back.
     mirror = re.search(r"^\s*PUBLIC_RELEASES:\s*(\S+)\s*$", release, re.M)
     header = read(UPDATE_H)
     asked = re.search(r'"https://github\.com/([^/"]+/[^/"]+)/releases"', header)
     if not mirror or not asked:
-        failures.append("could not read which repository the workflow copies "
-                        "releases to, or which one the game asks")
+        failures.append("could not read which repository the workflow names "
+                        "for the public copy, or which one the game asks")
     elif mirror.group(1) != asked.group(1):
-        failures.append("the workflow copies releases to %s but the game asks "
-                        "%s - no update would ever be found"
+        failures.append("the workflow names %s for the public copy but the game "
+                        "asks %s - no update would ever be found"
                         % (mirror.group(1), asked.group(1)))
     else:
-        print("[update] the game asks %s, the public copy the release "
-              "workflow writes" % asked.group(1))
+        print("[update] the game asks %s, the public copy of each release"
+              % asked.group(1))
     if asked and asked.group(1).endswith("/Wolfenstein-Enemy-territory-accessibility-mode"):
         failures.append("the game asks the private repository, whose releases "
                         "answer not found to a game that is not signed in")
-    if "secrets.RELEASES_TOKEN" not in public or not re.search(r'if \[ -z "\$GH_TOKEN" \]; then\s*echo "::error::', public):
-        failures.append("the public copy is not written with RELEASES_TOKEN, "
-                        "or a missing token is skipped instead of failing the run")
-    if "releases/latest/download/eta-update.txt" not in public or "curl -fsSL" not in public:
-        failures.append("the release workflow does not fetch the public "
-                        "eta-update.txt the way the game does to check it is there")
+    if "secrets.RELEASES_TOKEN" in release:
+        failures.append("the release workflow writes the public copy with the "
+                        "personal key RELEASES_TOKEN, which expires; the public "
+                        "repository publishes each release itself")
+    if "upload/" not in release or "publish-upload.yml" not in release:
+        failures.append("the release workflow does not say how the public "
+                        "repository gets each release (upload/VERSION, "
+                        "publish-upload.yml)")
 
     if "/latest/download/eta-update.txt" not in header:
         failures.append("the game does not ask releases/latest for "

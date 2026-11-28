@@ -2170,3 +2170,15 @@ mod's menu file adds.
 Checked in the game: "cinematic etintro.roq" said all sixteen lines in
 turn, then "The intro ends", then the main menu. Started with com_introplayed 1,
 the game played the intro, described.
+
+## 0138: the intro's tank scene described in full
+
+The tester heard a pause in the described intro. After "The tank blasts
+through a fortified gate" nothing was said for eight seconds, while the
+movie shows a soldier riding the tank and firing at a stone fort, and
+another leaping down from a wall, before the map comes back for the rail
+gun. Those two moments now have a line each, and the gate's line is
+shorter, so each is said in full before the next scene.
+
+Checked in the game: "cinematic etintro.roq" said all eighteen lines in
+turn, then "The intro ends".

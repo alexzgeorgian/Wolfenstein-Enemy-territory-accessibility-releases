@@ -1,0 +1,15 @@
+diff --git a/src/ui/ui_main.c b/src/ui/ui_main.c
+index 8a9702c..bb2c817 100644
+--- a/src/ui/ui_main.c
++++ b/src/ui/ui_main.c
+@@ -5224,7 +5224,9 @@ static const struct
+ 	{ 17000, "The Würzburg radar, a dish on a wooden tower, at night in the rain. Allied soldiers attack" },
+ 	{ 21500, "A grenade blasts the tower. A soldier plants explosives by the dish, runs, and the radar blows apart" },
+ 	{ 26300, "On the map, the fuel dump. Snowy mountains: an Allied tank rolls on, firing at Germans" },
+-	{ 32000, "The tank blasts through a fortified gate. German gunners fire back from the walls" },
++	{ 32000, "The tank fires its way through a tunnel and out of a gate" },
++	{ 35400, "On the tank, a soldier fires at a stone fort" },
++	{ 37900, "A soldier leaps down from a wall" },
+ 	{ 40000, "On the map, the rail gun. A snowy rail yard: a train rolls in, carrying a huge gun barrel" },
+ 	{ 45000, "From above: soldiers fight among crates in the falling snow" },
+ 	{ 49300, "An Allied soldier takes aim at an armoured train, and the giant railway gun raises its barrel" },

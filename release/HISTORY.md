@@ -9,6 +9,19 @@ The build you have installed is described above this, under "This
 build".
 
 
+## 1.4.4.11 - 27 November 2026
+
+**Axis let you in when you host: a team limit the match ran with was lifted and said; the team list said why a team was closed; the end of a match was read out; the intro movie was described.**
+
+- Each team in the limbo menu's list was said with its players and,
+  when closed, why; Enter on a closed team asked the match itself.
+- In a match you host, "The Axis team is full!" lifted the match's team
+  limit, said what it was, and joined you.
+- The results of a match were said when its results screen came up.
+- The intro movie was described while it played, and played at every
+  start; Options, Accessibility, "Watch the intro, described" plays it
+  again.
+
 ## 1.4.4.10 - 26 November 2026
 
 **Messages the server shows in the middle of the screen were said - among them why a team would not take you - and Space on a class went to its weapons.**
